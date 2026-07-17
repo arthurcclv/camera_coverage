@@ -52,7 +52,7 @@ export interface Voxel {
 }
 
 /** Default overall brightness multiplier (specs/volumetric_rendering.md §1). */
-export const DEFAULT_INTENSITY_SCALE = 0.25;
+export const DEFAULT_INTENSITY_SCALE = 1;
 
 /** Default composite mode (specs/volumetric_rendering.md §1, §4). */
 export const DEFAULT_COMPOSITE_MODE: CompositeMode = 'max';

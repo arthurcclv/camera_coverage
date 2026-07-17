@@ -84,7 +84,7 @@ export function OverlayControls({
         label="Intensity scale"
         value={options.intensityScale}
         min={0.02}
-        max={1}
+        max={2}
         step={0.02}
         onChange={(v) => onOptionsChange({ intensityScale: v })}
       />
