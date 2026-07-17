@@ -1,57 +1,78 @@
 /**
- * Streamed coverage voxel overlay (spec §9): one instanced cube per valid
- * leaf, rendered white with per-voxel opacity encoding the fraction of the
- * involved (enabled) cameras that can see it — fully covered voxels reach the
- * peak opacity, uncovered voxels are transparent, linear in between. Rebuilt
- * incrementally as ChunkResults arrive.
+ * Coverage visualization (spec §9): maps streamed coverage data onto the
+ * generic voxel volumetric renderer (specs/volumetric_rendering.md). This module
+ * owns *which* voxels are drawn and *how* coverage maps to each voxel's
+ * `intensity` and `color`; the renderer owns *how* voxels are drawn.
+ *
+ * Two mutually-exclusive modes (spec §9.1):
+ *  - 'coverage'   — every valid voxel, intensity = coverage fraction.
+ *  - 'blindspots' — only blind-spot voxels (mask == 0), intensity = 1.
+ *
+ * Both modes draw with the same user-selected overlay hue (spec §9.2); mode fixes
+ * *which* voxels and the intensity mapping, not the color.
+ *
+ * Leaves are accumulated as ChunkResults stream in and rebuilt into the renderer.
  */
-import * as THREE from 'three';
 import { accessor } from '@linkervision/camera-coverage-sdk';
 import type { ChunkResult } from '@linkervision/camera-coverage-sdk';
+import {
+  VoxelVolumetricRenderer,
+  DEFAULT_INTENSITY_SCALE,
+  type Voxel,
+} from './volumetric.ts';
+
+export type OverlayMode = 'coverage' | 'blindspots';
 
 interface Leaf {
-  x: number;
-  y: number;
-  z: number;
+  /** Voxel center, world space. */
+  cx: number;
+  cy: number;
+  cz: number;
   size: number; // world edge length
-  camCount: number;
+  camCount: number; // popcount(mask): enabled cameras that see this voxel
 }
 
 export interface OverlayOptions {
-  /** Involved (enabled) camera count == denominator of the coverage fraction. */
-  maxCameraCount: number;
-  /** Peak opacity: the opacity of a voxel seen by 100% of involved cameras. */
-  opacity: number;
-  hideWellCovered: boolean;
-  wellCoveredThreshold: number;
-  blindSpotsOnly: boolean;
+  /** Overlay visibility on/off. */
   visible: boolean;
+  /** Active visualization mode (spec §9.1). */
+  mode: OverlayMode;
+  /** Overlay fog hue in degrees (0..360), shared by both modes (spec §9.2). */
+  overlayHue: number;
+  /** Renderer global brightness multiplier (specs/volumetric_rendering.md §1). */
+  intensityScale: number;
+  /** Involved (enabled) camera count == denominator of the coverage fraction. */
+  involvedCameraCount: number;
 }
 
-const DEFAULT_OPTIONS: OverlayOptions = {
-  maxCameraCount: 1,
-  // Peak opacity for a fully-covered voxel; partially-covered voxels scale
-  // down linearly from here (spec §9).
-  opacity: 0.8,
-  hideWellCovered: false,
-  wellCoveredThreshold: 3,
-  blindSpotsOnly: false,
-  visible: true,
-};
+/** Default overlay hue (spec §9.2): red. */
+export const DEFAULT_OVERLAY_HUE = 0;
 
 /**
- * Per-voxel overlay opacity (spec §9): white voxels fade from transparent
- * (seen by no involved camera) to `peakOpacity` (seen by all), linearly in the
- * fraction of involved cameras that see the voxel.
+ * Convert a hue (degrees) to an RGB triple (components 0..1) at full saturation and
+ * 50% lightness — `hsl(hue, 100%, 50%)` (spec §9.2). This is the fog color the user
+ * picks with the overlay-color slider; full saturation makes the slider a clean
+ * rainbow spectrum.
  */
-export function coverageOpacity(
-  camCount: number,
-  involvedCameraCount: number,
-  peakOpacity: number,
-): number {
+export function hueToRgb(hue: number): [number, number, number] {
+  const h = ((((hue % 360) + 360) % 360)) / 60;
+  const x = 1 - Math.abs((h % 2) - 1);
+  if (h < 1) return [1, x, 0];
+  if (h < 2) return [x, 1, 0];
+  if (h < 3) return [0, 1, x];
+  if (h < 4) return [0, x, 1];
+  if (h < 5) return [x, 0, 1];
+  return [1, 0, x];
+}
+
+/**
+ * Coverage fraction (spec §13): the share of the involved (enabled) cameras that
+ * see a voxel, `popcount(mask) / involvedCameraCount`, clamped to [0, 1].
+ * 0 == blind spot, 1 == seen by every enabled camera.
+ */
+export function coverageFraction(camCount: number, involvedCameraCount: number): number {
   const denom = Math.max(1, involvedCameraCount);
-  const fraction = Math.max(0, Math.min(1, camCount / denom));
-  return fraction * peakOpacity;
+  return Math.max(0, Math.min(1, camCount / denom));
 }
 
 function popcount32(x: number): number {
@@ -62,43 +83,17 @@ function popcount32(x: number): number {
 }
 
 export class CoverageOverlay {
-  readonly object = new THREE.Group();
+  private readonly renderer = new VoxelVolumetricRenderer();
+  readonly object = this.renderer.object;
 
   private leaves: Leaf[] = [];
-  private mesh: THREE.InstancedMesh | null = null;
-  private readonly geometry = new THREE.BoxGeometry(1, 1, 1);
-  private readonly material = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    depthWrite: false,
-  });
-  private opts: OverlayOptions = { ...DEFAULT_OPTIONS };
-
-  constructor() {
-    // Per-voxel opacity: carry a per-instance `instanceAlpha` attribute and
-    // multiply it into the fragment alpha. InstancedMesh's built-in
-    // instanceColor is RGB-only, so alpha needs this shader hook (spec §9).
-    this.material.onBeforeCompile = (shader) => {
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          '#include <common>\nattribute float instanceAlpha;\nvarying float vInstanceAlpha;',
-        )
-        .replace(
-          '#include <begin_vertex>',
-          '#include <begin_vertex>\nvInstanceAlpha = instanceAlpha;',
-        );
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          '#include <common>',
-          '#include <common>\nvarying float vInstanceAlpha;',
-        )
-        .replace(
-          '#include <dithering_fragment>',
-          'gl_FragColor.a *= vInstanceAlpha;\n#include <dithering_fragment>',
-        );
-    };
-  }
+  private opts: OverlayOptions = {
+    visible: true,
+    mode: 'coverage',
+    overlayHue: DEFAULT_OVERLAY_HUE,
+    intensityScale: DEFAULT_INTENSITY_SCALE,
+    involvedCameraCount: 1,
+  };
 
   /** Clear accumulated chunks before starting a new compute() run. */
   reset(): void {
@@ -113,11 +108,12 @@ export class CoverageOverlay {
     const vs = result.voxelSize;
     acc.forEachLeaf((min, size, mask, valid) => {
       if (!valid) return;
+      const world = size * vs;
       this.leaves.push({
-        x: ox + min[0] * vs,
-        y: oy + min[1] * vs,
-        z: oz + min[2] * vs,
-        size: size * vs,
+        cx: ox + min[0] * vs + world / 2,
+        cy: oy + min[1] * vs + world / 2,
+        cz: oz + min[2] * vs + world / 2,
+        size: world,
         camCount: popcount32(mask),
       });
     });
@@ -126,50 +122,38 @@ export class CoverageOverlay {
 
   setOptions(opts: Partial<OverlayOptions>): void {
     this.opts = { ...this.opts, ...opts };
-    this.object.visible = this.opts.visible;
-    // Per-voxel opacity (fraction × peak) is baked into instanceAlpha in
-    // rebuild(); the material stays at full alpha.
+    this.renderer.setVisible(this.opts.visible);
+    this.renderer.setIntensityScale(this.opts.intensityScale);
     this.rebuild();
   }
 
   dispose(): void {
-    this.mesh?.dispose();
-    this.geometry.dispose();
-    this.material.dispose();
+    this.renderer.dispose();
   }
 
+  /** Map the accumulated leaves onto renderer voxels for the active mode (spec §9.1). */
   private rebuild(): void {
-    const filtered = this.leaves.filter((leaf) => {
-      if (this.opts.blindSpotsOnly) return leaf.camCount === 0;
-      if (this.opts.hideWellCovered) return leaf.camCount <= this.opts.wellCoveredThreshold;
-      return true;
-    });
-
-    if (this.mesh) {
-      this.object.remove(this.mesh);
-      this.mesh.dispose();
-      this.mesh = null;
+    // Both modes share the user-selected overlay hue (spec §9.2).
+    const color = hueToRgb(this.opts.overlayHue);
+    const voxels: Voxel[] = [];
+    for (const leaf of this.leaves) {
+      const center: [number, number, number] = [leaf.cx, leaf.cy, leaf.cz];
+      if (this.opts.mode === 'blindspots') {
+        // Only blind spots (no enabled camera sees them); fixed full intensity
+        // since their coverage fraction is 0 and would otherwise be invisible.
+        if (leaf.camCount !== 0) continue;
+        voxels.push({ center, size: leaf.size, intensity: 1, color });
+      } else {
+        // Coverage: every valid voxel, intensity == coverage fraction.
+        voxels.push({
+          center,
+          size: leaf.size,
+          intensity: coverageFraction(leaf.camCount, this.opts.involvedCameraCount),
+          color,
+        });
+      }
     }
-    if (filtered.length === 0) return;
-
-    const mesh = new THREE.InstancedMesh(this.geometry, this.material, filtered.length);
-    const m = new THREE.Matrix4();
-    const alphas = new Float32Array(filtered.length);
-    for (let i = 0; i < filtered.length; i++) {
-      const leaf = filtered[i];
-      m.makeScale(leaf.size, leaf.size, leaf.size);
-      m.setPosition(leaf.x + leaf.size / 2, leaf.y + leaf.size / 2, leaf.z + leaf.size / 2);
-      mesh.setMatrixAt(i, m);
-      // "Blind spots only" is a binary filter (all shown voxels have camCount
-      // 0, whose fractional opacity is 0), so render those at peak opacity
-      // rather than invisibly. Otherwise opacity scales with coverage fraction.
-      alphas[i] = this.opts.blindSpotsOnly
-        ? this.opts.opacity
-        : coverageOpacity(leaf.camCount, this.opts.maxCameraCount, this.opts.opacity);
-    }
-    this.geometry.setAttribute('instanceAlpha', new THREE.InstancedBufferAttribute(alphas, 1));
-    mesh.instanceMatrix.needsUpdate = true;
-    this.mesh = mesh;
-    this.object.add(mesh);
+    this.renderer.reset();
+    this.renderer.addVoxels(voxels);
   }
 }

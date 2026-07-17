@@ -11,8 +11,9 @@ and visualizes the result as a color-coded voxel overlay in the scene.
 
 - Demonstrate the SDK end-to-end: `init` → `loadScene` → `setSampling` →
   `setCameras` → `compute`, with results streamed and visualized.
-- Keep the scene small enough that the **CPU reference backend** stays responsive,
-  while still exercising the **WebGPU** path where available.
+- Keep the scene small enough that the **CPU reference compute backend** stays
+  responsive, while still exercising the **WebGPU compute** path where available
+  (distinct from the WebGPU *render* backend, §2.3).
 - Be a readable reference for SDK consumers, not a polished product.
 
 Non-goals: saving/loading scenes, importing external meshes, multi-scene support,
@@ -26,7 +27,7 @@ authentication, mobile layout.
 |---|---|
 | Bundler / dev server | **Vite** + TypeScript |
 | UI | **React** — control panels, buttons, stats readouts |
-| 3D rendering | **Vanilla Three.js**, driven imperatively inside a `useEffect`/ref (no react-three-fiber) |
+| 3D rendering | **Three.js `WebGPURenderer`** (`three/webgpu`) with **TSL** node materials and automatic WebGL2 fallback (§2.3). Driven imperatively inside a `useEffect`/ref (no react-three-fiber) |
 | SDK dependency | Referenced **by name** (`@linkervision/camera-coverage-sdk`) via npm workspaces |
 
 ### 2.1 Monorepo
@@ -63,19 +64,39 @@ apps/sample-app/
       useEngine.ts         WorkerClient lifecycle + init/loadScene/compute wrappers
     scene/
       buildRoom.ts         room + boxes → { positions, indices } + Three.js meshes
-      viewport.ts          Three.js renderer, orbit + transform controls, render loop
+      viewport.ts          WebGPURenderer (async init) + orbit/transform controls, render loop
       cameraGizmos.ts      per-camera frustum gizmos
-      coverageOverlay.ts   instanced-cube overlay from ChunkResult
+      volumetric.ts        voxel volumetric renderer (§2.3, volumetric_rendering.md)
+      coverageOverlay.ts   maps ChunkResult coverage → volumetric voxels (§9)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
     ui/
       CameraPanel.tsx      selected-camera editors
       CameraList.tsx       camera selection list + per-camera enable/disable toggle
-      OverlayControls.tsx  viz toggles + opacity + resolution slider
+      OverlayControls.tsx  overlay visibility + mode + intensity scale + resolution slider
       StatsPanel.tsx       coverage summary readout
       RunBar.tsx           Run button + auto-run toggle + stale/backend indicators
 ```
+
+### 2.3 Render backend
+
+The viewport renders with Three.js's **`WebGPURenderer`** (`three/webgpu`), chosen for
+throughput on the volumetric overlay's heavy additive overdraw (§9;
+[`volumetric_rendering.md`](./volumetric_rendering.md)).
+
+- It **prefers WebGPU** and **automatically falls back to its WebGL2 backend** when
+  `navigator.gpu` is unavailable, so the demo always renders through one code path.
+- The overlay's custom shader is authored in **TSL** node materials, which compile to
+  **WGSL** on the WebGPU backend and **GLSL** on the WebGL2 backend — one shader, both
+  backends.
+- `WebGPURenderer` initializes **asynchronously** (`await renderer.init()` before the
+  first frame); viewport setup accounts for this.
+
+**Two independent "WebGPU"s.** This render backend is distinct from the SDK's WebGPU
+**compute** backend (§3.2): the renderer draws on the main thread, the compute backend
+runs the coverage calculation in the worker. They are selected and reported (§10)
+separately, and each may independently be WebGPU or its fallback.
 
 ---
 
@@ -183,8 +204,8 @@ A disabled camera's gizmo is dimmed and its frustum wireframe hidden (§5.4).
   passed to the engine, so they don't participate in `compute()` — no coverage
   rate is reported for them and they can't be flagged as `CAMERA_INSIDE_GEOMETRY`.
 - Toggling a camera marks the result stale, same as any other camera edit (§8.1).
-- The well-covered threshold's max and the overlay's coverage-fraction opacity
-  denominator (§9) track the **enabled** camera count, not the total.
+- The overlay's coverage-fraction denominator (`involvedCameraCount`, §9.1) tracks
+  the **enabled** camera count, not the total.
 
 ---
 
@@ -240,28 +261,60 @@ Resolution edits require the full re-init pipeline (§6).
 
 ## 9. Coverage visualization
 
-Built from streamed `ChunkResult`s using `accessor(result).forEachLeaf((min, size,
-mask, valid) => …)`.
+The coverage field is drawn with the **voxel volumetric renderer** — a
+visualization-agnostic primitive that takes, per voxel, a `{center, size, intensity,
+color}` and draws it as additive volumetric fog. Its technical design (shader,
+chord-length math, compositing, tests) lives in
+[`volumetric_rendering.md`](./volumetric_rendering.md). **This section owns the
+visualization**: which voxels are fed to the renderer and how coverage data maps to
+each voxel's `intensity` and `color`. Domain terms are defined in §13.
 
-- **Instanced cubes** (one `THREE.InstancedMesh`), one instance per covered/valid
-  leaf, positioned at `min` with edge `size`.
-- **Opacity by coverage fraction**: every voxel is rendered **white**; its
-  opacity encodes what fraction of the involved (enabled) cameras can see it.
-  Let `f = popcount(mask) / involvedCameraCount`. A voxel seen by **100%** of the
-  involved cameras is white at the **peak opacity (0.8)**; a voxel seen by **none**
-  is fully **transparent (0)**; opacity is **linearly interpolated** in between
-  (`opacity = f * peakOpacity`). Per-voxel opacity is carried as a per-instance
-  attribute multiplied into the material's alpha.
-- Room geometry and cameras remain visible through partially-covered voxels.
-- **Controls** (`OverlayControls.tsx`):
-  - opacity slider — sets the **peak opacity** (opacity of a fully-covered
-    voxel), default **0.8**,
-  - "hide well-covered voxels" toggle (drop instances above a camera-count
-    threshold),
-  - "blind spots only" toggle (show only `mask == 0` valid voxels; because
-    their coverage fraction is 0, this binary filter renders them at the peak
-    opacity rather than transparently),
-  - overlay visibility on/off.
+Voxels are extracted from streamed `ChunkResult`s using
+`accessor(result).forEachLeaf((min, size, mask, valid) => …)` and fed into the
+renderer incrementally as chunks arrive. Each valid leaf becomes one voxel at world
+position `min` with edge `size`; `intensity` and `color` depend on the active mode.
+
+### 9.1 Visualization modes
+
+A **mode selector** switches between two mappings from coverage data to the
+renderer's per-voxel inputs:
+
+- **Coverage** — the default. **Every valid voxel** is fed. `color` = the
+  user-selected **overlay color** (§9.2); `intensity` = the voxel's **coverage
+  fraction** (`popcount(mask) / involvedCameraCount`, 0..1, §13). Well-covered
+  regions glow bright/solid; weakly covered regions are faint; blind spots
+  (fraction 0) contribute nothing and are invisible. This shows **where coverage
+  is**.
+- **Blind spots** — **only blind-spot voxels** (`mask == 0`, valid) are fed.
+  `color` = the same user-selected **overlay color**; `intensity` = 1 (a fixed full
+  value, since coverage fraction is 0 here and would otherwise render nothing).
+  Uncovered space glows against the scene. This shows **where coverage is absent** —
+  the complement of the coverage mode.
+
+Both modes draw with the same **overlay color** (§9.2); the color is a purely
+aesthetic global, independent of mode. What each mode encodes is *which* voxels are
+shown and how coverage maps to `intensity`, not hue.
+
+The two modes are mutually exclusive; the coverage-fraction denominator
+(`involvedCameraCount`) tracks the **enabled** camera count (§5.4).
+
+### 9.2 Controls
+
+`OverlayControls.tsx`, deliberately minimal:
+
+- **Show overlay** — visibility on/off.
+- **Mode** — Coverage / Blind spots.
+- **Overlay color** — a hue slider over the full spectrum (0..360°) that sets the fog
+  color used by **both** modes. The color is `hsl(hue, 100%, 50%)` — full-saturation,
+  so the slider sweeps a clean rainbow; it defaults to **red** (`hue = 0`). Rendered
+  with a rainbow-gradient track. Sits immediately **before** Intensity scale.
+- **Intensity scale** — the renderer's global brightness multiplier
+  (`intensityScale`).
+
+The overlay color is a single user-picked hue shared by both modes (the mode fixes
+*which* voxels and the `intensity` mapping, not the hue). The old flat overlay's
+"blind spots only" / "hide well-covered" toggles are subsumed by the mode selector;
+blind-spot counts also remain available numerically in the stats panel (§10).
 
 ---
 
@@ -273,7 +326,11 @@ From `CoverageSummary`:
 - `perCamera[]` — per-camera `coverageRate`, listed alongside each camera.
   Disabled cameras (§5.4) aren't sent to the engine, so they have no entry here.
 - `validVoxels`, `elapsedMs`.
-- Active backend (WebGPU / CPU) and current `voxelSize` / voxel count.
+- **Blind-spot count** — number of valid voxels no enabled camera sees (§13),
+  derived as `round(validVoxels × (1 − overallRate))`. Surfaced here numerically so
+  the count is available regardless of the active visualization mode (§9.1).
+- Active **compute** backend (WebGPU / CPU, §3.2) and **render** backend
+  (WebGPU / WebGL2, §2.3), plus current `voxelSize` / voxel count.
 
 ---
 
@@ -281,7 +338,8 @@ From `CoverageSummary`:
 
 | Case | Handling |
 |---|---|
-| `WEBGPU_UNAVAILABLE` on `auto` init | fall back to CPU (§3.2) |
+| `WEBGPU_UNAVAILABLE` on `auto` init (compute) | fall back to CPU (§3.2) |
+| WebGPU renderer unavailable | automatic WebGL2 fallback in `WebGPURenderer` (§2.3); no error surfaced |
 | `SCENE_TOO_LARGE` (fine voxel on CPU) | catch, show message, keep previous valid state |
 | `CAMERA_INSIDE_GEOMETRY` | surface which camera; keep it flagged in the list (disabled cameras are excluded, so never flagged) |
 | `TOO_MANY_CAMERAS` | not reachable (10 ≤ 128), but guarded |
@@ -295,3 +353,24 @@ From `CoverageSummary`:
 - Height-band / box sampling regions as a live control.
 - Scene editing (adding/removing boxes), mesh import.
 - Persisting camera layouts.
+
+---
+
+## 13. Terminology
+
+Canonical domain language for the app. The rendering primitive that draws the
+visualization is described in
+[`volumetric_rendering.md`](./volumetric_rendering.md); it is deliberately
+coverage-agnostic and defines only its own generic terms (voxel intensity, color).
+
+- **Coverage** — whether, and by how many cameras, a given voxel of free space can
+  be seen. The SDK produces, per valid voxel, a **camera bitmask** (which of the
+  enabled cameras see it) plus a **valid** flag. Coverage is the app's fundamental
+  quantity.
+- **Coverage fraction** — for one voxel, `popcount(mask) / involvedCameraCount`: the
+  share of the enabled ("involved") cameras that can see it. Ranges 0 (blind spot)
+  to 1 (seen by every enabled camera). Normalized, not a raw count. In the Coverage
+  visualization mode (§9.1) it maps to the renderer's per-voxel intensity.
+- **Blind spot** — a valid free-space voxel that no enabled camera sees (coverage
+  fraction 0). Invisible in the Coverage mode; surfaced by the dedicated Blind spots
+  mode (§9.1) and numerically in the stats panel (§10).

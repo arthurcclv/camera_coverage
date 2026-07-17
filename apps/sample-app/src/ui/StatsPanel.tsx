@@ -1,21 +1,37 @@
 /**
- * Coverage summary readout (spec §10).
+ * Coverage summary readout (spec §10). Reports both the compute backend
+ * (WebGPU / CPU, §3.2) and the render backend (WebGPU / WebGL2, §2.3), which are
+ * selected independently, plus the blind-spot count (§13).
  */
 import type { CoverageSummary } from '@linkervision/camera-coverage-sdk';
+import type { RenderBackend } from '../scene/viewport.ts';
 
 export interface StatsPanelProps {
   summary: CoverageSummary | null;
-  backend: 'webgpu' | 'cpu' | null;
+  computeBackend: 'webgpu' | 'cpu' | null;
+  renderBackend: RenderBackend | null;
   voxelSize: number;
 }
 
-export function StatsPanel({ summary, backend, voxelSize }: StatsPanelProps) {
+function renderBackendLabel(b: RenderBackend): string {
+  return b === 'webgpu' ? 'WebGPU' : 'WebGL2';
+}
+
+export function StatsPanel({ summary, computeBackend, renderBackend, voxelSize }: StatsPanelProps) {
+  // Blind spots: valid voxels no enabled camera sees (§13). overallRate is the
+  // covered fraction, so (1 − rate) of the valid voxels are blind spots.
+  const blindSpots = summary ? Math.round(summary.validVoxels * (1 - summary.overallRate)) : 0;
+
   return (
     <div className="panel">
       <p className="panel-title">Coverage stats</p>
       <div className="stat-line">
-        <span>Backend</span>
-        <b>{backend ? (backend === 'webgpu' ? 'WebGPU' : 'CPU') : '—'}</b>
+        <span>Compute backend</span>
+        <b>{computeBackend ? (computeBackend === 'webgpu' ? 'WebGPU' : 'CPU') : '—'}</b>
+      </div>
+      <div className="stat-line">
+        <span>Render backend</span>
+        <b>{renderBackend ? renderBackendLabel(renderBackend) : '—'}</b>
       </div>
       <div className="stat-line">
         <span>Voxel size</span>
@@ -30,6 +46,10 @@ export function StatsPanel({ summary, backend, voxelSize }: StatsPanelProps) {
           <div className="stat-line">
             <span>Valid voxels</span>
             <b>{summary.validVoxels.toLocaleString()}</b>
+          </div>
+          <div className="stat-line">
+            <span>Blind spots</span>
+            <b>{blindSpots.toLocaleString()}</b>
           </div>
           <div className="stat-line">
             <span>Elapsed</span>

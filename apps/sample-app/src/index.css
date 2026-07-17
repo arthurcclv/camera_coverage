@@ -94,6 +94,33 @@ body {
   flex: 1;
 }
 
+/* Spectrum variant: rainbow track (background set inline) with a visible thumb. */
+.row input[type='range'].spectrum {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 10px;
+  border-radius: 5px;
+  border: 1px solid #2a2e36;
+}
+.row input[type='range'].spectrum::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid #14161a;
+  cursor: pointer;
+}
+.row input[type='range'].spectrum::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid #14161a;
+  cursor: pointer;
+}
+
 .row input[type='number'] {
   width: 56px;
   background: #14161a;
@@ -247,6 +274,17 @@ body {
   color: #c4cad3;
   margin: 6px 0;
   cursor: pointer;
+}
+
+.segmented {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0 2px;
+}
+.segmented .btn {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
 }
 
 .status-line {

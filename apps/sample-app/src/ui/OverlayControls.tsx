@@ -1,7 +1,8 @@
 /**
- * Overlay viz toggles + opacity + resolution slider (spec §6, §9).
+ * Overlay controls (spec §6, §9.2): deliberately minimal — visibility, mode
+ * selector (Coverage / Blind spots), intensity scale, plus the resolution slider.
  */
-import type { OverlayOptions } from '../scene/coverageOverlay.ts';
+import type { OverlayMode, OverlayOptions } from '../scene/coverageOverlay.ts';
 import { Slider } from './Slider.tsx';
 
 export interface OverlayControlsProps {
@@ -10,10 +11,20 @@ export interface OverlayControlsProps {
   voxelSize: number;
   onVoxelSizeChange(v: number): void;
   estimatedVoxelCount: number;
-  numCameras: number;
 }
 
 const LOW_VOXEL_SIZE_WARNING = 0.2;
+
+const MODES: { value: OverlayMode; label: string }[] = [
+  { value: 'coverage', label: 'Coverage' },
+  { value: 'blindspots', label: 'Blind spots' },
+];
+
+// Rainbow track for the overlay-color slider: full-saturation hsl swept 0..360°,
+// matching hueToRgb() in coverageOverlay.ts (spec §9.2).
+const HUE_GRADIENT = `linear-gradient(to right, ${[0, 60, 120, 180, 240, 300, 360]
+  .map((h) => `hsl(${h}, 100%, 50%)`)
+  .join(', ')})`;
 
 export function OverlayControls({
   options,
@@ -21,7 +32,6 @@ export function OverlayControls({
   voxelSize,
   onVoxelSizeChange,
   estimatedVoxelCount,
-  numCameras,
 }: OverlayControlsProps) {
   return (
     <div className="panel">
@@ -45,45 +55,46 @@ export function OverlayControls({
         />
         Show overlay
       </label>
+
+      <div className="segmented" role="radiogroup" aria-label="Visualization mode">
+        {MODES.map((m) => (
+          <button
+            key={m.value}
+            type="button"
+            role="radio"
+            aria-checked={options.mode === m.value}
+            className={`btn secondary${options.mode === m.value ? ' active' : ''}`}
+            onClick={() => onOptionsChange({ mode: m.value })}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+      <p className="hint">
+        {options.mode === 'coverage'
+          ? 'Brightness = fraction of enabled cameras that see each voxel.'
+          : 'Fog over voxels no enabled camera sees (blind spots).'}
+      </p>
+
       <Slider
-        label="Peak opacity (fully covered)"
-        value={options.opacity}
+        label="Overlay color"
+        value={options.overlayHue}
+        min={0}
+        max={360}
+        step={1}
+        digits={0}
+        gradient={HUE_GRADIENT}
+        onChange={(v) => onOptionsChange({ overlayHue: v })}
+      />
+
+      <Slider
+        label="Intensity scale"
+        value={options.intensityScale}
         min={0.02}
         max={1}
         step={0.02}
-        onChange={(v) => onOptionsChange({ opacity: v })}
+        onChange={(v) => onOptionsChange({ intensityScale: v })}
       />
-      <p className="hint">
-        Voxels are white; opacity scales with the fraction of enabled cameras
-        that see them (transparent = none, peak = all).
-      </p>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={options.hideWellCovered}
-          disabled={options.blindSpotsOnly}
-          onChange={(e) => onOptionsChange({ hideWellCovered: e.target.checked })}
-        />
-        Hide well-covered voxels (camera count &gt; threshold)
-      </label>
-      <Slider
-        label="Threshold"
-        value={options.wellCoveredThreshold}
-        min={0}
-        max={numCameras}
-        step={1}
-        digits={0}
-        disabled={!options.hideWellCovered || options.blindSpotsOnly}
-        onChange={(v) => onOptionsChange({ wellCoveredThreshold: v })}
-      />
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={options.blindSpotsOnly}
-          onChange={(e) => onOptionsChange({ blindSpotsOnly: e.target.checked })}
-        />
-        Blind spots only (0 cameras)
-      </label>
     </div>
   );
 }

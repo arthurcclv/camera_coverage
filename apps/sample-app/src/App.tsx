@@ -8,9 +8,10 @@ import * as THREE from 'three';
 import type { CameraConfig, CoverageSummary } from '@linkervision/camera-coverage-sdk';
 
 import { buildRoom } from './scene/buildRoom.ts';
-import { createViewport, type Viewport } from './scene/viewport.ts';
+import { createViewport, type RenderBackend, type Viewport } from './scene/viewport.ts';
 import { CameraGizmoSet } from './scene/cameraGizmos.ts';
-import { CoverageOverlay, type OverlayOptions } from './scene/coverageOverlay.ts';
+import { CoverageOverlay, DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
+import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { defaultCameras } from './cameras/defaults.ts';
 import { useEngine } from './engine/useEngine.ts';
 
@@ -35,12 +36,11 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 const DEFAULT_OVERLAY_OPTIONS: OverlayOptions = {
-  maxCameraCount: 10,
-  opacity: 0.8,
-  hideWellCovered: false,
-  wellCoveredThreshold: 3,
-  blindSpotsOnly: false,
   visible: true,
+  mode: 'coverage',
+  overlayHue: DEFAULT_OVERLAY_HUE,
+  intensityScale: DEFAULT_INTENSITY_SCALE,
+  involvedCameraCount: 10,
 };
 
 export function App() {
@@ -52,8 +52,9 @@ export function App() {
   const [disabledIds, setDisabledIds] = useState<Set<string>>(() => new Set());
   const [overlayOptions, setOverlayOptions] = useState<OverlayOptions>({
     ...DEFAULT_OVERLAY_OPTIONS,
-    maxCameraCount: cameras.length,
+    involvedCameraCount: cameras.length,
   });
+  const [renderBackend, setRenderBackend] = useState<RenderBackend | null>(null);
   const [voxelSize, setVoxelSize] = useState(DEFAULT_VOXEL_SIZE);
   const debouncedVoxelSize = useDebounced(voxelSize, DEBOUNCE_MS);
   const [initializedVoxelSize, setInitializedVoxelSize] = useState<number | null>(null);
@@ -73,6 +74,10 @@ export function App() {
   disabledIdsRef.current = disabledIds;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const overlayOptionsRef = useRef(overlayOptions);
+  overlayOptionsRef.current = overlayOptions;
+  const engineFlaggedRef = useRef(engine.state.flaggedCameras);
+  engineFlaggedRef.current = engine.state.flaggedCameras;
 
   const estimatedVoxelCount = useMemo(() => {
     const [x0, y0, z0] = room.worldMin;
@@ -82,53 +87,80 @@ export function App() {
   }, [room, voxelSize]);
 
   // --- Three.js scene: created once, torn down on unmount ------------------
+  // WebGPURenderer.init() is async (spec §2.3), so setup runs in an async IIFE
+  // and teardown is deferred until (or cancels) that setup.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    const viewport = createViewport(container);
-    const gizmos = new CameraGizmoSet();
-    const overlay = new CoverageOverlay();
-    viewport.scene.add(room.group);
-    viewport.scene.add(gizmos.group);
-    viewport.scene.add(overlay.object);
+    let cancelled = false;
+    let teardown: (() => void) | null = null;
 
-    viewportRef.current = viewport;
-    gizmosRef.current = gizmos;
-    overlayRef.current = overlay;
+    (async () => {
+      const viewport = await createViewport(container);
+      if (cancelled) {
+        viewport.dispose();
+        return;
+      }
+      const gizmos = new CameraGizmoSet();
+      const overlay = new CoverageOverlay();
+      viewport.scene.add(room.group);
+      viewport.scene.add(gizmos.group);
+      viewport.scene.add(overlay.object);
 
-    const raycaster = new THREE.Raycaster();
-    const pointer = new THREE.Vector2();
-    const onClick = (ev: MouseEvent) => {
-      const rect = viewport.renderer.domElement.getBoundingClientRect();
-      pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-      pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(pointer, viewport.camera);
-      const hitId = gizmos.pick(raycaster);
-      if (hitId) setSelectedId(hitId);
-    };
-    viewport.renderer.domElement.addEventListener('click', onClick);
+      viewportRef.current = viewport;
+      gizmosRef.current = gizmos;
+      overlayRef.current = overlay;
+      setRenderBackend(viewport.renderBackend);
 
-    const onObjectChange = () => {
-      if (!selectedIdRef.current) return;
-      const readback = gizmos.readTransform(selectedIdRef.current);
-      if (!readback) return;
-      gizmos.syncHelper(selectedIdRef.current);
-      setCameras((prev) =>
-        prev.map((c) => (c.id === selectedIdRef.current ? { ...c, position: readback.position, rotation: readback.rotation } : c)),
-      );
-    };
-    viewport.transformControls.addEventListener('objectChange', onObjectChange);
+      // Apply any option/camera state that changed before setup completed
+      // (the [overlayOptions]/[cameras]/[selectedId] effects no-op while the
+      // refs are still null during async init).
+      overlay.setOptions(overlayOptionsRef.current);
+      gizmos.update(camerasRef.current, selectedIdRef.current, engineFlaggedRef.current, disabledIdsRef.current);
+      if (selectedIdRef.current) {
+        const target = gizmos.getAttachTarget(selectedIdRef.current);
+        if (target) viewport.transformControls.attach(target);
+      }
+
+      const raycaster = new THREE.Raycaster();
+      const pointer = new THREE.Vector2();
+      const onClick = (ev: MouseEvent) => {
+        const rect = viewport.renderer.domElement.getBoundingClientRect();
+        pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(pointer, viewport.camera);
+        const hitId = gizmos.pick(raycaster);
+        if (hitId) setSelectedId(hitId);
+      };
+      viewport.renderer.domElement.addEventListener('click', onClick);
+
+      const onObjectChange = () => {
+        if (!selectedIdRef.current) return;
+        const readback = gizmos.readTransform(selectedIdRef.current);
+        if (!readback) return;
+        gizmos.syncHelper(selectedIdRef.current);
+        setCameras((prev) =>
+          prev.map((c) => (c.id === selectedIdRef.current ? { ...c, position: readback.position, rotation: readback.rotation } : c)),
+        );
+      };
+      viewport.transformControls.addEventListener('objectChange', onObjectChange);
+
+      teardown = () => {
+        viewport.renderer.domElement.removeEventListener('click', onClick);
+        viewport.transformControls.removeEventListener('objectChange', onObjectChange);
+        overlay.dispose();
+        gizmos.dispose();
+        viewport.dispose();
+        viewportRef.current = null;
+        gizmosRef.current = null;
+        overlayRef.current = null;
+      };
+    })();
 
     return () => {
-      viewport.renderer.domElement.removeEventListener('click', onClick);
-      viewport.transformControls.removeEventListener('objectChange', onObjectChange);
-      overlay.dispose();
-      gizmos.dispose();
-      viewport.dispose();
-      viewportRef.current = null;
-      gizmosRef.current = null;
-      overlayRef.current = null;
+      cancelled = true;
+      teardown?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room]);
@@ -162,7 +194,7 @@ export function App() {
   const enabledCameraCount = cameras.length - disabledIds.size;
 
   useEffect(() => {
-    setOverlayOptions((o) => ({ ...o, maxCameraCount: enabledCameraCount }));
+    setOverlayOptions((o) => ({ ...o, involvedCameraCount: enabledCameraCount }));
   }, [enabledCameraCount]);
 
   // --- mark results stale on any input change after the first run ----------
@@ -288,9 +320,13 @@ export function App() {
           voxelSize={voxelSize}
           onVoxelSizeChange={setVoxelSize}
           estimatedVoxelCount={estimatedVoxelCount}
-          numCameras={enabledCameraCount}
         />
-        <StatsPanel summary={summary} backend={engine.state.backend} voxelSize={debouncedVoxelSize} />
+        <StatsPanel
+          summary={summary}
+          computeBackend={engine.state.backend}
+          renderBackend={renderBackend}
+          voxelSize={debouncedVoxelSize}
+        />
       </div>
     </div>
   );

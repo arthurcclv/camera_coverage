@@ -1,21 +1,32 @@
 /**
- * Three.js renderer, orbit camera, transform-controls gizmo, and render loop
- * (spec §2.2). Driven imperatively; React only owns the container ref.
+ * Viewport (spec §2.2, §2.3): Three.js `WebGPURenderer` (`three/webgpu`) with
+ * automatic WebGL2 fallback, orbit camera, transform-controls gizmo, and render
+ * loop. `WebGPURenderer` initializes asynchronously, so `createViewport` is async
+ * and awaits `renderer.init()` before the first frame. Driven imperatively; React
+ * only owns the container ref.
+ *
+ * The render backend here (WebGPU or its WebGL2 fallback) is independent of the
+ * SDK's WebGPU *compute* backend (spec §3.2); the two are selected and reported
+ * separately.
  */
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
+
+export type RenderBackend = 'webgpu' | 'webgl2';
 
 export interface Viewport {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
-  renderer: THREE.WebGLRenderer;
+  renderer: THREE.WebGPURenderer;
+  /** Which backend `WebGPURenderer` actually selected (spec §2.3). */
+  renderBackend: RenderBackend;
   orbitControls: OrbitControls;
   transformControls: TransformControls;
   dispose(): void;
 }
 
-export function createViewport(container: HTMLElement): Viewport {
+export async function createViewport(container: HTMLElement): Promise<Viewport> {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1a1d22);
 
@@ -26,8 +37,14 @@ export function createViewport(container: HTMLElement): Viewport {
   camera.position.set(13, 24, 15);
   camera.lookAt(0, 1, 0);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  // Prefers WebGPU; falls back to its own WebGL2 backend when navigator.gpu is
+  // unavailable, so the demo always renders through one code path (spec §2.3).
+  const renderer = new THREE.WebGPURenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
+  await renderer.init();
+  // `backend` is typed as the abstract base; the WebGPU backend tags itself.
+  const backend = renderer.backend as { isWebGPUBackend?: boolean } | undefined;
+  const renderBackend: RenderBackend = backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
   container.appendChild(renderer.domElement);
 
   const hemi = new THREE.HemisphereLight(0xffffff, 0x30323a, 1.1);
@@ -74,8 +91,10 @@ export function createViewport(container: HTMLElement): Viewport {
     transformControls.dispose();
     orbitControls.dispose();
     renderer.dispose();
-    container.removeChild(renderer.domElement);
+    if (renderer.domElement.parentNode === container) {
+      container.removeChild(renderer.domElement);
+    }
   }
 
-  return { scene, camera, renderer, orbitControls, transformControls, dispose };
+  return { scene, camera, renderer, renderBackend, orbitControls, transformControls, dispose };
 }
