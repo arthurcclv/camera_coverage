@@ -215,6 +215,11 @@ world space, meters) is produced by `buildRoom.ts` and used for **both**:
 
 - **Select** a camera by clicking its frustum gizmo in the viewport or its camera
   node in the scene hierarchy (§5.5).
+- **Deselect** by clicking empty space in the viewport (a click that hits no
+  frustum gizmo body clears the current selection, detaching the TransformControls
+  gizmo). Only a genuine click deselects: a click that concludes a camera-orbit or
+  TransformControls drag (pointer moved past a small threshold between press and
+  release) is ignored and leaves the selection unchanged.
 - **Panel sliders** edit the selected camera: position X/Y/Z, yaw/pitch/roll, FOV.
 - **TransformControls** gizmo (translate + rotate modes, in Local or Global space
   per the §2.4 space toggle) on the selected camera in the viewport, kept in

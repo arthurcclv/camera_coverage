@@ -20,6 +20,7 @@ import {
   type TransformSpace,
 } from './scene/transformSpace.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
+import { selectionAfterClick, type PointerPos } from './scene/viewportSelection.ts';
 import { defaultCameras } from './cameras/defaults.ts';
 import { useEngine } from './engine/useEngine.ts';
 
@@ -209,14 +210,23 @@ export function App() {
 
       const raycaster = new THREE.Raycaster();
       const pointer = new THREE.Vector2();
+      // A genuine click selects the picked gizmo (or deselects on a miss); the
+      // click that fires at the end of an orbit/TransformControls drag leaves
+      // the selection unchanged (spec §5.2, see scene/viewportSelection.ts).
+      const down: PointerPos = { x: 0, y: 0 };
+      const onPointerDown = (ev: PointerEvent) => {
+        down.x = ev.clientX;
+        down.y = ev.clientY;
+      };
       const onClick = (ev: MouseEvent) => {
         const rect = viewport.renderer.domElement.getBoundingClientRect();
         pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
         pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(pointer, viewport.camera);
         const hitId = gizmos.pick(raycaster);
-        if (hitId) setSelectedId(hitId);
+        setSelectedId((prev) => selectionAfterClick(prev, hitId, down, { x: ev.clientX, y: ev.clientY }));
       };
+      viewport.renderer.domElement.addEventListener('pointerdown', onPointerDown);
       viewport.renderer.domElement.addEventListener('click', onClick);
 
       const onObjectChange = () => {
@@ -231,6 +241,7 @@ export function App() {
       viewport.transformControls.addEventListener('objectChange', onObjectChange);
 
       teardown = () => {
+        viewport.renderer.domElement.removeEventListener('pointerdown', onPointerDown);
         viewport.renderer.domElement.removeEventListener('click', onClick);
         viewport.transformControls.removeEventListener('objectChange', onObjectChange);
         overlay.dispose();
