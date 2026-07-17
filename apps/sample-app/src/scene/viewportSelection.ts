@@ -6,7 +6,13 @@
  * the single source of truth for distinguishing a genuine click from a
  * drag-tail click and for the resulting selection, kept pure so it can be
  * unit-tested without a React/DOM harness (test/viewportSelection.test.ts).
+ *
+ * Selection is unified across cameras and probes (spec §5.5, §12.4): a single
+ * value picks out a camera *or* a probe, so selecting one deselects the other.
  */
+
+/** The unified selection: a camera *or* a probe, or nothing (spec §5.5). */
+export type Selection = { kind: 'camera' | 'probe'; id: string } | null;
 
 /** Screen-space pointer position in CSS pixels. */
 export interface PointerPos {
@@ -24,16 +30,16 @@ export function isClick(down: PointerPos, up: PointerPos, threshold = DRAG_THRES
 
 /**
  * Selection after a viewport click (spec §5.2). A drag-tail click leaves the
- * current selection unchanged; a genuine click selects the picked gizmo's
- * camera (`hitId`) or, on a miss (`null`), deselects.
+ * current selection unchanged; a genuine click selects the picked gizmo's entity
+ * (`hit`) or, on a miss (`null`), deselects.
  */
 export function selectionAfterClick(
-  current: string | null,
-  hitId: string | null,
+  current: Selection,
+  hit: Selection,
   down: PointerPos,
   up: PointerPos,
   threshold = DRAG_THRESHOLD_PX,
-): string | null {
+): Selection {
   if (!isClick(down, up, threshold)) return current;
-  return hitId;
+  return hit;
 }

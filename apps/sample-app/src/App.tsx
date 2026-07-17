@@ -1,15 +1,17 @@
 /**
  * Layout, engine lifecycle, and state orchestration (spec §2.2).
  * Three.js runs imperatively inside a ref-driven effect; React owns the
- * CameraConfig[] / overlay-option state and pushes it into the scene.
+ * CameraConfig[] / Probe[] / overlay-option state and pushes it into the scene.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import type { CameraConfig, CoverageSummary } from '@linkervision/camera-coverage-sdk';
+import { WorkspaceGrid, type CameraConfig, type CoverageSummary, type Vec3 } from '@linkervision/camera-coverage-sdk';
 
 import { buildRoom } from './scene/buildRoom.ts';
 import { createViewport, type RenderBackend, type Viewport } from './scene/viewport.ts';
 import { CameraGizmoSet } from './scene/cameraGizmos.ts';
+import { ProbeGizmoSet } from './scene/probeGizmos.ts';
+import { ProbeVisibility, type Probe, type ProbeVisibilityResult } from './scene/probeVisibility.ts';
 import { CoverageOverlay, DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
 import {
   DEFAULT_TRANSFORM_SPACE,
@@ -20,12 +22,13 @@ import {
   type TransformSpace,
 } from './scene/transformSpace.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
-import { selectionAfterClick, type PointerPos } from './scene/viewportSelection.ts';
+import { selectionAfterClick, type PointerPos, type Selection } from './scene/viewportSelection.ts';
 import { defaultCameras } from './cameras/defaults.ts';
 import { useEngine } from './engine/useEngine.ts';
 
 import { SceneHierarchy } from './ui/SceneHierarchy.tsx';
 import { CameraPanel } from './ui/CameraPanel.tsx';
+import { ProbePanel } from './ui/ProbePanel.tsx';
 import { OverlayControls } from './ui/OverlayControls.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
 import { RunBar } from './ui/RunBar.tsx';
@@ -34,6 +37,21 @@ const CHUNK_SIZE_XZ = 10;
 const DEFAULT_VOXEL_SIZE = 0.5;
 const DEBOUNCE_MS = 250;
 const AUTO_RUN_MAX_HZ = 10;
+
+// Defaults for a camera spawned from the "+" menu (spec §5.5), matching the
+// default rig's optics (cameras/defaults.ts).
+const NEW_CAMERA = { fov: 60, aspect: 16 / 9, near: 0.1, far: 30 };
+
+/** Next free `prefix-N` id given the existing ids (spec §5.5). */
+function nextFreeId(prefix: string, ids: string[]): string {
+  const re = new RegExp(`^${prefix}-(\\d+)$`);
+  let max = 0;
+  for (const id of ids) {
+    const m = re.exec(id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `${prefix}-${max + 1}`;
+}
 
 // Viewport top-right toolbar icons (spec §2.4): stacked-planes for the coverage
 // overlay, a camera body for the frustum gizmos.
@@ -122,9 +140,22 @@ const DEFAULT_OVERLAY_OPTIONS: OverlayOptions = {
 export function App() {
   const room = useMemo(() => buildRoom(), []);
   const engine = useEngine();
+  const probeVisibility = useMemo(() => new ProbeVisibility(), []);
+
+  const workspaceCenter = useMemo<Vec3>(
+    () => [
+      (room.worldMin[0] + room.worldMax[0]) / 2,
+      (room.worldMin[1] + room.worldMax[1]) / 2,
+      (room.worldMin[2] + room.worldMax[2]) / 2,
+    ],
+    [room],
+  );
 
   const [cameras, setCameras] = useState<CameraConfig[]>(() => defaultCameras());
-  const [selectedId, setSelectedId] = useState<string | null>(cameras[0]?.id ?? null);
+  const [probes, setProbes] = useState<Probe[]>([]);
+  const [selection, setSelection] = useState<Selection>(() =>
+    cameras[0] ? { kind: 'camera', id: cameras[0].id } : null,
+  );
   const [disabledIds, setDisabledIds] = useState<Set<string>>(() => new Set());
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const [overlayOptions, setOverlayOptions] = useState<OverlayOptions>({
@@ -142,17 +173,28 @@ export function App() {
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate'>('translate');
   const [transformSpace, setTransformSpace] = useState<TransformSpace>(DEFAULT_TRANSFORM_SPACE);
   const [gizmosVisible, setGizmosVisible] = useState(true);
+  // Per-probe visibility queries against the retained run (spec §12.2), keyed by
+  // probe id. Recomputed when probes move or a new run's masks arrive.
+  const [probeQueries, setProbeQueries] = useState<Map<string, ProbeVisibilityResult>>(new Map());
+  // Bumped whenever a completed run replaces the retained masks (spec §12.2).
+  const [masksVersion, setMasksVersion] = useState(0);
+
+  const selectedCameraId = selection?.kind === 'camera' ? selection.id : null;
+  const selectedProbeId = selection?.kind === 'probe' ? selection.id : null;
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<Viewport | null>(null);
   const gizmosRef = useRef<CameraGizmoSet | null>(null);
+  const probeGizmosRef = useRef<ProbeGizmoSet | null>(null);
   const overlayRef = useRef<CoverageOverlay | null>(null);
   const camerasRef = useRef(cameras);
   camerasRef.current = cameras;
+  const probesRef = useRef(probes);
+  probesRef.current = probes;
   const disabledIdsRef = useRef(disabledIds);
   disabledIdsRef.current = disabledIds;
-  const selectedIdRef = useRef(selectedId);
-  selectedIdRef.current = selectedId;
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
   const overlayOptionsRef = useRef(overlayOptions);
   overlayOptionsRef.current = overlayOptions;
   const gizmosVisibleRef = useRef(gizmosVisible);
@@ -186,27 +228,27 @@ export function App() {
         return;
       }
       const gizmos = new CameraGizmoSet();
+      const probeGizmos = new ProbeGizmoSet();
       const overlay = new CoverageOverlay();
       viewport.scene.add(room.group);
       viewport.scene.add(gizmos.group);
+      viewport.scene.add(probeGizmos.group);
       viewport.scene.add(overlay.object);
 
       viewportRef.current = viewport;
       gizmosRef.current = gizmos;
+      probeGizmosRef.current = probeGizmos;
       overlayRef.current = overlay;
       setRenderBackend(viewport.renderBackend);
 
-      // Apply any option/camera state that changed before setup completed
-      // (the [overlayOptions]/[cameras]/[selectedId] effects no-op while the
-      // refs are still null during async init).
+      // Apply any option/camera/probe state that changed before setup completed.
       overlay.setOptions(overlayOptionsRef.current);
-      gizmos.update(camerasRef.current, selectedIdRef.current, engineFlaggedRef.current, disabledIdsRef.current);
+      const sel = selectionRef.current;
+      gizmos.update(camerasRef.current, sel?.kind === 'camera' ? sel.id : null, engineFlaggedRef.current, disabledIdsRef.current);
       gizmos.group.visible = gizmosVisibleRef.current;
+      probeGizmos.update(probesRef.current, sel?.kind === 'probe' ? sel.id : null);
       viewport.transformControls.setSpace(threeSpace(transformSpaceRef.current));
-      if (selectedIdRef.current) {
-        const target = gizmos.getAttachTarget(selectedIdRef.current);
-        if (target) viewport.transformControls.attach(target);
-      }
+      attachForSelection(viewport, gizmos, probeGizmos, sel);
 
       const raycaster = new THREE.Raycaster();
       const pointer = new THREE.Vector2();
@@ -223,20 +265,34 @@ export function App() {
         pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
         pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(pointer, viewport.camera);
-        const hitId = gizmos.pick(raycaster);
-        setSelectedId((prev) => selectionAfterClick(prev, hitId, down, { x: ev.clientX, y: ev.clientY }));
+        // Nearest hit across cameras and probes (spec §5.2, §12.4). Hidden camera
+        // gizmos are not clickable (spec §2.4).
+        const camHit = gizmosVisibleRef.current ? gizmos.pickHit(raycaster) : null;
+        const probeHit = probeGizmos.pickHit(raycaster);
+        let hit: Selection = null;
+        if (camHit && (!probeHit || camHit.distance <= probeHit.distance)) hit = { kind: 'camera', id: camHit.id };
+        else if (probeHit) hit = { kind: 'probe', id: probeHit.id };
+        setSelection((prev) => selectionAfterClick(prev, hit, down, { x: ev.clientX, y: ev.clientY }));
       };
       viewport.renderer.domElement.addEventListener('pointerdown', onPointerDown);
       viewport.renderer.domElement.addEventListener('click', onClick);
 
       const onObjectChange = () => {
-        if (!selectedIdRef.current) return;
-        const readback = gizmos.readTransform(selectedIdRef.current);
-        if (!readback) return;
-        gizmos.syncHelper(selectedIdRef.current);
-        setCameras((prev) =>
-          prev.map((c) => (c.id === selectedIdRef.current ? { ...c, position: readback.position, rotation: readback.rotation } : c)),
-        );
+        const sel = selectionRef.current;
+        if (!sel) return;
+        if (sel.kind === 'camera') {
+          const readback = gizmos.readTransform(sel.id);
+          if (!readback) return;
+          gizmos.syncHelper(sel.id);
+          setCameras((prev) =>
+            prev.map((c) => (c.id === sel.id ? { ...c, position: readback.position, rotation: readback.rotation } : c)),
+          );
+        } else {
+          // Moving a probe never marks results stale (spec §12.5).
+          const position = probeGizmos.readPosition(sel.id);
+          if (!position) return;
+          setProbes((prev) => prev.map((p) => (p.id === sel.id ? { ...p, position } : p)));
+        }
       };
       viewport.transformControls.addEventListener('objectChange', onObjectChange);
 
@@ -246,9 +302,11 @@ export function App() {
         viewport.transformControls.removeEventListener('objectChange', onObjectChange);
         overlay.dispose();
         gizmos.dispose();
+        probeGizmos.dispose();
         viewport.dispose();
         viewportRef.current = null;
         gizmosRef.current = null;
+        probeGizmosRef.current = null;
         overlayRef.current = null;
       };
     })();
@@ -260,26 +318,29 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room]);
 
-  // --- push camera state into gizmos + TransformControls attachment --------
+  // --- push camera/probe state into gizmos ---------------------------------
   useEffect(() => {
-    gizmosRef.current?.update(cameras, selectedId, engine.state.flaggedCameras, disabledIds);
-  }, [cameras, selectedId, engine.state.flaggedCameras, disabledIds]);
+    gizmosRef.current?.update(cameras, selectedCameraId, engine.state.flaggedCameras, disabledIds);
+  }, [cameras, selectedCameraId, engine.state.flaggedCameras, disabledIds]);
 
+  useEffect(() => {
+    probeGizmosRef.current?.update(probes, selectedProbeId);
+  }, [probes, selectedProbeId]);
+
+  // --- TransformControls attachment + mode per selection kind (spec §12.4) ---
   useEffect(() => {
     const viewport = viewportRef.current;
     const gizmos = gizmosRef.current;
-    if (!viewport || !gizmos) return;
-    if (selectedId) {
-      const target = gizmos.getAttachTarget(selectedId);
-      if (target) viewport.transformControls.attach(target);
-    } else {
-      viewport.transformControls.detach();
-    }
-  }, [selectedId]);
+    const probeGizmos = probeGizmosRef.current;
+    if (!viewport || !gizmos || !probeGizmos) return;
+    attachForSelection(viewport, gizmos, probeGizmos, selection);
+  }, [selection]);
 
   useEffect(() => {
-    viewportRef.current?.transformControls.setMode(transformMode);
-  }, [transformMode]);
+    // A probe is a point — translate only, ignoring the rotate mode (spec §12.4).
+    const mode = selection?.kind === 'probe' ? 'translate' : transformMode;
+    viewportRef.current?.transformControls.setMode(mode);
+  }, [transformMode, selection]);
 
   useEffect(() => {
     viewportRef.current?.transformControls.setSpace(threeSpace(transformSpace));
@@ -301,11 +362,43 @@ export function App() {
     setOverlayOptions((o) => ({ ...o, involvedCameraCount: enabledCameraCount }));
   }, [enabledCameraCount]);
 
-  // --- mark results stale on any input change after the first run ----------
+  // --- mark results stale on any camera/resolution change after the first run.
+  // Probe edits are intentionally excluded (spec §12.5). ----------------------
   useEffect(() => {
     if (hasRunOnce) setStale(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameras, debouncedVoxelSize, disabledIds]);
+
+  // --- probe visibility queries (spec §12.2): recompute for every probe when a
+  // probe moves or a completed run replaces the retained masks -----------------
+  useEffect(() => {
+    const map = new Map<string, ProbeVisibilityResult>();
+    for (const p of probes) map.set(p.id, probeVisibility.query(p.position));
+    setProbeQueries(map);
+  }, [probes, masksVersion, probeVisibility]);
+
+  // --- sightlines from the selected probe to each camera that sees it (§12.4) -
+  useEffect(() => {
+    const probeGizmos = probeGizmosRef.current;
+    if (!probeGizmos) return;
+    if (selection?.kind !== 'probe') {
+      probeGizmos.setSightlines(null);
+      return;
+    }
+    const probe = probes.find((p) => p.id === selection.id);
+    const query = probeQueries.get(selection.id);
+    if (!probe || !query || query.status !== 'ok') {
+      probeGizmos.setSightlines(null);
+      return;
+    }
+    const targets: Vec3[] = [];
+    query.cameraIds.forEach((id, n) => {
+      if (!query.visible[n]) return;
+      const cam = cameras.find((c) => c.id === id);
+      if (cam) targets.push(cam.position);
+    });
+    probeGizmos.setSightlines(probe.position, targets);
+  }, [selection, probeQueries, probes, cameras]);
 
   const handleToggleEnabled = useCallback((id: string) => {
     setDisabledIds((prev) => {
@@ -320,6 +413,10 @@ export function App() {
     setCameras((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   }, []);
 
+  const handleProbeChange = useCallback((id: string, position: Vec3) => {
+    setProbes((prev) => prev.map((p) => (p.id === id ? { ...p, position } : p)));
+  }, []);
+
   const handleToggleCollapse = useCallback((nodeId: string) => {
     setCollapsedIds((prev) => {
       const next = new Set(prev);
@@ -327,6 +424,35 @@ export function App() {
       else next.add(nodeId);
       return next;
     });
+  }, []);
+
+  // --- add / delete entities (spec §5.5, §12.5) ------------------------------
+  const handleAddCamera = useCallback(() => {
+    const id = nextFreeId('cam', camerasRef.current.map((c) => c.id));
+    setCameras((prev) => [...prev, { id, position: [...workspaceCenter] as Vec3, rotation: [0, 0, 0, 1], ...NEW_CAMERA }]);
+    setSelection({ kind: 'camera', id });
+  }, [workspaceCenter]);
+
+  const handleAddProbe = useCallback(() => {
+    const id = nextFreeId('probe', probesRef.current.map((p) => p.id));
+    setProbes((prev) => [...prev, { id, position: [...workspaceCenter] as Vec3 }]);
+    setSelection({ kind: 'probe', id });
+  }, [workspaceCenter]);
+
+  const handleDeleteCamera = useCallback((id: string) => {
+    setCameras((prev) => prev.filter((c) => c.id !== id));
+    setDisabledIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    setSelection((prev) => (prev?.kind === 'camera' && prev.id === id ? null : prev));
+  }, []);
+
+  const handleDeleteProbe = useCallback((id: string) => {
+    setProbes((prev) => prev.filter((p) => p.id !== id));
+    setSelection((prev) => (prev?.kind === 'probe' && prev.id === id ? null : prev));
   }, []);
 
   const handleRun = useCallback(async () => {
@@ -344,17 +470,30 @@ export function App() {
     const ok = engine.setCameras(enabledCameras);
     if (!ok) return;
 
+    // Retain this run's chunks + ordered enabled-camera ids for probe lookup
+    // (spec §12.2), in parallel with the overlay.
+    const grid = new WorkspaceGrid({
+      worldMin: room.worldMin,
+      worldMax: room.worldMax,
+      voxelSize: debouncedVoxelSize,
+      chunkSizeXZ: CHUNK_SIZE_XZ,
+    });
+    probeVisibility.reset(grid, enabledCameras.map((c) => c.id));
     overlayRef.current?.reset();
     const result = await engine.compute({
       mode: 1,
-      onChunkDone: (_chunkId, chunkResult) => overlayRef.current?.addChunk(chunkResult),
+      onChunkDone: (_chunkId, chunkResult) => {
+        overlayRef.current?.addChunk(chunkResult);
+        probeVisibility.addChunk(chunkResult);
+      },
     });
     if (result) {
       setSummary(result);
       setHasRunOnce(true);
       setStale(false);
+      setMasksVersion((v) => v + 1);
     }
-  }, [engine, room, initializedVoxelSize, debouncedVoxelSize]);
+  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, probeVisibility]);
 
   // --- auto-run: recompute automatically once results go stale, throttled to
   // at most AUTO_RUN_MAX_HZ runs/sec ------------------------------------------
@@ -378,7 +517,16 @@ export function App() {
     return () => clearInterval(id);
   }, [autoRun]);
 
-  const selectedCamera = cameras.find((c) => c.id === selectedId) ?? null;
+  const selectedCamera = cameras.find((c) => c.id === selectedCameraId) ?? null;
+  const selectedProbe = probes.find((p) => p.id === selectedProbeId) ?? null;
+  const probeSeenCounts = useMemo(() => {
+    const map = new Map<string, number | null>();
+    for (const p of probes) {
+      const q = probeQueries.get(p.id);
+      map.set(p.id, q && q.status === 'ok' ? q.seenCount : null);
+    }
+    return map;
+  }, [probes, probeQueries]);
 
   return (
     <div className="app">
@@ -387,20 +535,21 @@ export function App() {
           <div className="viewport-toolbar">
             <button
               type="button"
-              className={`btn secondary icon-btn${transformMode === 'translate' ? ' active' : ''}`}
+              className={`btn secondary icon-btn${selection?.kind === 'probe' || transformMode === 'translate' ? ' active' : ''}`}
               title="Move"
               aria-label="Move"
-              aria-pressed={transformMode === 'translate'}
+              aria-pressed={selection?.kind === 'probe' || transformMode === 'translate'}
               onClick={() => setTransformMode('translate')}
             >
               <MoveIcon />
             </button>
             <button
               type="button"
-              className={`btn secondary icon-btn${transformMode === 'rotate' ? ' active' : ''}`}
+              className={`btn secondary icon-btn${selection?.kind !== 'probe' && transformMode === 'rotate' ? ' active' : ''}`}
               title="Rotate"
               aria-label="Rotate"
-              aria-pressed={transformMode === 'rotate'}
+              aria-pressed={selection?.kind !== 'probe' && transformMode === 'rotate'}
+              disabled={selection?.kind === 'probe'}
               onClick={() => setTransformMode('rotate')}
             >
               <RotateIcon />
@@ -448,24 +597,41 @@ export function App() {
           onRun={handleRun}
         />
         <div className="panel">
-          <p className="panel-title">Scene</p>
           <SceneHierarchy
             cameras={cameras}
-            selectedId={selectedId}
+            probes={probes}
+            selection={selection}
             flaggedIds={engine.state.flaggedCameras}
             disabledIds={disabledIds}
             perCamera={summary?.perCamera ?? null}
+            probeSeenCounts={probeSeenCounts}
             collapsedIds={collapsedIds}
-            onSelectCamera={setSelectedId}
+            onSelect={setSelection}
             onToggleEnabled={handleToggleEnabled}
             onToggleCollapse={handleToggleCollapse}
+            onAddCamera={handleAddCamera}
+            onAddProbe={handleAddProbe}
+            onDeleteCamera={handleDeleteCamera}
+            onDeleteProbe={handleDeleteProbe}
           />
         </div>
-        <CameraPanel
-          camera={selectedCamera}
-          flagged={selectedId ? engine.state.flaggedCameras.has(selectedId) : false}
-          onChange={handleCameraChange}
-        />
+        {selectedProbe ? (
+          <ProbePanel
+            probe={selectedProbe}
+            query={probeQueries.get(selectedProbe.id)}
+            hasRunOnce={hasRunOnce}
+            stale={stale}
+            onChange={handleProbeChange}
+            onDelete={handleDeleteProbe}
+            onSelectCamera={(id) => setSelection({ kind: 'camera', id })}
+          />
+        ) : (
+          <CameraPanel
+            camera={selectedCamera}
+            flagged={selectedCameraId ? engine.state.flaggedCameras.has(selectedCameraId) : false}
+            onChange={handleCameraChange}
+          />
+        )}
         <OverlayControls
           options={overlayOptions}
           onOptionsChange={(patch) => setOverlayOptions((o) => ({ ...o, ...patch }))}
@@ -482,4 +648,21 @@ export function App() {
       </div>
     </div>
   );
+}
+
+/** Attach TransformControls to the selected entity's target, or detach (spec §12.4). */
+function attachForSelection(
+  viewport: Viewport,
+  gizmos: CameraGizmoSet,
+  probeGizmos: ProbeGizmoSet,
+  selection: Selection,
+): void {
+  const target =
+    selection?.kind === 'camera'
+      ? gizmos.getAttachTarget(selection.id)
+      : selection?.kind === 'probe'
+        ? probeGizmos.getAttachTarget(selection.id)
+        : undefined;
+  if (target) viewport.transformControls.attach(target);
+  else viewport.transformControls.detach();
 }

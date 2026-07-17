@@ -15,6 +15,8 @@ and visualizes the result as a color-coded voxel overlay in the scene.
   responsive, while still exercising the **WebGPU compute** path where available
   (distinct from the WebGPU *render* backend, §2.3).
 - Be a readable reference for SDK consumers, not a polished product.
+- Let the user drop **probes** — points in the scene — and read back which enabled
+  cameras can see each point, reusing the computed coverage masks (§12).
 
 Non-goals: saving/loading scenes, importing external meshes, multi-scene support,
 authentication, mobile layout.
@@ -66,15 +68,18 @@ apps/sample-app/
       buildRoom.ts         room + boxes → { positions, indices } + Three.js meshes
       viewport.ts          WebGPURenderer (async init) + orbit/transform controls, render loop
       cameraGizmos.ts      per-camera frustum gizmos
+      probeGizmos.ts       per-probe markers + selected-probe sightlines (§12.4)
+      probeVisibility.ts   retained ChunkResults + world-point → camera-mask lookup (§12.2)
       volumetric.ts        voxel volumetric renderer (§2.3, volumetric_rendering.md)
       coverageOverlay.ts   maps ChunkResult coverage → volumetric voxels (§9)
-      sceneTree.ts         scene hierarchy node model + derivation (§5.5)
+      sceneTree.ts         scene hierarchy node model + derivation (camera + probe) (§5.5)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
     ui/
       CameraPanel.tsx      selected-camera editors
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras group + per-camera enable/disable toggle) (§5.5)
+      ProbePanel.tsx       selected-probe position + per-camera visibility readout (§12.3)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes groups, enable toggle, add "+" menu, delete context menu) (§5.5)
       OverlayControls.tsx  overlay visibility + mode + intensity scale + resolution slider
       StatsPanel.tsx       coverage summary readout
       RunBar.tsx           Run button + auto-run toggle + stale/backend indicators
@@ -214,12 +219,14 @@ world space, meters) is produced by `buildRoom.ts` and used for **both**:
 ### 5.2 Editing interaction
 
 - **Select** a camera by clicking its frustum gizmo in the viewport or its camera
-  node in the scene hierarchy (§5.5).
-- **Deselect** by clicking empty space in the viewport (a click that hits no
-  frustum gizmo body clears the current selection, detaching the TransformControls
-  gizmo). Only a genuine click deselects: a click that concludes a camera-orbit or
-  TransformControls drag (pointer moved past a small threshold between press and
-  release) is ignored and leaves the selection unchanged.
+  node in the scene hierarchy (§5.5). Selection is unified across cameras and probes
+  (§5.5, §12.4): the viewport pick returns the nearest hit across both, and selecting
+  a camera deselects any probe and vice-versa.
+- **Deselect** by clicking empty space in the viewport (a click that hits no gizmo
+  body — camera *or* probe — clears the current selection, detaching the
+  TransformControls gizmo). Only a genuine click deselects: a click that concludes a
+  camera-orbit or TransformControls drag (pointer moved past a small threshold between
+  press and release) is ignored and leaves the selection unchanged.
 - **Panel sliders** edit the selected camera: position X/Y/Z, yaw/pitch/roll, FOV.
 - **TransformControls** gizmo (translate + rotate modes, in Local or Global space
   per the §2.4 space toggle) on the selected camera in the viewport, kept in
@@ -247,29 +254,47 @@ viewport-level toggle can hide/show all gizmos at once (§2.4).
 
 ### 5.5 Scene hierarchy view
 
-The camera list is presented as a **scene hierarchy** — a generic tree that today
-contains only cameras but is structured to hold other scene entities (e.g. lights,
-meshes) in the future.
+The scene entities are presented as a **scene hierarchy** — a generic tree that
+holds cameras (§5) and probes (§12), and is structured to hold further entity types
+(e.g. lights, meshes) in the future.
 
-- **Node model.** An app-level `SceneNode` discriminated union (`scene/sceneTree.ts`),
-  currently `{ kind: 'group' }` and `{ kind: 'camera' }`. Nodes carry hierarchy and
-  identity only; camera payload stays in the canonical `CameraConfig[]` (§5), which a
-  camera node references by `cameraId`. The tree is **derived** from that array via
-  `buildSceneTree(cameras)` — no separate mutable node state.
-- **Structure.** A single auto-derived collapsible **"Cameras"** group at the root
-  holds all camera nodes. Groups are derived by entity type, not user-created; future
-  entity types appear as sibling groups. No reordering, reparenting, or user-created
-  groups (future).
+- **Node model.** An app-level `SceneNode` discriminated union (`scene/sceneTree.ts`):
+  `{ kind: 'group' }`, `{ kind: 'camera' }`, and `{ kind: 'probe' }`. Nodes carry
+  hierarchy and identity only; entity payload stays in the canonical arrays — cameras
+  in `CameraConfig[]` (§5), probes in `Probe[]` (§12.1) — which a node references by
+  id. The tree is **derived** from those arrays via `buildSceneTree(cameras, probes)`
+  — no separate mutable node state.
+- **Structure.** Auto-derived collapsible groups at the root, one per entity type:
+  a **"Cameras"** group over the camera nodes, and (when any probes exist) a
+  **"Probes"** group over the probe nodes. Groups are derived by entity type, not
+  user-created; further entity types appear as sibling groups. No reordering,
+  reparenting, or user-created groups (future).
 - **Rows.** A generic `TreeRow` renders indentation, the expand caret, label,
   selection highlight, and click routing; kind-specific content is dispatched on
   `node.kind`. Camera rows keep the existing checkbox toggle (§5.4), coverage dot,
-  coverage-rate badge, and `inside geometry` badge. The group header shows a caret,
-  label, and passive child count.
-- **Selection.** Clicking a camera node selects its camera (drives §5.2 panel and
-  gizmo). Clicking the group header only expands/collapses it and does not change the
-  current selection.
+  coverage-rate badge, and `inside geometry` badge. Probe rows show the probe label
+  plus a small **"seen by K" badge** — the count of enabled cameras that see the probe
+  (`popcount` of its mask, §12.2), mirroring the camera coverage-rate badge; full
+  detail lives in the probe panel (§12.3). The badge is omitted when there is no usable
+  mask (no run yet, or no coverage data at the point — §12.3). A group header shows a
+  caret, label, and passive child count.
+- **Selection.** The app holds a single **unified selection** — a camera *or* a probe
+  (`{ kind: 'camera' | 'probe'; id } | null`) — so selecting one deselects the other
+  and only one `TransformControls` gizmo is ever attached. Clicking a camera or probe
+  node selects that entity (drives the §5.2 panel and gizmo). Clicking a group header
+  only expands/collapses it and does not change the current selection.
+- **Adding entities.** The "Scene" panel header carries a **"+" icon button** at its
+  top-right that opens a small menu of entity types to create — **Camera** and
+  **Probe**. Creating an entity spawns it at the **workspace center** with the next
+  free id (`cam-N` / `probe-N`) and **auto-selects** it (its gizmo and panel are
+  immediately ready). Creating a camera marks the result stale (§8.1, §12.5); creating
+  a probe does not.
+- **Deleting entities.** **Right-clicking** a camera or probe row opens a context menu
+  whose action (for now) is **Delete**, which removes that entity. Deleting the
+  currently-selected entity clears the selection; deleting a camera marks the result
+  stale (§8.1). Group headers have no context menu.
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
-  (§12).
+  (§13).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
   `aria-expanded`/`aria-selected`; interaction is mouse-driven (no keyboard tree
   navigation yet).
@@ -334,7 +359,7 @@ color}` and draws it as additive volumetric fog. Its technical design (shader,
 chord-length math, compositing, tests) lives in
 [`volumetric_rendering.md`](./volumetric_rendering.md). **This section owns the
 visualization**: which voxels are fed to the renderer and how coverage data maps to
-each voxel's `intensity` and `color`. Domain terms are defined in §13.
+each voxel's `intensity` and `color`. Domain terms are defined in §14.
 
 Voxels are extracted from streamed `ChunkResult`s using
 `accessor(result).forEachLeaf((min, size, mask, valid) => …)` and fed into the
@@ -348,7 +373,7 @@ renderer's per-voxel inputs:
 
 - **Coverage** — the default. **Every valid voxel** is fed. `color` = the
   user-selected **overlay color** (§9.2); `intensity` = the voxel's **coverage
-  fraction** (`popcount(mask) / involvedCameraCount`, 0..1, §13). Well-covered
+  fraction** (`popcount(mask) / involvedCameraCount`, 0..1, §14). Well-covered
   regions glow bright/solid; weakly covered regions are faint; blind spots
   (fraction 0) contribute nothing and are invisible. This shows **where coverage
   is**.
@@ -393,7 +418,7 @@ From `CoverageSummary`:
 - `perCamera[]` — per-camera `coverageRate`, listed alongside each camera.
   Disabled cameras (§5.4) aren't sent to the engine, so they have no entry here.
 - `validVoxels`, `elapsedMs`.
-- **Blind-spot count** — number of valid voxels no enabled camera sees (§13),
+- **Blind-spot count** — number of valid voxels no enabled camera sees (§14),
   derived as `round(validVoxels × (1 − overallRate))`. Surfaced here numerically so
   the count is available regardless of the active visualization mode (§9.1).
 - Active **compute** backend (WebGPU / CPU, §3.2) and **render** backend
@@ -414,18 +439,116 @@ From `CoverageSummary`:
 
 ---
 
-## 12. Out of scope / future
+## 12. Probes
+
+A **probe** is a user-placed **point** in the scene used to inspect coverage at an
+exact location: when a probe is selected, the app reports which enabled cameras can
+see that point. Probes are pure **observers** — they are not cameras, never
+participate in `compute()`, and never change the coverage field.
+
+### 12.1 Model & state
+
+- A probe is `{ id, position: Vec3 }`. Probes live in a canonical `probes: Probe[]`
+  array in `App.tsx`, parallel to `cameras` (§5). A probe node in the hierarchy
+  (§5.5) references its probe by id; the tree carries identity only, like camera
+  nodes.
+- Probes are **not persisted** (§13).
+
+### 12.2 Visibility query (reuse of computed masks)
+
+A probe's visibility is read from the **most recent completed `compute()` run's
+per-voxel camera masks** — not a fresh ray cast (the SDK exposes no arbitrary-point
+query; the grid masks already encode line-of-sight + frustum + range per voxel, §7).
+The probe's world position is mapped to the voxel that contains it and that voxel's
+mask is read:
+
+- world → global voxel `floor((p − worldMin) / voxelSize)` → `(chunkId, i, j, k)`
+  via a `WorkspaceGrid` built from the same workspace config used at `init` (§4.2);
+- `accessor(chunkResult).getMask/getMaskWord(i, j, k)` gives the camera bitmask, and
+  `isValid(i, j, k)` gives voxel validity.
+
+To make this lookup possible the app **retains the streamed `ChunkResult`s** (keyed
+by `chunkId`) for the current run, reset at the start of each `compute()`. This is in
+parallel with the overlay (§9), which consumes the same stream but keeps only
+per-voxel *counts* and drops invalid voxels, so its data can't answer "which cameras,
+at this point." The retained SVO is the compact resident form; no extra spatial index
+is built, and lookup uses the SDK accessor's own `O(depth)` descent.
+
+- **Bit order.** Bit *n* of a mask is the camera at index *n* in the
+  **enabled-camera list passed to `setCameras()` for that run**. The app snapshots
+  that ordered id list alongside the retained chunks, so masks decode to the correct
+  camera ids even if the live enabled set has since changed. All mask words are
+  decoded (correct up to `MAX_CAMERAS` = 128), not just word 0.
+- **Resolution.** Because the mask is quantized to the voxel grid, probe visibility
+  has voxel-size resolution (§6).
+
+### 12.3 Probe panel (right sidebar)
+
+When a probe is selected (§5.2), the right panel shows, in place of the camera panel:
+
+- header `Probe — <id>`;
+- **position X / Y / Z** sliders (a point has no orientation — no rotation or FOV);
+- a **visibility readout** against the enabled cameras of the retained run:
+  - a summary line **"Seen by K of N cameras"** (N = that run's enabled-camera count),
+  - one row per enabled camera marked **visible (✓)** or **not visible (–)**, decoded
+    from the mask; clicking a camera row selects that camera (§5.2);
+- a **Delete** action (also available from the hierarchy context menu, §5.5).
+
+**States without usable data** — never rendered as "0 of N":
+
+- no `compute()` has completed yet → *"Run coverage to see visibility."*;
+- the probe's voxel is invalid or outside the sampled region (`isValid` false, point
+  outside the workspace, or no retained chunk covers it) → *"No coverage data at this
+  point."*.
+
+**Stale hint.** The masks describe the enabled-camera set of the retained run. When
+the live scene has diverged from that run (results stale, §8.1 — a camera moved, was
+toggled, added, or deleted since), the panel shows a **stale hint** above the readout
+(e.g. "⚠ Coverage out of date — recompute"), because the reported visibility no
+longer matches the current scene. With Auto-run on (the default) this reconciles
+within one throttled run.
+
+### 12.4 Viewport representation
+
+- Each probe renders as a distinct **marker** — its own color, visually separate from
+  camera bodies — via a `ProbeGizmoSet` (`scene/probeGizmos.ts`), pickable like camera
+  gizmo bodies. Viewport click-selection (§5.2) returns the **nearest hit across
+  cameras and probes**.
+- Selecting a probe attaches `TransformControls` in **translate mode only**; the
+  rotate mode/toggle (§2.4) is disabled/ignored while a probe is selected (a point has
+  no orientation). Dragging the marker edits the probe position, kept in two-way sync
+  with the panel sliders.
+- Moving a probe **re-reads the existing masks** as it crosses voxel boundaries and
+  updates the panel and sightlines live; it does **not** mark results stale or trigger
+  recompute (a probe is not part of the coverage input, §12.5).
+- **Sightlines.** While a probe is selected, a **green line segment** is drawn from
+  the probe to each camera that **sees** it (visible cameras only), rebuilt when the
+  probe moves or the masks change. Only the selected probe draws sightlines.
+
+### 12.5 Recompute coupling
+
+- Adding, moving, or deleting a **probe** never marks coverage stale and never
+  triggers `compute()`.
+- Adding or deleting a **camera** (§5.5) changes the coverage input and marks the
+  result stale like any camera edit (§8.1); Auto-run recomputes.
+
+---
+
+## 13. Out of scope / future
 
 - Mode 2 (coverage-count thresholding), per-camera coverage isolation view.
 - Height-band / box sampling regions as a live control.
 - Scene editing (adding/removing boxes), mesh import.
-- Persisting camera layouts.
-- Scene-hierarchy: additional entity types (lights, meshes), user-created groups,
+- Persisting camera / probe layouts.
+- Scene-hierarchy: further entity types (lights, meshes), user-created groups,
   reordering/reparenting, keyboard navigation.
+- Probes: richer per-camera detail (distance / angle), sub-voxel visibility (a true
+  per-point ray cast instead of reusing the voxel mask), and sightlines for
+  non-selected probes.
 
 ---
 
-## 13. Terminology
+## 14. Terminology
 
 Canonical domain language for the app. The rendering primitive that draws the
 visualization is described in

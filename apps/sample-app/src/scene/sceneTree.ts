@@ -1,20 +1,25 @@
 /**
  * App-level scene hierarchy model (spec §5.5).
  *
- * A generic tree that today holds only cameras but is structured so future
+ * A generic tree that holds cameras (§5) and probes (§12), structured so future
  * entity types (lights, meshes, …) slot in as new `SceneNode` variants and
- * sibling groups. Nodes carry hierarchy + identity only; camera payload stays
- * in the canonical `CameraConfig[]` (§5), referenced by `cameraId`. The tree is
- * derived from that array — there is no separate mutable node state.
+ * sibling groups. Nodes carry hierarchy + identity only; entity payload stays in
+ * the canonical arrays — cameras in `CameraConfig[]`, probes in `Probe[]` — which
+ * a node references by id. The tree is derived from those arrays via
+ * `buildSceneTree` — there is no separate mutable node state.
  */
 import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
+import type { Probe } from './probeVisibility.ts';
 
 export type SceneNode =
   | { kind: 'group'; id: string; label: string; childIds: string[] }
-  | { kind: 'camera'; id: string; label: string; cameraId: string };
+  | { kind: 'camera'; id: string; label: string; cameraId: string }
+  | { kind: 'probe'; id: string; label: string; probeId: string };
 
 const CAMERA_GROUP_ID = 'group:cameras';
+const PROBE_GROUP_ID = 'group:probes';
 const CAMERA_NODE_PREFIX = 'cam:';
+const PROBE_NODE_PREFIX = 'probe:';
 
 /** Stable tree-node id for a camera (namespaced to avoid collisions). */
 export function nodeIdForCamera(cameraId: string): string {
@@ -28,25 +33,57 @@ export function cameraIdForNode(nodeId: string): string | null {
     : null;
 }
 
+/** Stable tree-node id for a probe (namespaced to avoid collisions). */
+export function nodeIdForProbe(probeId: string): string {
+  return `${PROBE_NODE_PREFIX}${probeId}`;
+}
+
+/** Inverse of {@link nodeIdForProbe}; null if the node id isn't a probe. */
+export function probeIdForNode(nodeId: string): string | null {
+  return nodeId.startsWith(PROBE_NODE_PREFIX)
+    ? nodeId.slice(PROBE_NODE_PREFIX.length)
+    : null;
+}
+
 /**
- * Build the scene tree for the given cameras: a single "Cameras" group whose
- * children are one camera node per config, in array order. Returned flat with
- * the group first; children are reachable via `group.childIds`.
+ * Build the scene tree: a "Cameras" group over one node per camera, and — when
+ * any probes exist — a sibling "Probes" group over one node per probe, each in
+ * array order. Returned flat, groups before their children; children are reachable
+ * via `group.childIds`.
  */
-export function buildSceneTree(cameras: CameraConfig[]): SceneNode[] {
+export function buildSceneTree(cameras: CameraConfig[], probes: Probe[] = []): SceneNode[] {
   const cameraNodes: SceneNode[] = cameras.map((c) => ({
     kind: 'camera',
     id: nodeIdForCamera(c.id),
     label: c.id,
     cameraId: c.id,
   }));
-  const group: SceneNode = {
+  const cameraGroup: SceneNode = {
     kind: 'group',
     id: CAMERA_GROUP_ID,
     label: 'Cameras',
     childIds: cameraNodes.map((n) => n.id),
   };
-  return [group, ...cameraNodes];
+
+  const nodes: SceneNode[] = [cameraGroup, ...cameraNodes];
+
+  if (probes.length > 0) {
+    const probeNodes: SceneNode[] = probes.map((p) => ({
+      kind: 'probe',
+      id: nodeIdForProbe(p.id),
+      label: p.id,
+      probeId: p.id,
+    }));
+    const probeGroup: SceneNode = {
+      kind: 'group',
+      id: PROBE_GROUP_ID,
+      label: 'Probes',
+      childIds: probeNodes.map((n) => n.id),
+    };
+    nodes.push(probeGroup, ...probeNodes);
+  }
+
+  return nodes;
 }
 
 export interface RenderRow {

@@ -317,6 +317,117 @@ body {
   color: #7c8592;
   margin-top: 4px;
 }
+.hint.warn {
+  color: #ffb84d;
+}
+
+/* Scene panel header + add-entity menu (spec §5.5). */
+.scene-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.add-menu-anchor {
+  position: relative;
+}
+.add-btn {
+  padding: 2px 8px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* Transient popover menus: the add-entity menu and the row Delete context menu. */
+.menu {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: #262b33;
+  border: 1px solid #384252;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  min-width: 120px;
+  z-index: 10;
+}
+.add-menu-anchor .menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+}
+.menu.context-menu {
+  position: fixed;
+}
+.menu li {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #e6e8eb;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+}
+.menu li:hover {
+  background: #2c66c9;
+  color: #fff;
+}
+
+/* Probe rows + panel (spec §5.5, §12.3). */
+.tree-row .dot.probe-dot {
+  background: #ff9d3f;
+  transform: rotate(45deg);
+  border-radius: 2px;
+}
+.panel-title-action {
+  float: right;
+  padding: 2px 8px;
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.probe-summary {
+  font-size: 12px;
+  color: #c4cad3;
+  margin: 8px 0 6px;
+}
+.probe-summary b {
+  color: #e6e8eb;
+}
+.probe-vis-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.probe-vis-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #7c8592;
+  cursor: pointer;
+}
+.probe-vis-row:hover {
+  background: #262b33;
+}
+.probe-vis-row.visible {
+  color: #e6e8eb;
+}
+.probe-vis-row .mark {
+  width: 12px;
+  text-align: center;
+  color: #7a828f;
+  font-weight: 700;
+}
+.probe-vis-row.visible .mark {
+  color: #4de08a;
+}
 
 .checkbox-row {
   display: flex;

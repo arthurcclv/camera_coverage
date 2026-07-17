@@ -1,34 +1,54 @@
 /**
  * Scene hierarchy view (spec §5.5). A generic tree — a `TreeRow` shell plus
- * per-`node.kind` content — that currently renders a "Cameras" group over the
- * camera nodes. Camera-only chrome (enable toggle, coverage dot, rate/flag
- * badges) lives in `CameraRowContent`; adding a future entity type means adding
- * a node variant + its own row-content component, not touching the shell.
+ * per-`node.kind` content — rendering a "Cameras" group over camera nodes and,
+ * when any probes exist, a "Probes" group over probe nodes. Kind-specific chrome
+ * (camera enable toggle / coverage badges; probe "seen by K" badge) lives in the
+ * per-kind row-content components; adding a future entity type means adding a node
+ * variant + its own row-content component, not touching the shell.
+ *
+ * The panel header carries the "+" add-entity menu; right-clicking a camera or
+ * probe row opens a Delete context menu.
  */
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
 
+import type { Probe } from '../scene/probeVisibility.ts';
+import type { Selection } from '../scene/viewportSelection.ts';
 import {
   buildSceneTree,
-  cameraIdForNode,
   flattenVisible,
   nodeIdForCamera,
+  nodeIdForProbe,
   type RenderRow,
   type SceneNode,
 } from '../scene/sceneTree.ts';
 
 export interface SceneHierarchyProps {
   cameras: CameraConfig[];
-  /** Currently selected camera id (§5.2); drives the highlighted camera node. */
-  selectedId: string | null;
+  probes: Probe[];
+  /** Unified selection (spec §5.5); drives the highlighted node. */
+  selection: Selection;
   flaggedIds: Set<string>;
   disabledIds: Set<string>;
   perCamera: { id: string; coverageRate: number }[] | null;
+  /** Per-probe enabled-cameras-that-see count, or null when no usable mask (§5.5). */
+  probeSeenCounts: Map<string, number | null>;
   /** Ids of collapsed group nodes (ephemeral UI state, §5.5). */
   collapsedIds: Set<string>;
-  onSelectCamera(id: string): void;
+  onSelect(selection: Selection): void;
   onToggleEnabled(id: string): void;
   onToggleCollapse(nodeId: string): void;
+  onAddCamera(): void;
+  onAddProbe(): void;
+  onDeleteCamera(id: string): void;
+  onDeleteProbe(id: string): void;
+}
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  kind: 'camera' | 'probe';
+  id: string;
 }
 
 function dotColor(rate: number | undefined, flagged: boolean): string {
@@ -40,31 +60,118 @@ function dotColor(rate: number | undefined, flagged: boolean): string {
 }
 
 export function SceneHierarchy(props: SceneHierarchyProps) {
-  const { cameras, selectedId, collapsedIds } = props;
-  const nodes = useMemo(() => buildSceneTree(cameras), [cameras]);
+  const { cameras, probes, selection, collapsedIds } = props;
+  const nodes = useMemo(() => buildSceneTree(cameras, probes), [cameras, probes]);
   const rows = useMemo(() => flattenVisible(nodes, collapsedIds), [nodes, collapsedIds]);
   const rateById = useMemo(
     () => new Map(props.perCamera?.map((p) => [p.id, p.coverageRate])),
     [props.perCamera],
   );
-  const selectedNodeId = selectedId ? nodeIdForCamera(selectedId) : null;
+
+  const selectedNodeId =
+    selection?.kind === 'camera'
+      ? nodeIdForCamera(selection.id)
+      : selection?.kind === 'probe'
+        ? nodeIdForProbe(selection.id)
+        : null;
+
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  // Close either popover on any outside interaction (spec §5.5 menus are transient).
+  useEffect(() => {
+    if (!addMenuOpen && !contextMenu) return;
+    const close = () => {
+      setAddMenuOpen(false);
+      setContextMenu(null);
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('contextmenu', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('contextmenu', close);
+    };
+  }, [addMenuOpen, contextMenu]);
+
+  const openContextMenu = (ev: React.MouseEvent, kind: 'camera' | 'probe', id: string) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    setAddMenuOpen(false);
+    setContextMenu({ x: ev.clientX, y: ev.clientY, kind, id });
+  };
 
   return (
-    <ul className="tree" role="tree">
-      {rows.map((row) => (
-        <TreeRow
-          key={row.node.id}
-          row={row}
-          selected={row.node.id === selectedNodeId}
-          rateById={rateById}
-          flaggedIds={props.flaggedIds}
-          disabledIds={props.disabledIds}
-          onSelectCamera={props.onSelectCamera}
-          onToggleEnabled={props.onToggleEnabled}
-          onToggleCollapse={props.onToggleCollapse}
-        />
-      ))}
-    </ul>
+    <div className="scene-hierarchy">
+      <div className="panel-title scene-header">
+        <span>Scene</span>
+        <div className="add-menu-anchor">
+          <button
+            type="button"
+            className="btn secondary icon-btn add-btn"
+            title="Add entity"
+            aria-label="Add entity"
+            aria-haspopup="menu"
+            aria-expanded={addMenuOpen}
+            onClick={(e) => {
+              e.stopPropagation();
+              setAddMenuOpen((o) => !o);
+              setContextMenu(null);
+            }}
+          >
+            +
+          </button>
+          {addMenuOpen && (
+            <ul className="menu" role="menu">
+              <li role="menuitem" onClick={() => { setAddMenuOpen(false); props.onAddCamera(); }}>
+                Camera
+              </li>
+              <li role="menuitem" onClick={() => { setAddMenuOpen(false); props.onAddProbe(); }}>
+                Probe
+              </li>
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <ul className="tree" role="tree">
+        {rows.map((row) => (
+          <TreeRow
+            key={row.node.id}
+            row={row}
+            selected={row.node.id === selectedNodeId}
+            rateById={rateById}
+            flaggedIds={props.flaggedIds}
+            disabledIds={props.disabledIds}
+            probeSeenCounts={props.probeSeenCounts}
+            onSelect={props.onSelect}
+            onToggleEnabled={props.onToggleEnabled}
+            onToggleCollapse={props.onToggleCollapse}
+            onContextMenu={openContextMenu}
+          />
+        ))}
+      </ul>
+
+      {contextMenu && (
+        <ul
+          className="menu context-menu"
+          role="menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <li
+            role="menuitem"
+            onClick={() => {
+              const { kind, id } = contextMenu;
+              setContextMenu(null);
+              if (kind === 'camera') props.onDeleteCamera(id);
+              else props.onDeleteProbe(id);
+            }}
+          >
+            Delete
+          </li>
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -74,9 +181,11 @@ interface TreeRowProps {
   rateById: Map<string, number>;
   flaggedIds: Set<string>;
   disabledIds: Set<string>;
-  onSelectCamera(id: string): void;
+  probeSeenCounts: Map<string, number | null>;
+  onSelect(selection: Selection): void;
   onToggleEnabled(id: string): void;
   onToggleCollapse(nodeId: string): void;
+  onContextMenu(ev: React.MouseEvent, kind: 'camera' | 'probe', id: string): void;
 }
 
 /** Generic shell: indentation, caret, selection highlight, click routing. */
@@ -88,7 +197,14 @@ function TreeRow(props: TreeRowProps) {
 
   const handleClick = () => {
     if (node.kind === 'group') props.onToggleCollapse(node.id);
-    else props.onSelectCamera(node.cameraId);
+    else if (node.kind === 'camera') props.onSelect({ kind: 'camera', id: node.cameraId });
+    else props.onSelect({ kind: 'probe', id: node.probeId });
+  };
+
+  const handleContextMenu = (ev: React.MouseEvent) => {
+    if (node.kind === 'camera') props.onContextMenu(ev, 'camera', node.cameraId);
+    else if (node.kind === 'probe') props.onContextMenu(ev, 'probe', node.probeId);
+    // Group headers have no context menu (spec §5.5).
   };
 
   const className = [
@@ -109,6 +225,7 @@ function TreeRow(props: TreeRowProps) {
       className={className}
       style={{ paddingLeft: 8 + depth * 14 }}
       onClick={handleClick}
+      onContextMenu={handleContextMenu}
     >
       <span className="tree-caret" aria-hidden="true">
         {hasChildren ? (collapsed ? '▸' : '▾') : ''}
@@ -122,6 +239,9 @@ function TreeRow(props: TreeRowProps) {
           enabled={enabled}
           onToggleEnabled={props.onToggleEnabled}
         />
+      )}
+      {node.kind === 'probe' && (
+        <ProbeRowContent node={node} seenCount={props.probeSeenCounts.get(node.probeId) ?? null} />
       )}
     </li>
   );
@@ -159,6 +279,22 @@ function CameraRowContent({ node, rate, flagged, enabled, onToggleEnabled }: Cam
       <span className="label">{node.label}</span>
       {flagged && <span className="badge flagged">inside geometry</span>}
       {enabled && rate !== undefined && <span className="rate">{(rate * 100).toFixed(0)}%</span>}
+    </>
+  );
+}
+
+function ProbeRowContent({
+  node,
+  seenCount,
+}: {
+  node: Extract<SceneNode, { kind: 'probe' }>;
+  seenCount: number | null;
+}) {
+  return (
+    <>
+      <span className="dot probe-dot" />
+      <span className="label">{node.label}</span>
+      {seenCount !== null && <span className="rate">seen {seenCount}</span>}
     </>
   );
 }

@@ -70,16 +70,22 @@ export class CameraGizmoSet {
 
   /** Nearest hit camera id, or null. */
   pick(raycaster: THREE.Raycaster): string | null {
-    let bestId: string | null = null;
-    let bestDist = Infinity;
+    return this.pickHit(raycaster)?.id ?? null;
+  }
+
+  /**
+   * Nearest hit camera id + its ray distance, or null. The distance lets a caller
+   * pick the nearest hit across cameras and probes (spec §5.2, §12.4).
+   */
+  pickHit(raycaster: THREE.Raycaster): { id: string; distance: number } | null {
+    let best: { id: string; distance: number } | null = null;
     for (const [id, entry] of this.entries) {
       const hits = raycaster.intersectObject(entry.body, false);
-      if (hits.length > 0 && hits[0].distance < bestDist) {
-        bestDist = hits[0].distance;
-        bestId = id;
+      if (hits.length > 0 && (!best || hits[0].distance < best.distance)) {
+        best = { id, distance: hits[0].distance };
       }
     }
-    return bestId;
+    return best;
   }
 
   getAttachTarget(id: string): THREE.Object3D | undefined {

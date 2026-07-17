@@ -1,15 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
+import type { Probe } from '../src/scene/probeVisibility.ts';
 import {
   buildSceneTree,
   cameraIdForNode,
   flattenVisible,
   nodeIdForCamera,
+  nodeIdForProbe,
+  probeIdForNode,
 } from '../src/scene/sceneTree.ts';
 
 function cam(id: string): CameraConfig {
   return { id, position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 };
+}
+
+function probe(id: string): Probe {
+  return { id, position: [0, 0, 0] };
 }
 
 test('buildSceneTree yields a Cameras group over one node per camera, in order', () => {
@@ -71,4 +78,39 @@ test('empty camera list yields an empty (childless) group', () => {
   const rows = flattenVisible(nodes, new Set());
   assert.equal(rows.length, 1);
   assert.equal(rows[0].hasChildren, false);
+});
+
+test('no Probes group when there are no probes (spec §5.5)', () => {
+  const nodes = buildSceneTree([cam('a')], []);
+  assert.equal(nodes.some((n) => n.kind === 'group' && n.label === 'Probes'), false);
+});
+
+test('buildSceneTree adds a Probes group over one node per probe (spec §5.5)', () => {
+  const nodes = buildSceneTree([cam('a')], [probe('p1'), probe('p2')]);
+  const probeGroup = nodes.find((n) => n.kind === 'group' && n.label === 'Probes');
+  assert.ok(probeGroup);
+  assert.deepEqual(
+    probeGroup.kind === 'group' && probeGroup.childIds,
+    [nodeIdForProbe('p1'), nodeIdForProbe('p2')],
+  );
+  const probeNodes = nodes.filter((n) => n.kind === 'probe');
+  assert.deepEqual(
+    probeNodes.map((n) => n.kind === 'probe' && n.probeId),
+    ['p1', 'p2'],
+  );
+});
+
+test('probe node ids round-trip and stay disjoint from camera ids', () => {
+  assert.equal(probeIdForNode(nodeIdForProbe('probe-3')), 'probe-3');
+  assert.equal(probeIdForNode(nodeIdForCamera('cam-1')), null);
+  assert.equal(cameraIdForNode(nodeIdForProbe('probe-3')), null);
+});
+
+test('flattenVisible lists Cameras then Probes groups with their children', () => {
+  const nodes = buildSceneTree([cam('a')], [probe('p1')]);
+  const rows = flattenVisible(nodes, new Set());
+  assert.deepEqual(
+    rows.map((r) => r.node.id),
+    ['group:cameras', nodeIdForCamera('a'), 'group:probes', nodeIdForProbe('p1')],
+  );
 });
