@@ -1,0 +1,42 @@
+{
+  "name": "@linkervision/camera-coverage-sdk",
+  "version": "0.1.0",
+  "description": "GPU-accelerated 3D camera visibility / coverage analysis engine (WebGPU compute)",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "webgpu",
+    "visibility",
+    "coverage",
+    "bvh",
+    "voxel",
+    "cctv",
+    "bim",
+    "digital-twin"
+  ],
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": [
+    "src",
+    "crates",
+    "scripts",
+    "specs"
+  ],
+  "scripts": {
+    "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "build:wasm": "bash scripts/build-wasm.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@webgpu/types": "^0.1.40",
+    "typescript": "^5.5.0",
+    "webgpu": "^0.4.0"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  }
+}
