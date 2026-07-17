@@ -68,12 +68,13 @@ apps/sample-app/
       cameraGizmos.ts      per-camera frustum gizmos
       volumetric.ts        voxel volumetric renderer (§2.3, volumetric_rendering.md)
       coverageOverlay.ts   maps ChunkResult coverage → volumetric voxels (§9)
+      sceneTree.ts         scene hierarchy node model + derivation (§5.5)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
     ui/
       CameraPanel.tsx      selected-camera editors
-      CameraList.tsx       camera selection list + per-camera enable/disable toggle
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras group + per-camera enable/disable toggle) (§5.5)
       OverlayControls.tsx  overlay visibility + mode + intensity scale + resolution slider
       StatsPanel.tsx       coverage summary readout
       RunBar.tsx           Run button + auto-run toggle + stale/backend indicators
@@ -202,8 +203,8 @@ world space, meters) is produced by `buildRoom.ts` and used for **both**:
 
 ### 5.2 Editing interaction
 
-- **Select** a camera by clicking its frustum gizmo in the viewport or its row in
-  the camera list.
+- **Select** a camera by clicking its frustum gizmo in the viewport or its camera
+  node in the scene hierarchy (§5.5).
 - **Panel sliders** edit the selected camera: position X/Y/Z, yaw/pitch/roll, FOV.
 - **TransformControls** gizmo (translate + rotate modes) on the selected camera in
   the viewport, kept in two-way sync with the panel.
@@ -217,8 +218,9 @@ viewport-level toggle can hide/show all gizmos at once (§2.4).
 
 ### 5.4 Enable / disable
 
-- Each row in the camera list has a **checkbox toggle** to enable/disable that
-  camera, independent of selection. Toggling doesn't change the current selection.
+- Each **camera node** in the scene hierarchy (§5.5) has a **checkbox toggle** to
+  enable/disable that camera, independent of selection. Toggling doesn't change the
+  current selection.
 - Disabled cameras stay in the scene (dimmed gizmo, no frustum wireframe) and keep
   their position/rotation/FOV editable, but are **excluded from `setCameras()`**
   passed to the engine, so they don't participate in `compute()` — no coverage
@@ -226,6 +228,35 @@ viewport-level toggle can hide/show all gizmos at once (§2.4).
 - Toggling a camera marks the result stale, same as any other camera edit (§8.1).
 - The overlay's coverage-fraction denominator (`involvedCameraCount`, §9.1) tracks
   the **enabled** camera count, not the total.
+
+### 5.5 Scene hierarchy view
+
+The camera list is presented as a **scene hierarchy** — a generic tree that today
+contains only cameras but is structured to hold other scene entities (e.g. lights,
+meshes) in the future.
+
+- **Node model.** An app-level `SceneNode` discriminated union (`scene/sceneTree.ts`),
+  currently `{ kind: 'group' }` and `{ kind: 'camera' }`. Nodes carry hierarchy and
+  identity only; camera payload stays in the canonical `CameraConfig[]` (§5), which a
+  camera node references by `cameraId`. The tree is **derived** from that array via
+  `buildSceneTree(cameras)` — no separate mutable node state.
+- **Structure.** A single auto-derived collapsible **"Cameras"** group at the root
+  holds all camera nodes. Groups are derived by entity type, not user-created; future
+  entity types appear as sibling groups. No reordering, reparenting, or user-created
+  groups (future).
+- **Rows.** A generic `TreeRow` renders indentation, the expand caret, label,
+  selection highlight, and click routing; kind-specific content is dispatched on
+  `node.kind`. Camera rows keep the existing checkbox toggle (§5.4), coverage dot,
+  coverage-rate badge, and `inside geometry` badge. The group header shows a caret,
+  label, and passive child count.
+- **Selection.** Clicking a camera node selects its camera (drives §5.2 panel and
+  gizmo). Clicking the group header only expands/collapses it and does not change the
+  current selection.
+- **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
+  (§12).
+- **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
+  `aria-expanded`/`aria-selected`; interaction is mouse-driven (no keyboard tree
+  navigation yet).
 
 ---
 
@@ -373,6 +404,8 @@ From `CoverageSummary`:
 - Height-band / box sampling regions as a live control.
 - Scene editing (adding/removing boxes), mesh import.
 - Persisting camera layouts.
+- Scene-hierarchy: additional entity types (lights, meshes), user-created groups,
+  reordering/reparenting, keyboard navigation.
 
 ---
 

@@ -15,7 +15,7 @@ import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { defaultCameras } from './cameras/defaults.ts';
 import { useEngine } from './engine/useEngine.ts';
 
-import { CameraList } from './ui/CameraList.tsx';
+import { SceneHierarchy } from './ui/SceneHierarchy.tsx';
 import { CameraPanel } from './ui/CameraPanel.tsx';
 import { OverlayControls } from './ui/OverlayControls.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
@@ -71,6 +71,7 @@ export function App() {
   const [cameras, setCameras] = useState<CameraConfig[]>(() => defaultCameras());
   const [selectedId, setSelectedId] = useState<string | null>(cameras[0]?.id ?? null);
   const [disabledIds, setDisabledIds] = useState<Set<string>>(() => new Set());
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const [overlayOptions, setOverlayOptions] = useState<OverlayOptions>({
     ...DEFAULT_OVERLAY_OPTIONS,
     involvedCameraCount: cameras.length,
@@ -246,6 +247,15 @@ export function App() {
     setCameras((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   }, []);
 
+  const handleToggleCollapse = useCallback((nodeId: string) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
+
   const handleRun = useCallback(async () => {
     const needsReinit = initializedVoxelSize === null || initializedVoxelSize !== debouncedVoxelSize;
     if (needsReinit) {
@@ -348,15 +358,17 @@ export function App() {
           onRun={handleRun}
         />
         <div className="panel">
-          <p className="panel-title">Cameras</p>
-          <CameraList
+          <p className="panel-title">Scene</p>
+          <SceneHierarchy
             cameras={cameras}
             selectedId={selectedId}
             flaggedIds={engine.state.flaggedCameras}
             disabledIds={disabledIds}
             perCamera={summary?.perCamera ?? null}
-            onSelect={setSelectedId}
+            collapsedIds={collapsedIds}
+            onSelectCamera={setSelectedId}
             onToggleEnabled={handleToggleEnabled}
+            onToggleCollapse={handleToggleCollapse}
           />
         </div>
         <CameraPanel
