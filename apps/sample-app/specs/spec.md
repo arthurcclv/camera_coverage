@@ -85,6 +85,31 @@ apps/sample-app/
       RunBar.tsx           Run button + auto-run toggle + stale/backend indicators
 ```
 
+The app is a **three-column** flex layout (desktop only, §1):
+
+- **Left panel** — the scene inspector: the `SceneHierarchy` tree on top,
+  the selected entity's editor (`CameraPanel`/`ProbePanel`) below it. The
+  hierarchy grows to fill the column and scrolls internally; the detail panel
+  sits below (and shows a placeholder when nothing is selected). A **draggable
+  divider** between the two resizes the split: dragging sets the detail panel's
+  height and the hierarchy takes the remainder, with the detail panel scrolling
+  internally when its content exceeds that height. The detail panel is the sole
+  scroll region for the object editor — its inner lists (e.g. the probe's
+  per-camera visibility list) do not scroll independently, so the object editor
+  never shows a nested second scrollbar. Both sides keep a minimum height. Until
+  first dragged the detail panel uses its natural height; once dragged, the
+  chosen split is remembered across reloads (localStorage).
+- **Center** — the 3D viewport with its overlaid toolbars (§2.4).
+- **Right sidebar** — the run/results controls: `RunBar`, `OverlayControls`,
+  `StatsPanel`.
+
+Both side columns share the same fixed width and are not collapsible; only the
+left column's internal hierarchy/detail split is adjustable (via the divider above).
+
+Scroll containers (the side columns, the hierarchy tree, the detail panel) use a
+thin custom-styled scrollbar and reserve a **stable gutter** (`scrollbar-gutter:
+stable`) so their content does not reflow when the scrollbar appears or disappears.
+
 ### 2.3 Render backend
 
 The viewport renders with Three.js's **`WebGPURenderer`** (`three/webgpu`), chosen for
@@ -101,7 +126,7 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
 
 ### 2.4 Viewport toolbar
 
-Two toolbars overlay the 3D viewport itself (independent of the sidebar panels):
+Two toolbars overlay the 3D viewport itself (independent of the side panels):
 
 - **Top-left** — transform controls for the selected camera (§5.2):
   - Transform **mode** toggle: **Move** / **Rotate** icon buttons, switching
@@ -482,17 +507,19 @@ is built, and lookup uses the SDK accessor's own `O(depth)` descent.
 - **Resolution.** Because the mask is quantized to the voxel grid, probe visibility
   has voxel-size resolution (§6).
 
-### 12.3 Probe panel (right sidebar)
+### 12.3 Probe panel (left panel)
 
-When a probe is selected (§5.2), the right panel shows, in place of the camera panel:
+When a probe is selected (§5.2), the left panel shows, in place of the camera panel:
 
 - header `Probe — <id>`;
 - **position X / Y / Z** sliders (a point has no orientation — no rotation or FOV);
 - a **visibility readout** against the enabled cameras of the retained run:
   - a summary line **"Seen by K of N cameras"** (N = that run's enabled-camera count),
   - one row per enabled camera marked **visible (✓)** or **not visible (–)**, decoded
-    from the mask; clicking a camera row selects that camera (§5.2);
-- a **Delete** action (also available from the hierarchy context menu, §5.5).
+    from the mask; clicking a camera row selects that camera (§5.2).
+
+Deletion is not offered from this panel — a probe is deleted from the hierarchy
+context menu (§5.5).
 
 **States without usable data** — never rendered as "0 of N":
 

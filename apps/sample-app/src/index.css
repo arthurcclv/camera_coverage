@@ -11,6 +11,52 @@ body {
   background: #14161a;
 }
 
+/* Custom scrollbar appearance, applied app-wide (spec §2.2).
+
+   WebKit/Blink (Chrome, Safari) use the ::-webkit-scrollbar pseudo-elements for
+   full control (exact 8px width, radius, hover color). Firefox uses the standard
+   scrollbar-width/-color. The two are kept apart deliberately: in modern Chrome
+   (121+) setting the standard `scrollbar-color`/`scrollbar-width` switches the
+   element to the native scrollbar and *disables* ::-webkit-scrollbar, so the
+   standard props are confined to a Firefox-only @supports block (Firefox has no
+   ::-webkit-scrollbar selector; Chrome/Safari do, so they skip it).
+
+   Gutter reservation is per-container (scrollbar-gutter isn't inherited) — see
+   the .sidebar/.tree/.detail-panel rules. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #384252;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #55606f;
+}
+::-webkit-scrollbar-button {
+  display: none;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox only (no ::-webkit-scrollbar support). scrollbar-color is inherited;
+   scrollbar-width is not, so it's set on each scroll container below. */
+@supports (scrollbar-width: thin) and (not selector(::-webkit-scrollbar)) {
+  .app {
+    scrollbar-color: #384252 transparent;
+  }
+  .sidebar,
+  .tree,
+  .left-panel .detail-panel {
+    scrollbar-width: thin;
+  }
+}
+
 .app {
   display: flex;
   height: 100vh;
@@ -69,12 +115,111 @@ body {
   width: 340px;
   flex-shrink: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   background: #1b1e24;
   border-left: 1px solid #2a2e36;
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* Left inspector column: hierarchy grows to fill, object detail pinned below
+   at natural height (spec §2.2). Mirrors .sidebar but borders on the right. */
+.left-panel {
+  width: 340px;
+  flex-shrink: 0;
+  background: #1b1e24;
+  border-right: 1px solid #2a2e36;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.left-panel .hierarchy-panel {
+  flex: 1;
+  /* Keep the hierarchy visible even when the detail panel is dragged tall; the
+     tree still scrolls within whatever height it gets. */
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+}
+/* Let the tree fill the growing hierarchy panel instead of its 240px cap. */
+.left-panel .hierarchy-panel .scene-hierarchy {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.left-panel .hierarchy-panel .tree {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+/* Object detail panel: a non-scrolling wrapper (holds the height set by the
+   divider) around the panel card, which is itself the single scroll region.
+   Natural height by default (grows with content, shrinking to scroll if the
+   column runs out of room); an inline `height` (set from React) pins it once the
+   divider is dragged. */
+.left-panel .detail-panel {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* The panel card is a flex column with a fixed title and a scrolling body —
+   same structure as the hierarchy panel, so the title never scrolls out
+   (spec §2.2). The body is the single scroll region for the object editor; its
+   scrollbar sits inside the card's border, the gutter reserves its width, and
+   the extra right padding keeps content off it. */
+.left-panel .detail-panel > .panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.left-panel .detail-panel > .panel > .panel-title {
+  flex-shrink: 0;
+}
+.left-panel .detail-panel > .panel > .panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
+}
+/* Inner lists don't scroll independently — the panel-card scrollbar is the only
+   one for the object editor (spec §2.2). */
+.left-panel .detail-panel .probe-vis-list {
+  max-height: none;
+  overflow: visible;
+}
+
+/* Draggable split between hierarchy and detail (spec §2.2). Thin visual grip
+   with a taller pointer target; row-resize cursor. */
+.panel-divider {
+  flex: 0 0 8px;
+  height: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+}
+.panel-divider::before {
+  content: '';
+  width: 44px;
+  height: 3px;
+  border-radius: 2px;
+  background: #384252;
+}
+.panel-divider:hover::before {
+  background: #55606f;
 }
 
 .panel {
@@ -228,12 +373,14 @@ body {
 .tree {
   list-style: none;
   margin: 0;
-  padding: 0;
+  /* Right padding keeps rows off the scrollbar (the gutter reserves its width). */
+  padding: 0 6px 0 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
   max-height: 240px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .tree-row {
@@ -377,13 +524,6 @@ body {
   background: #ff9d3f;
   transform: rotate(45deg);
   border-radius: 2px;
-}
-.panel-title-action {
-  float: right;
-  padding: 2px 8px;
-  font-size: 11px;
-  text-transform: none;
-  letter-spacing: normal;
 }
 .probe-summary {
   font-size: 12px;

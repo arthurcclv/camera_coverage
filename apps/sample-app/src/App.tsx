@@ -3,7 +3,7 @@
  * Three.js runs imperatively inside a ref-driven effect; React owns the
  * CameraConfig[] / Probe[] / overlay-option state and pushes it into the scene.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import * as THREE from 'three';
 import { WorkspaceGrid, type CameraConfig, type CoverageSummary, type Vec3 } from '@linkervision/camera-coverage-sdk';
 
@@ -26,6 +26,13 @@ import { selectionAfterClick, type PointerPos, type Selection } from './scene/vi
 import { defaultCameras } from './cameras/defaults.ts';
 import { useEngine } from './engine/useEngine.ts';
 
+import {
+  clampDetailHeight,
+  DETAIL_HEIGHT_STORAGE_KEY,
+  MIN_DETAIL_HEIGHT,
+  parseStoredDetailHeight,
+  serializeDetailHeight,
+} from './ui/leftPanelSplit.ts';
 import { SceneHierarchy } from './ui/SceneHierarchy.tsx';
 import { CameraPanel } from './ui/CameraPanel.tsx';
 import { ProbePanel } from './ui/ProbePanel.tsx';
@@ -181,6 +188,49 @@ export function App() {
 
   const selectedCameraId = selection?.kind === 'camera' ? selection.id : null;
   const selectedProbeId = selection?.kind === 'probe' ? selection.id : null;
+
+  // Left-column hierarchy/detail split (spec §2.2): null = detail at natural
+  // height until first dragged; a number pins its height (hierarchy takes the
+  // rest). Initialized from and persisted to localStorage.
+  const [detailHeight, setDetailHeight] = useState<number | null>(() =>
+    parseStoredDetailHeight(
+      typeof localStorage === 'undefined' ? null : localStorage.getItem(DETAIL_HEIGHT_STORAGE_KEY),
+    ),
+  );
+  const leftPanelRef = useRef<HTMLDivElement | null>(null);
+  const detailPanelRef = useRef<HTMLDivElement | null>(null);
+  const dividerDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return;
+    const serialized = serializeDetailHeight(detailHeight);
+    if (serialized == null) localStorage.removeItem(DETAIL_HEIGHT_STORAGE_KEY);
+    else localStorage.setItem(DETAIL_HEIGHT_STORAGE_KEY, serialized);
+  }, [detailHeight]);
+
+  const onDividerPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    dividerDragRef.current = {
+      startY: e.clientY,
+      startHeight: detailPanelRef.current?.offsetHeight ?? MIN_DETAIL_HEIGHT,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, []);
+
+  const onDividerPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dividerDragRef.current;
+    const column = leftPanelRef.current;
+    if (!drag || !column) return;
+    // Drag up → taller detail panel; clamp against the column so the hierarchy
+    // keeps its minimum height (spec §2.2).
+    const raw = drag.startHeight + (drag.startY - e.clientY);
+    setDetailHeight(clampDetailHeight(raw, column.clientHeight));
+  }, []);
+
+  const onDividerPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    dividerDragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  }, []);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<Viewport | null>(null);
@@ -530,6 +580,58 @@ export function App() {
 
   return (
     <div className="app">
+      <div className="left-panel" ref={leftPanelRef}>
+        <div className="panel hierarchy-panel">
+          <SceneHierarchy
+            cameras={cameras}
+            probes={probes}
+            selection={selection}
+            flaggedIds={engine.state.flaggedCameras}
+            disabledIds={disabledIds}
+            perCamera={summary?.perCamera ?? null}
+            probeSeenCounts={probeSeenCounts}
+            collapsedIds={collapsedIds}
+            onSelect={setSelection}
+            onToggleEnabled={handleToggleEnabled}
+            onToggleCollapse={handleToggleCollapse}
+            onAddCamera={handleAddCamera}
+            onAddProbe={handleAddProbe}
+            onDeleteCamera={handleDeleteCamera}
+            onDeleteProbe={handleDeleteProbe}
+          />
+        </div>
+        <div
+          className="panel-divider"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize hierarchy and detail panels"
+          onPointerDown={onDividerPointerDown}
+          onPointerMove={onDividerPointerMove}
+          onPointerUp={onDividerPointerUp}
+        />
+        <div
+          className="detail-panel"
+          ref={detailPanelRef}
+          style={detailHeight != null ? { height: detailHeight, flex: '0 0 auto' } : undefined}
+        >
+          {selectedProbe ? (
+            <ProbePanel
+              probe={selectedProbe}
+              query={probeQueries.get(selectedProbe.id)}
+              hasRunOnce={hasRunOnce}
+              stale={stale}
+              onChange={handleProbeChange}
+              onSelectCamera={(id) => setSelection({ kind: 'camera', id })}
+            />
+          ) : (
+            <CameraPanel
+              camera={selectedCamera}
+              flagged={selectedCameraId ? engine.state.flaggedCameras.has(selectedCameraId) : false}
+              onChange={handleCameraChange}
+            />
+          )}
+        </div>
+      </div>
       <div className="viewport-col">
         <div className="viewport" ref={containerRef}>
           <div className="viewport-toolbar">
@@ -596,42 +698,6 @@ export function App() {
           onAutoRunChange={setAutoRun}
           onRun={handleRun}
         />
-        <div className="panel">
-          <SceneHierarchy
-            cameras={cameras}
-            probes={probes}
-            selection={selection}
-            flaggedIds={engine.state.flaggedCameras}
-            disabledIds={disabledIds}
-            perCamera={summary?.perCamera ?? null}
-            probeSeenCounts={probeSeenCounts}
-            collapsedIds={collapsedIds}
-            onSelect={setSelection}
-            onToggleEnabled={handleToggleEnabled}
-            onToggleCollapse={handleToggleCollapse}
-            onAddCamera={handleAddCamera}
-            onAddProbe={handleAddProbe}
-            onDeleteCamera={handleDeleteCamera}
-            onDeleteProbe={handleDeleteProbe}
-          />
-        </div>
-        {selectedProbe ? (
-          <ProbePanel
-            probe={selectedProbe}
-            query={probeQueries.get(selectedProbe.id)}
-            hasRunOnce={hasRunOnce}
-            stale={stale}
-            onChange={handleProbeChange}
-            onDelete={handleDeleteProbe}
-            onSelectCamera={(id) => setSelection({ kind: 'camera', id })}
-          />
-        ) : (
-          <CameraPanel
-            camera={selectedCamera}
-            flagged={selectedCameraId ? engine.state.flaggedCameras.has(selectedCameraId) : false}
-            onChange={handleCameraChange}
-          />
-        )}
         <OverlayControls
           options={overlayOptions}
           onOptionsChange={(patch) => setOverlayOptions((o) => ({ ...o, ...patch }))}

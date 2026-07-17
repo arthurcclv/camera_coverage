@@ -18,7 +18,9 @@ export function CameraPanel({ camera, flagged, onChange }: CameraPanelProps) {
     return (
       <div className="panel">
         <p className="panel-title">Camera</p>
-        <p className="hint">Select a camera from the list or click its gizmo in the viewport.</p>
+        <div className="panel-body">
+          <p className="hint">Select a camera from the list or click its gizmo in the viewport.</p>
+        </div>
       </div>
     );
   }
@@ -40,15 +42,17 @@ export function CameraPanel({ camera, flagged, onChange }: CameraPanelProps) {
         {flagged && <span className="badge flagged" style={{ marginLeft: 8 }}>inside geometry</span>}
       </p>
 
-      <Slider label="Pos X" value={camera.position[0]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(0, v)} />
-      <Slider label="Pos Y" value={camera.position[1]} min={0} max={6.5} step={0.1} onChange={(v) => setPosition(1, v)} />
-      <Slider label="Pos Z" value={camera.position[2]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(2, v)} />
+      <div className="panel-body">
+        <Slider label="Pos X" value={camera.position[0]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(0, v)} />
+        <Slider label="Pos Y" value={camera.position[1]} min={0} max={6.5} step={0.1} onChange={(v) => setPosition(1, v)} />
+        <Slider label="Pos Z" value={camera.position[2]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(2, v)} />
 
-      <Slider label="Yaw" value={euler.yaw} min={-180} max={180} step={1} digits={0} onChange={(v) => setEuler({ yaw: v })} />
-      <Slider label="Pitch" value={euler.pitch} min={-89} max={89} step={1} digits={0} onChange={(v) => setEuler({ pitch: v })} />
-      <Slider label="Roll" value={euler.roll} min={-180} max={180} step={1} digits={0} onChange={(v) => setEuler({ roll: v })} />
+        <Slider label="Yaw" value={euler.yaw} min={-180} max={180} step={1} digits={0} onChange={(v) => setEuler({ yaw: v })} />
+        <Slider label="Pitch" value={euler.pitch} min={-89} max={89} step={1} digits={0} onChange={(v) => setEuler({ pitch: v })} />
+        <Slider label="Roll" value={euler.roll} min={-180} max={180} step={1} digits={0} onChange={(v) => setEuler({ roll: v })} />
 
-      <Slider label="FOV (vert.)" value={camera.fov} min={10} max={150} step={1} digits={0} onChange={(v) => set({ fov: v })} />
+        <Slider label="FOV (vert.)" value={camera.fov} min={10} max={150} step={1} digits={0} onChange={(v) => set({ fov: v })} />
+      </div>
     </div>
   );
 }

@@ -17,11 +17,10 @@ export interface ProbePanelProps {
   /** Whether the live scene has diverged from the retained run (spec §8.1). */
   stale: boolean;
   onChange(id: string, position: Vec3): void;
-  onDelete(id: string): void;
   onSelectCamera(id: string): void;
 }
 
-export function ProbePanel({ probe, query, hasRunOnce, stale, onChange, onDelete, onSelectCamera }: ProbePanelProps) {
+export function ProbePanel({ probe, query, hasRunOnce, stale, onChange, onSelectCamera }: ProbePanelProps) {
   if (!probe) return null;
 
   const setPosition = (axis: 0 | 1 | 2, v: number) => {
@@ -32,27 +31,19 @@ export function ProbePanel({ probe, query, hasRunOnce, stale, onChange, onDelete
 
   return (
     <div className="panel">
-      <p className="panel-title">
-        Probe — {probe.id}
-        <button
-          type="button"
-          className="btn secondary panel-title-action"
-          title="Delete probe"
-          onClick={() => onDelete(probe.id)}
-        >
-          Delete
-        </button>
-      </p>
+      <p className="panel-title">Probe — {probe.id}</p>
 
-      <Slider label="Pos X" value={probe.position[0]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(0, v)} />
-      <Slider label="Pos Y" value={probe.position[1]} min={0} max={6.5} step={0.1} onChange={(v) => setPosition(1, v)} />
-      <Slider label="Pos Z" value={probe.position[2]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(2, v)} />
+      <div className="panel-body">
+        <Slider label="Pos X" value={probe.position[0]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(0, v)} />
+        <Slider label="Pos Y" value={probe.position[1]} min={0} max={6.5} step={0.1} onChange={(v) => setPosition(1, v)} />
+        <Slider label="Pos Z" value={probe.position[2]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(2, v)} />
 
-      {stale && hasRunOnce && (
-        <p className="hint warn">⚠ Coverage out of date — recompute</p>
-      )}
+        {stale && hasRunOnce && (
+          <p className="hint warn">⚠ Coverage out of date — recompute</p>
+        )}
 
-      <ProbeReadout probe={probe} query={query} hasRunOnce={hasRunOnce} onSelectCamera={onSelectCamera} />
+        <ProbeReadout probe={probe} query={query} hasRunOnce={hasRunOnce} onSelectCamera={onSelectCamera} />
+      </div>
     </div>
   );
 }
