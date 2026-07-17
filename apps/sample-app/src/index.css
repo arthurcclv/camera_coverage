@@ -43,9 +43,26 @@ body {
   z-index: 1;
 }
 
+.viewport-toolbar-right {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 1;
+}
+
 .btn.active {
   background: #2c66c9;
   color: white;
+}
+
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  line-height: 0;
 }
 
 .sidebar {

@@ -93,6 +93,25 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
 - `WebGPURenderer` initializes **asynchronously** (`await renderer.init()` before the
   first frame); viewport setup accounts for this.
 
+### 2.4 Viewport toolbar
+
+Two toolbars overlay the 3D viewport itself (independent of the sidebar panels):
+
+- **Top-left** — transform mode toggle: **Move** / **Rotate**, switching
+  `TransformControls`'s mode for the selected camera (§5.2).
+- **Top-right** — icon-button visibility toggles for the two viewport-only layers
+  that can clutter or obscure the scene:
+  - **Overlay** — shows/hides the coverage volumetric overlay (the `visible`
+    option, §9.2). This is the only control for overlay visibility — the
+    sidebar has no separate checkbox for it.
+  - **Gizmos** — shows/hides all camera frustum gizmos (§5.3) at once.
+    Independent of per-camera enable/disable (§5.4): a camera stays
+    enabled/selectable from the camera list while its gizmo is hidden — it's
+    just not drawn or clickable in the viewport. Defaults to visible.
+
+Both render as icon buttons (eye-style glyphs) in a top-right toolbar strip,
+highlighted ("active") when the corresponding layer is currently visible.
+
 **Two independent "WebGPU"s.** This render backend is distinct from the SDK's WebGPU
 **compute** backend (§3.2): the renderer draws on the main thread, the compute backend
 runs the coverage calculation in the worker. They are selected and reported (§10)
@@ -193,7 +212,8 @@ world space, meters) is produced by `buildRoom.ts` and used for **both**:
 
 Each camera renders as a frustum wireframe reflecting its `fov`/`aspect`/`far`, so
 aim and coverage volume are visible. The selected camera's gizmo is highlighted.
-A disabled camera's gizmo is dimmed and its frustum wireframe hidden (§5.4).
+A disabled camera's gizmo is dimmed and its frustum wireframe hidden (§5.4). A
+viewport-level toggle can hide/show all gizmos at once (§2.4).
 
 ### 5.4 Enable / disable
 
@@ -300,9 +320,9 @@ The two modes are mutually exclusive; the coverage-fraction denominator
 
 ### 9.2 Controls
 
-`OverlayControls.tsx`, deliberately minimal:
+`OverlayControls.tsx`, deliberately minimal. Visibility on/off lives only in the
+viewport's top-right toolbar (§2.4), not here:
 
-- **Show overlay** — visibility on/off.
 - **Mode** — Coverage / Blind spots.
 - **Overlay color** — a hue slider over the full spectrum (0..360°) that sets the fog
   color used by **both** modes. The color is `hsl(hue, 100%, 50%)` — full-saturation,

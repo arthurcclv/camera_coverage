@@ -26,6 +26,27 @@ const DEFAULT_VOXEL_SIZE = 0.5;
 const DEBOUNCE_MS = 250;
 const AUTO_RUN_MAX_HZ = 10;
 
+// Viewport top-right toolbar icons (spec §2.4): stacked-planes for the coverage
+// overlay, a camera body for the frustum gizmos.
+function LayersIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
+    </svg>
+  );
+}
+
+function CameraIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="23 7 16 12 23 17 23 7" />
+      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+    </svg>
+  );
+}
+
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -63,6 +84,7 @@ export function App() {
   const [stale, setStale] = useState(false);
   const [autoRun, setAutoRun] = useState(true);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate'>('translate');
+  const [gizmosVisible, setGizmosVisible] = useState(true);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<Viewport | null>(null);
@@ -76,6 +98,8 @@ export function App() {
   selectedIdRef.current = selectedId;
   const overlayOptionsRef = useRef(overlayOptions);
   overlayOptionsRef.current = overlayOptions;
+  const gizmosVisibleRef = useRef(gizmosVisible);
+  gizmosVisibleRef.current = gizmosVisible;
   const engineFlaggedRef = useRef(engine.state.flaggedCameras);
   engineFlaggedRef.current = engine.state.flaggedCameras;
 
@@ -118,6 +142,7 @@ export function App() {
       // refs are still null during async init).
       overlay.setOptions(overlayOptionsRef.current);
       gizmos.update(camerasRef.current, selectedIdRef.current, engineFlaggedRef.current, disabledIdsRef.current);
+      gizmos.group.visible = gizmosVisibleRef.current;
       if (selectedIdRef.current) {
         const target = gizmos.getAttachTarget(selectedIdRef.current);
         if (target) viewport.transformControls.attach(target);
@@ -190,6 +215,11 @@ export function App() {
   useEffect(() => {
     overlayRef.current?.setOptions(overlayOptions);
   }, [overlayOptions]);
+
+  // --- gizmos visibility toggle (viewport top-right toolbar, spec §2.4) ------
+  useEffect(() => {
+    if (gizmosRef.current) gizmosRef.current.group.visible = gizmosVisible;
+  }, [gizmosVisible]);
 
   const enabledCameraCount = cameras.length - disabledIds.size;
 
@@ -283,6 +313,26 @@ export function App() {
               onClick={() => setTransformMode('rotate')}
             >
               Rotate
+            </button>
+          </div>
+          <div className="viewport-toolbar-right">
+            <button
+              type="button"
+              className={`btn secondary icon-btn${overlayOptions.visible ? ' active' : ''}`}
+              title={overlayOptions.visible ? 'Hide coverage overlay' : 'Show coverage overlay'}
+              aria-pressed={overlayOptions.visible}
+              onClick={() => setOverlayOptions((o) => ({ ...o, visible: !o.visible }))}
+            >
+              <LayersIcon />
+            </button>
+            <button
+              type="button"
+              className={`btn secondary icon-btn${gizmosVisible ? ' active' : ''}`}
+              title={gizmosVisible ? 'Hide camera gizmos' : 'Show camera gizmos'}
+              aria-pressed={gizmosVisible}
+              onClick={() => setGizmosVisible((v) => !v)}
+            >
+              <CameraIcon />
             </button>
           </div>
         </div>

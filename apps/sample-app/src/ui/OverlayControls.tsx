@@ -1,6 +1,7 @@
 /**
- * Overlay controls (spec §6, §9.2): deliberately minimal — visibility, mode
- * selector (Coverage / Blind spots), intensity scale, plus the resolution slider.
+ * Overlay controls (spec §6, §9.2): deliberately minimal — mode selector
+ * (Coverage / Blind spots), intensity scale, plus the resolution slider.
+ * Visibility on/off lives in the viewport's top-right toolbar (§2.4), not here.
  */
 import type { OverlayMode, OverlayOptions } from '../scene/coverageOverlay.ts';
 import { Slider } from './Slider.tsx';
@@ -47,14 +48,6 @@ export function OverlayControls({
       <p className="panel-title" style={{ marginTop: 12 }}>
         Coverage overlay
       </p>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={options.visible}
-          onChange={(e) => onOptionsChange({ visible: e.target.checked })}
-        />
-        Show overlay
-      </label>
 
       <div className="segmented" role="radiogroup" aria-label="Visualization mode">
         {MODES.map((m) => (
