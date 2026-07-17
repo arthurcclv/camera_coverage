@@ -180,6 +180,15 @@ body {
 .btn.secondary:hover:not(:disabled) {
   background: #333844;
 }
+/* Toggle "on" state for secondary buttons (spec §2.4). Needs higher specificity
+   than .btn.secondary, which otherwise overrides .btn.active by source order. */
+.btn.secondary.active {
+  background: #2c66c9;
+  color: #fff;
+}
+.btn.secondary.active:hover:not(:disabled) {
+  background: #3574e0;
+}
 
 .badge {
   display: inline-flex;

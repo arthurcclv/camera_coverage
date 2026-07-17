@@ -11,6 +11,14 @@ import { buildRoom } from './scene/buildRoom.ts';
 import { createViewport, type RenderBackend, type Viewport } from './scene/viewport.ts';
 import { CameraGizmoSet } from './scene/cameraGizmos.ts';
 import { CoverageOverlay, DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
+import {
+  DEFAULT_TRANSFORM_SPACE,
+  spaceIconKind,
+  spaceTooltip,
+  threeSpace,
+  toggleSpace,
+  type TransformSpace,
+} from './scene/transformSpace.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { defaultCameras } from './cameras/defaults.ts';
 import { useEngine } from './engine/useEngine.ts';
@@ -43,6 +51,52 @@ function CameraIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polygon points="23 7 16 12 23 17 23 7" />
       <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+    </svg>
+  );
+}
+
+// Transform-mode toggle icons (spec §2.4): four-way arrows for Move (translate),
+// a circular arrow for Rotate.
+function MoveIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="5 9 2 12 5 15" />
+      <polyline points="9 5 12 2 15 5" />
+      <polyline points="15 19 12 22 9 19" />
+      <polyline points="19 9 22 12 19 15" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+      <line x1="12" y1="2" x2="12" y2="22" />
+    </svg>
+  );
+}
+
+function RotateIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="23 4 23 10 17 10" />
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+    </svg>
+  );
+}
+
+// Transform-space toggle icons (spec §2.4): a cube for local space (gizmo aligned
+// to the camera's own axes), a globe for global/world space.
+function BoxIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+      <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+      <line x1="12" y1="22.08" x2="12" y2="12" />
+    </svg>
+  );
+}
+
+function GlobeIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
     </svg>
   );
 }
@@ -85,6 +139,7 @@ export function App() {
   const [stale, setStale] = useState(false);
   const [autoRun, setAutoRun] = useState(true);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate'>('translate');
+  const [transformSpace, setTransformSpace] = useState<TransformSpace>(DEFAULT_TRANSFORM_SPACE);
   const [gizmosVisible, setGizmosVisible] = useState(true);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -101,6 +156,8 @@ export function App() {
   overlayOptionsRef.current = overlayOptions;
   const gizmosVisibleRef = useRef(gizmosVisible);
   gizmosVisibleRef.current = gizmosVisible;
+  const transformSpaceRef = useRef(transformSpace);
+  transformSpaceRef.current = transformSpace;
   const engineFlaggedRef = useRef(engine.state.flaggedCameras);
   engineFlaggedRef.current = engine.state.flaggedCameras;
 
@@ -144,6 +201,7 @@ export function App() {
       overlay.setOptions(overlayOptionsRef.current);
       gizmos.update(camerasRef.current, selectedIdRef.current, engineFlaggedRef.current, disabledIdsRef.current);
       gizmos.group.visible = gizmosVisibleRef.current;
+      viewport.transformControls.setSpace(threeSpace(transformSpaceRef.current));
       if (selectedIdRef.current) {
         const target = gizmos.getAttachTarget(selectedIdRef.current);
         if (target) viewport.transformControls.attach(target);
@@ -211,6 +269,10 @@ export function App() {
   useEffect(() => {
     viewportRef.current?.transformControls.setMode(transformMode);
   }, [transformMode]);
+
+  useEffect(() => {
+    viewportRef.current?.transformControls.setSpace(threeSpace(transformSpace));
+  }, [transformSpace]);
 
   // --- push overlay option state into the overlay ---------------------------
   useEffect(() => {
@@ -313,16 +375,33 @@ export function App() {
         <div className="viewport" ref={containerRef}>
           <div className="viewport-toolbar">
             <button
-              className={`btn secondary${transformMode === 'translate' ? ' active' : ''}`}
+              type="button"
+              className={`btn secondary icon-btn${transformMode === 'translate' ? ' active' : ''}`}
+              title="Move"
+              aria-label="Move"
+              aria-pressed={transformMode === 'translate'}
               onClick={() => setTransformMode('translate')}
             >
-              Move
+              <MoveIcon />
             </button>
             <button
-              className={`btn secondary${transformMode === 'rotate' ? ' active' : ''}`}
+              type="button"
+              className={`btn secondary icon-btn${transformMode === 'rotate' ? ' active' : ''}`}
+              title="Rotate"
+              aria-label="Rotate"
+              aria-pressed={transformMode === 'rotate'}
               onClick={() => setTransformMode('rotate')}
             >
-              Rotate
+              <RotateIcon />
+            </button>
+            <button
+              type="button"
+              className="btn secondary icon-btn"
+              title={spaceTooltip(transformSpace)}
+              aria-label={spaceTooltip(transformSpace)}
+              onClick={() => setTransformSpace((s) => toggleSpace(s))}
+            >
+              {spaceIconKind(transformSpace) === 'box' ? <BoxIcon /> : <GlobeIcon />}
             </button>
           </div>
           <div className="viewport-toolbar-right">

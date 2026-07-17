@@ -98,8 +98,18 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
 
 Two toolbars overlay the 3D viewport itself (independent of the sidebar panels):
 
-- **Top-left** — transform mode toggle: **Move** / **Rotate**, switching
-  `TransformControls`'s mode for the selected camera (§5.2).
+- **Top-left** — transform controls for the selected camera (§5.2):
+  - Transform **mode** toggle: **Move** / **Rotate** icon buttons, switching
+    `TransformControls`'s mode. Each shows its name as a tooltip on hover and
+    is highlighted ("active") when its mode is current.
+  - Transform **space** toggle: a single icon button that flips the gizmo
+    between **Local** and **Global** space (`TransformControls.setSpace`,
+    mapping Local→`'local'` and Global→`'world'`). In Local space the gizmo
+    aligns to the camera's own axes; in Global it aligns to the world axes.
+    The icon reflects the current space (a box/cube glyph for Local, a globe
+    glyph for Global) and the tooltip names the current space and the action
+    (e.g. "Local space — click for global"). Defaults to **Local**. Always
+    enabled, independent of selection, and shared by both Move and Rotate.
 - **Top-right** — icon-button visibility toggles for the two viewport-only layers
   that can clutter or obscure the scene:
   - **Overlay** — shows/hides the coverage volumetric overlay (the `visible`
@@ -206,8 +216,9 @@ world space, meters) is produced by `buildRoom.ts` and used for **both**:
 - **Select** a camera by clicking its frustum gizmo in the viewport or its camera
   node in the scene hierarchy (§5.5).
 - **Panel sliders** edit the selected camera: position X/Y/Z, yaw/pitch/roll, FOV.
-- **TransformControls** gizmo (translate + rotate modes) on the selected camera in
-  the viewport, kept in two-way sync with the panel.
+- **TransformControls** gizmo (translate + rotate modes, in Local or Global space
+  per the §2.4 space toggle) on the selected camera in the viewport, kept in
+  two-way sync with the panel.
 
 ### 5.3 Frustum gizmos
 
