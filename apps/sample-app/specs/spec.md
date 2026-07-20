@@ -264,7 +264,10 @@ world space, meters) is produced by `buildRoom.ts` and used for **both**:
   TransformControls gizmo). Only a genuine click deselects: a click that concludes a
   camera-orbit or TransformControls drag (pointer moved past a small threshold between
   press and release) is ignored and leaves the selection unchanged.
-- **Panel sliders** edit the selected camera: position X/Y/Z, yaw/pitch/roll, FOV.
+- **Panel sliders** edit the selected camera: position X/Y/Z, yaw/pitch/roll, FOV,
+  and **Range (far)** — the detection range / far frustum plane (`CameraConfig.far`),
+  slider range 0.5–100 m, step 0.1. Editing it resizes the frustum gizmo (§5.3) live
+  and invalidates the displayed coverage result (§5.4).
 - **TransformControls** gizmo (translate + rotate modes, in Local or Global space
   per the §2.4 space toggle) on the selected camera in the viewport, kept in
   two-way sync with the panel.

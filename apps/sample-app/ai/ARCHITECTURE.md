@@ -102,7 +102,7 @@ state without re-subscribing. **Auto-run** is a 10 Hz `setInterval` that fires
 
 **UI (`ui/`, presentational React)**
 - `SceneHierarchy.tsx` — tree view, add menu, delete context menu, per-kind rows.
-- `CameraPanel.tsx` — selected-camera position / Euler / FOV sliders.
+- `CameraPanel.tsx` — selected-camera position / Euler / FOV / range (far) sliders.
 - `ProbePanel.tsx` — probe position sliders + visibility readout + stale hint.
 - `SectionPanel.tsx` — orientation / thickness / aggregation editor for the
   selected section (thickness keeps the section's center fixed; position only

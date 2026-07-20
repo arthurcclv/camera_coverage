@@ -1,7 +1,8 @@
 /**
  * Selected-camera editor (spec §5.1, §5.2): position + Euler yaw/pitch/roll +
- * FOV. The quaternion is the source of truth; Euler is re-derived from it on
- * every render rather than kept as separate local state, so it never drifts.
+ * FOV + range (far). The quaternion is the source of truth; Euler is
+ * re-derived from it on every render rather than kept as separate local
+ * state, so it never drifts.
  */
 import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
 import { eulerToQuat, quatToEuler } from '../cameras/math.ts';
@@ -52,6 +53,7 @@ export function CameraPanel({ camera, flagged, onChange }: CameraPanelProps) {
         <Slider label="Roll" value={euler.roll} min={-180} max={180} step={1} digits={0} onChange={(v) => setEuler({ roll: v })} />
 
         <Slider label="FOV (vert.)" value={camera.fov} min={10} max={150} step={1} digits={0} onChange={(v) => set({ fov: v })} />
+        <Slider label="Range (far)" value={camera.far ?? 50} min={0.5} max={100} step={0.1} onChange={(v) => set({ far: v })} />
       </div>
     </div>
   );

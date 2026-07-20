@@ -15,8 +15,8 @@ result. It is a **readable reference for SDK consumers**, not a shipping product
 
 - Explore a fixed enclosed room (open-top box with freestanding obstacles) seeded
   with 10 CCTV-style cameras.
-- **Move / rotate / re-aim each camera** and change its FOV, via in-viewport
-  gizmos or panel sliders.
+- **Move / rotate / re-aim each camera** and change its FOV and detection range
+  (far), via in-viewport gizmos or panel sliders.
 - **Run the coverage computation** on demand, or leave **auto-run** on (default)
   so it recomputes shortly after any input change.
 - See coverage as a **color-coded volumetric voxel overlay** in two modes:
