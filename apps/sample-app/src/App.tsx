@@ -12,6 +12,14 @@ import { createViewport, type RenderBackend, type Viewport } from './scene/viewp
 import { CameraGizmoSet } from './scene/cameraGizmos.ts';
 import { ProbeGizmoSet } from './scene/probeGizmos.ts';
 import { ProbeVisibility, type Probe, type ProbeVisibilityResult } from './scene/probeVisibility.ts';
+import { SectionGizmoSet } from './scene/sectionGizmos.ts';
+import {
+  axisMapping,
+  defaultSection,
+  SectionHeatmapStore,
+  type Section,
+  type SectionCellGrid,
+} from './scene/sectionHeatmap.ts';
 import { CoverageOverlay, DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
 import {
   DEFAULT_TRANSFORM_SPACE,
@@ -36,8 +44,11 @@ import {
 import { SceneHierarchy } from './ui/SceneHierarchy.tsx';
 import { CameraPanel } from './ui/CameraPanel.tsx';
 import { ProbePanel } from './ui/ProbePanel.tsx';
+import { SectionPanel } from './ui/SectionPanel.tsx';
 import { OverlayControls } from './ui/OverlayControls.tsx';
+import { SectionHeatmapControls } from './ui/SectionHeatmapControls.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
+import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
 import { RunBar } from './ui/RunBar.tsx';
 
 const CHUNK_SIZE_XZ = 10;
@@ -68,6 +79,19 @@ function LayersIcon() {
       <polygon points="12 2 2 7 12 12 22 7 12 2" />
       <polyline points="2 17 12 22 22 17" />
       <polyline points="2 12 12 17 22 12" />
+    </svg>
+  );
+}
+
+// Section master visibility toggle icon (spec §2.4): a 2×2 grid, echoing the
+// heatmap's per-cell layout.
+function GridIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="8" height="8" rx="1" />
+      <rect x="13" y="3" width="8" height="8" rx="1" />
+      <rect x="3" y="13" width="8" height="8" rx="1" />
+      <rect x="13" y="13" width="8" height="8" rx="1" />
     </svg>
   );
 }
@@ -148,6 +172,7 @@ export function App() {
   const room = useMemo(() => buildRoom(), []);
   const engine = useEngine();
   const probeVisibility = useMemo(() => new ProbeVisibility(), []);
+  const sectionHeatmapStore = useMemo(() => new SectionHeatmapStore(), []);
 
   const workspaceCenter = useMemo<Vec3>(
     () => [
@@ -160,6 +185,9 @@ export function App() {
 
   const [cameras, setCameras] = useState<CameraConfig[]>(() => defaultCameras());
   const [probes, setProbes] = useState<Probe[]>([]);
+  const [sections, setSections] = useState<Section[]>([]);
+  // Master show/hide-all for the section heatmap layer (viewport toolbar, spec §2.4).
+  const [sectionsVisible, setSectionsVisible] = useState(true);
   const [selection, setSelection] = useState<Selection>(() =>
     cameras[0] ? { kind: 'camera', id: cameras[0].id } : null,
   );
@@ -188,6 +216,7 @@ export function App() {
 
   const selectedCameraId = selection?.kind === 'camera' ? selection.id : null;
   const selectedProbeId = selection?.kind === 'probe' ? selection.id : null;
+  const selectedSectionId = selection?.kind === 'section' ? selection.id : null;
 
   // Left-column hierarchy/detail split (spec §2.2): null = detail at natural
   // height until first dragged; a number pins its height (hierarchy takes the
@@ -236,11 +265,14 @@ export function App() {
   const viewportRef = useRef<Viewport | null>(null);
   const gizmosRef = useRef<CameraGizmoSet | null>(null);
   const probeGizmosRef = useRef<ProbeGizmoSet | null>(null);
+  const sectionGizmosRef = useRef<SectionGizmoSet | null>(null);
   const overlayRef = useRef<CoverageOverlay | null>(null);
   const camerasRef = useRef(cameras);
   camerasRef.current = cameras;
   const probesRef = useRef(probes);
   probesRef.current = probes;
+  const sectionsRef = useRef(sections);
+  sectionsRef.current = sections;
   const disabledIdsRef = useRef(disabledIds);
   disabledIdsRef.current = disabledIds;
   const selectionRef = useRef(selection);
@@ -249,6 +281,8 @@ export function App() {
   overlayOptionsRef.current = overlayOptions;
   const gizmosVisibleRef = useRef(gizmosVisible);
   gizmosVisibleRef.current = gizmosVisible;
+  const sectionsVisibleRef = useRef(sectionsVisible);
+  sectionsVisibleRef.current = sectionsVisible;
   const transformSpaceRef = useRef(transformSpace);
   transformSpaceRef.current = transformSpace;
   const engineFlaggedRef = useRef(engine.state.flaggedCameras);
@@ -260,6 +294,18 @@ export function App() {
     const volume = (x1 - x0) * (y1 - y0) * (z1 - z0);
     return Math.round(volume / voxelSize ** 3);
   }, [room, voxelSize]);
+
+  // --- per-section cell grids (spec §13.3, §13.4): recomputed from the
+  // retained run whenever a section's own fields change or a new run replaces
+  // the retained masks. Computed for every section (not just visible ones), so
+  // hierarchy badges and the stats panel stay live regardless of the per-
+  // section visibility checkbox. ---------------------------------------------
+  const sectionCellGrids = useMemo(() => {
+    const map = new Map<string, SectionCellGrid | null>();
+    for (const s of sections) map.set(s.id, sectionHeatmapStore.computeCells(s));
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sections, masksVersion, sectionHeatmapStore]);
 
   // --- Three.js scene: created once, torn down on unmount ------------------
   // WebGPURenderer.init() is async (spec §2.3), so setup runs in an async IIFE
@@ -279,26 +325,35 @@ export function App() {
       }
       const gizmos = new CameraGizmoSet();
       const probeGizmos = new ProbeGizmoSet();
+      const sectionGizmos = new SectionGizmoSet();
       const overlay = new CoverageOverlay();
       viewport.scene.add(room.group);
       viewport.scene.add(gizmos.group);
       viewport.scene.add(probeGizmos.group);
+      viewport.scene.add(sectionGizmos.group);
       viewport.scene.add(overlay.object);
 
       viewportRef.current = viewport;
       gizmosRef.current = gizmos;
       probeGizmosRef.current = probeGizmos;
+      sectionGizmosRef.current = sectionGizmos;
       overlayRef.current = overlay;
       setRenderBackend(viewport.renderBackend);
 
-      // Apply any option/camera/probe state that changed before setup completed.
+      // Apply any option/camera/probe/section state that changed before setup completed.
       overlay.setOptions(overlayOptionsRef.current);
       const sel = selectionRef.current;
       gizmos.update(camerasRef.current, sel?.kind === 'camera' ? sel.id : null, engineFlaggedRef.current, disabledIdsRef.current);
       gizmos.group.visible = gizmosVisibleRef.current;
       probeGizmos.update(probesRef.current, sel?.kind === 'probe' ? sel.id : null);
+      sectionGizmos.update(sectionsRef.current, new Map(), sectionsVisibleRef.current, false, room.worldMin, room.worldMax);
       viewport.transformControls.setSpace(threeSpace(transformSpaceRef.current));
-      attachForSelection(viewport, gizmos, probeGizmos, sel);
+      const initialSection = sel?.kind === 'section' ? sectionsRef.current.find((s) => s.id === sel.id) : undefined;
+      const initialCollapseAxis = initialSection ? axisMapping(initialSection.orientation).collapseAxis : null;
+      viewport.transformControls.showX = initialCollapseAxis === null || initialCollapseAxis === 0;
+      viewport.transformControls.showY = initialCollapseAxis === null || initialCollapseAxis === 1;
+      viewport.transformControls.showZ = initialCollapseAxis === null || initialCollapseAxis === 2;
+      attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, sel);
 
       const raycaster = new THREE.Raycaster();
       const pointer = new THREE.Vector2();
@@ -337,11 +392,24 @@ export function App() {
           setCameras((prev) =>
             prev.map((c) => (c.id === sel.id ? { ...c, position: readback.position, rotation: readback.rotation } : c)),
           );
-        } else {
+        } else if (sel.kind === 'probe') {
           // Moving a probe never marks results stale (spec §12.5).
           const position = probeGizmos.readPosition(sel.id);
           if (!position) return;
           setProbes((prev) => prev.map((p) => (p.id === sel.id ? { ...p, position } : p)));
+        } else {
+          // Axis-constrained slide: the target's position on the collapse axis is
+          // the slab's new midpoint; thickness (max - min) stays fixed (spec §13.8).
+          // Never marks results stale (spec §13.4).
+          const current = sectionsRef.current.find((s) => s.id === sel.id);
+          if (!current) return;
+          const { collapseAxis } = axisMapping(current.orientation);
+          const mid = sectionGizmos.readAxisPosition(sel.id, collapseAxis);
+          if (mid === undefined) return;
+          const halfThickness = (current.max - current.min) / 2;
+          setSections((prev) =>
+            prev.map((s) => (s.id === sel.id ? { ...s, min: mid - halfThickness, max: mid + halfThickness } : s)),
+          );
         }
       };
       viewport.transformControls.addEventListener('objectChange', onObjectChange);
@@ -353,10 +421,12 @@ export function App() {
         overlay.dispose();
         gizmos.dispose();
         probeGizmos.dispose();
+        sectionGizmos.dispose();
         viewport.dispose();
         viewportRef.current = null;
         gizmosRef.current = null;
         probeGizmosRef.current = null;
+        sectionGizmosRef.current = null;
         overlayRef.current = null;
       };
     })();
@@ -377,24 +447,43 @@ export function App() {
     probeGizmosRef.current?.update(probes, selectedProbeId);
   }, [probes, selectedProbeId]);
 
-  // --- TransformControls attachment + mode per selection kind (spec §12.4) ---
+  useEffect(() => {
+    sectionGizmosRef.current?.update(sections, sectionCellGrids, sectionsVisible, stale, room.worldMin, room.worldMax);
+  }, [sections, sectionCellGrids, sectionsVisible, stale, room]);
+
+  // --- TransformControls attachment + mode per selection kind (spec §12.4, §13.8) ---
   useEffect(() => {
     const viewport = viewportRef.current;
     const gizmos = gizmosRef.current;
     const probeGizmos = probeGizmosRef.current;
-    if (!viewport || !gizmos || !probeGizmos) return;
-    attachForSelection(viewport, gizmos, probeGizmos, selection);
+    const sectionGizmos = sectionGizmosRef.current;
+    if (!viewport || !gizmos || !probeGizmos || !sectionGizmos) return;
+    attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, selection);
   }, [selection]);
 
   useEffect(() => {
-    // A probe is a point — translate only, ignoring the rotate mode (spec §12.4).
-    const mode = selection?.kind === 'probe' ? 'translate' : transformMode;
+    // A probe is a point and a section slides along one axis — both are
+    // translate only, ignoring the rotate mode (spec §12.4, §13.8).
+    const mode = selection?.kind === 'probe' || selection?.kind === 'section' ? 'translate' : transformMode;
     viewportRef.current?.transformControls.setMode(mode);
   }, [transformMode, selection]);
 
   useEffect(() => {
     viewportRef.current?.transformControls.setSpace(threeSpace(transformSpace));
   }, [transformSpace]);
+
+  // --- axis-constrained handles while a section is selected (spec §13.8): only
+  // the collapse-axis handle is shown, so dragging can only slide the slab along
+  // its normal. Reset to all-axes for camera/probe selections. -----------------
+  useEffect(() => {
+    const controls = viewportRef.current?.transformControls;
+    if (!controls) return;
+    const current = selection?.kind === 'section' ? sections.find((s) => s.id === selection.id) : undefined;
+    const collapseAxis = current ? axisMapping(current.orientation).collapseAxis : null;
+    controls.showX = collapseAxis === null || collapseAxis === 0;
+    controls.showY = collapseAxis === null || collapseAxis === 1;
+    controls.showZ = collapseAxis === null || collapseAxis === 2;
+  }, [selection, sections]);
 
   // --- push overlay option state into the overlay ---------------------------
   useEffect(() => {
@@ -489,6 +578,20 @@ export function App() {
     setSelection({ kind: 'probe', id });
   }, [workspaceCenter]);
 
+  const handleAddSection = useCallback(() => {
+    const id = nextFreeId('section', sectionsRef.current.map((s) => s.id));
+    setSections((prev) => [...prev, defaultSection(id, room.worldMin, room.worldMax)]);
+    setSelection({ kind: 'section', id });
+  }, [room]);
+
+  const handleSectionChange = useCallback((id: string, patch: Partial<Section>) => {
+    setSections((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  }, []);
+
+  const handleToggleSectionVisible = useCallback((id: string) => {
+    setSections((prev) => prev.map((s) => (s.id === id ? { ...s, visible: !s.visible } : s)));
+  }, []);
+
   const handleDeleteCamera = useCallback((id: string) => {
     setCameras((prev) => prev.filter((c) => c.id !== id));
     setDisabledIds((prev) => {
@@ -503,6 +606,11 @@ export function App() {
   const handleDeleteProbe = useCallback((id: string) => {
     setProbes((prev) => prev.filter((p) => p.id !== id));
     setSelection((prev) => (prev?.kind === 'probe' && prev.id === id ? null : prev));
+  }, []);
+
+  const handleDeleteSection = useCallback((id: string) => {
+    setSections((prev) => prev.filter((s) => s.id !== id));
+    setSelection((prev) => (prev?.kind === 'section' && prev.id === id ? null : prev));
   }, []);
 
   const handleRun = useCallback(async () => {
@@ -529,12 +637,14 @@ export function App() {
       chunkSizeXZ: CHUNK_SIZE_XZ,
     });
     probeVisibility.reset(grid, enabledCameras.map((c) => c.id));
+    sectionHeatmapStore.reset(grid, enabledCameras.map((c) => c.id));
     overlayRef.current?.reset();
     const result = await engine.compute({
       mode: 1,
       onChunkDone: (_chunkId, chunkResult) => {
         overlayRef.current?.addChunk(chunkResult);
         probeVisibility.addChunk(chunkResult);
+        sectionHeatmapStore.addChunk(chunkResult);
       },
     });
     if (result) {
@@ -543,7 +653,7 @@ export function App() {
       setStale(false);
       setMasksVersion((v) => v + 1);
     }
-  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, probeVisibility]);
+  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, probeVisibility, sectionHeatmapStore]);
 
   // --- auto-run: recompute automatically once results go stale, throttled to
   // at most AUTO_RUN_MAX_HZ runs/sec ------------------------------------------
@@ -569,6 +679,7 @@ export function App() {
 
   const selectedCamera = cameras.find((c) => c.id === selectedCameraId) ?? null;
   const selectedProbe = probes.find((p) => p.id === selectedProbeId) ?? null;
+  const selectedSection = sections.find((s) => s.id === selectedSectionId) ?? null;
   const probeSeenCounts = useMemo(() => {
     const map = new Map<string, number | null>();
     for (const p of probes) {
@@ -585,19 +696,24 @@ export function App() {
           <SceneHierarchy
             cameras={cameras}
             probes={probes}
+            sections={sections}
             selection={selection}
             flaggedIds={engine.state.flaggedCameras}
             disabledIds={disabledIds}
             perCamera={summary?.perCamera ?? null}
             probeSeenCounts={probeSeenCounts}
+            sectionCellGrids={sectionCellGrids}
             collapsedIds={collapsedIds}
             onSelect={setSelection}
             onToggleEnabled={handleToggleEnabled}
+            onToggleSectionVisible={handleToggleSectionVisible}
             onToggleCollapse={handleToggleCollapse}
             onAddCamera={handleAddCamera}
             onAddProbe={handleAddProbe}
+            onAddSection={handleAddSection}
             onDeleteCamera={handleDeleteCamera}
             onDeleteProbe={handleDeleteProbe}
+            onDeleteSection={handleDeleteSection}
           />
         </div>
         <div
@@ -614,7 +730,14 @@ export function App() {
           ref={detailPanelRef}
           style={detailHeight != null ? { height: detailHeight, flex: '0 0 auto' } : undefined}
         >
-          {selectedProbe ? (
+          {selectedSection ? (
+            <SectionPanel
+              section={selectedSection}
+              worldMin={room.worldMin}
+              worldMax={room.worldMax}
+              onChange={handleSectionChange}
+            />
+          ) : selectedProbe ? (
             <ProbePanel
               probe={selectedProbe}
               query={probeQueries.get(selectedProbe.id)}
@@ -678,6 +801,15 @@ export function App() {
             </button>
             <button
               type="button"
+              className={`btn secondary icon-btn${sectionsVisible ? ' active' : ''}`}
+              title={sectionsVisible ? 'Hide section heatmaps' : 'Show section heatmaps'}
+              aria-pressed={sectionsVisible}
+              onClick={() => setSectionsVisible((v) => !v)}
+            >
+              <GridIcon />
+            </button>
+            <button
+              type="button"
               className={`btn secondary icon-btn${gizmosVisible ? ' active' : ''}`}
               title={gizmosVisible ? 'Hide camera gizmos' : 'Show camera gizmos'}
               aria-pressed={gizmosVisible}
@@ -705,22 +837,32 @@ export function App() {
           onVoxelSizeChange={setVoxelSize}
           estimatedVoxelCount={estimatedVoxelCount}
         />
+        <SectionHeatmapControls />
         <StatsPanel
           summary={summary}
           computeBackend={engine.state.backend}
           renderBackend={renderBackend}
           voxelSize={debouncedVoxelSize}
         />
+        {selectedSection && (
+          <SectionStatsPanel
+            section={selectedSection}
+            cellGrid={sectionCellGrids.get(selectedSection.id) ?? null}
+            hasRunOnce={hasRunOnce}
+            stale={stale}
+          />
+        )}
       </div>
     </div>
   );
 }
 
-/** Attach TransformControls to the selected entity's target, or detach (spec §12.4). */
+/** Attach TransformControls to the selected entity's target, or detach (spec §12.4, §13.8). */
 function attachForSelection(
   viewport: Viewport,
   gizmos: CameraGizmoSet,
   probeGizmos: ProbeGizmoSet,
+  sectionGizmos: SectionGizmoSet,
   selection: Selection,
 ): void {
   const target =
@@ -728,7 +870,9 @@ function attachForSelection(
       ? gizmos.getAttachTarget(selection.id)
       : selection?.kind === 'probe'
         ? probeGizmos.getAttachTarget(selection.id)
-        : undefined;
+        : selection?.kind === 'section'
+          ? sectionGizmos.getAttachTarget(selection.id)
+          : undefined;
   if (target) viewport.transformControls.attach(target);
   else viewport.transformControls.detach();
 }

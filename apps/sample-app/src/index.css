@@ -525,6 +525,12 @@ body {
   transform: rotate(45deg);
   border-radius: 2px;
 }
+
+/* Section rows (spec §5.5, §13.6): a small square swatch instead of a dot. */
+.tree-row .dot.section-dot {
+  background: #4de08a;
+  border-radius: 2px;
+}
 .probe-summary {
   font-size: 12px;
   color: #c4cad3;
@@ -588,6 +594,21 @@ body {
   flex: 1;
   padding: 6px 10px;
   font-size: 12px;
+}
+
+/* Section heatmap legend (spec §13.6): a horizontal Turbo gradient colorbar
+   with 0/1 endpoint labels. */
+.legend-bar {
+  height: 12px;
+  border-radius: 4px;
+  border: 1px solid #2a2e36;
+  margin: 6px 0 2px;
+}
+.legend-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #7c8592;
 }
 
 .status-line {

@@ -72,23 +72,28 @@ apps/sample-app/
       probeVisibility.ts   retained ChunkResults + world-point → camera-mask lookup (§12.2)
       volumetric.ts        voxel volumetric renderer (§2.3, volumetric_rendering.md)
       coverageOverlay.ts   maps ChunkResult coverage → volumetric voxels (§9)
-      sceneTree.ts         scene hierarchy node model + derivation (camera + probe) (§5.5)
+      sectionHeatmap.ts    retained ChunkResults → per-section column aggregate + heatmap texture + stats (§13)
+      sectionGizmos.ts     per-section heatmap plane + faint bound outlines + transform target (§13.5, §13.8)
+      sceneTree.ts         scene hierarchy node model + derivation (camera + probe + section) (§5.5)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
     ui/
       CameraPanel.tsx      selected-camera editors
       ProbePanel.tsx       selected-probe position + per-camera visibility readout (§12.3)
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes groups, enable toggle, add "+" menu, delete context menu) (§5.5)
+      SectionPanel.tsx     selected-section orientation + range + aggregation editor (§13.6)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups, enable/visibility toggle, add "+" menu, delete context menu) (§5.5)
       OverlayControls.tsx  overlay visibility + mode + intensity scale + resolution slider
+      SectionHeatmapControls.tsx  global section colormap + legend (§13.6)
       StatsPanel.tsx       coverage summary readout
+      SectionStatsPanel.tsx  selected-section coverage stats (§13.7)
       RunBar.tsx           Run button + auto-run toggle + stale/backend indicators
 ```
 
 The app is a **three-column** flex layout (desktop only, §1):
 
 - **Left panel** — the scene inspector: the `SceneHierarchy` tree on top,
-  the selected entity's editor (`CameraPanel`/`ProbePanel`) below it. The
+  the selected entity's editor (`CameraPanel`/`ProbePanel`/`SectionPanel`) below it. The
   hierarchy grows to fill the column and scrolls internally; the detail panel
   sits below (and shows a placeholder when nothing is selected). A **draggable
   divider** between the two resizes the split: dragging sets the detail panel's
@@ -101,7 +106,8 @@ The app is a **three-column** flex layout (desktop only, §1):
   chosen split is remembered across reloads (localStorage).
 - **Center** — the 3D viewport with its overlaid toolbars (§2.4).
 - **Right sidebar** — the run/results controls: `RunBar`, `OverlayControls`,
-  `StatsPanel`.
+  `SectionHeatmapControls`, `StatsPanel`, and (when a section is selected)
+  `SectionStatsPanel` (§13.7).
 
 Both side columns share the same fixed width and are not collapsible; only the
 left column's internal hierarchy/detail split is adjustable (via the divider above).
@@ -140,17 +146,21 @@ Two toolbars overlay the 3D viewport itself (independent of the side panels):
     glyph for Global) and the tooltip names the current space and the action
     (e.g. "Local space — click for global"). Defaults to **Local**. Always
     enabled, independent of selection, and shared by both Move and Rotate.
-- **Top-right** — icon-button visibility toggles for the two viewport-only layers
+- **Top-right** — icon-button visibility toggles for the viewport-only layers
   that can clutter or obscure the scene:
   - **Overlay** — shows/hides the coverage volumetric overlay (the `visible`
     option, §9.2). This is the only control for overlay visibility — the
     sidebar has no separate checkbox for it.
+  - **Section** — a **master** show/hide-all for the section heatmap layer (§13):
+    off hides every section's heatmap; on shows each section per its own
+    per-section visibility checkbox (§13.6), parallel to how **Gizmos** relates
+    to per-camera state. Defaults to visible.
   - **Gizmos** — shows/hides all camera frustum gizmos (§5.3) at once.
     Independent of per-camera enable/disable (§5.4): a camera stays
     enabled/selectable from the camera list while its gizmo is hidden — it's
     just not drawn or clickable in the viewport. Defaults to visible.
 
-Both render as icon buttons (eye-style glyphs) in a top-right toolbar strip,
+These render as icon buttons (eye-style glyphs) in a top-right toolbar strip,
 highlighted ("active") when the corresponding layer is currently visible.
 
 **Two independent "WebGPU"s.** This render backend is distinct from the SDK's WebGPU
@@ -244,9 +254,11 @@ world space, meters) is produced by `buildRoom.ts` and used for **both**:
 ### 5.2 Editing interaction
 
 - **Select** a camera by clicking its frustum gizmo in the viewport or its camera
-  node in the scene hierarchy (§5.5). Selection is unified across cameras and probes
-  (§5.5, §12.4): the viewport pick returns the nearest hit across both, and selecting
-  a camera deselects any probe and vice-versa.
+  node in the scene hierarchy (§5.5). Selection is **unified** across cameras, probes,
+  and sections (§5.5, §12.4, §13.8): the viewport pick returns the nearest hit across
+  cameras and probes; sections are selected from the hierarchy only (their heatmap
+  plane is not pickable, §13.8). Selecting any one entity deselects the others, so only
+  one editor and at most one `TransformControls` gizmo is ever active.
 - **Deselect** by clicking empty space in the viewport (a click that hits no gizmo
   body — camera *or* probe — clears the current selection, detaching the
   TransformControls gizmo). Only a genuine click deselects: a click that concludes a
@@ -284,16 +296,18 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 (e.g. lights, meshes) in the future.
 
 - **Node model.** An app-level `SceneNode` discriminated union (`scene/sceneTree.ts`):
-  `{ kind: 'group' }`, `{ kind: 'camera' }`, and `{ kind: 'probe' }`. Nodes carry
-  hierarchy and identity only; entity payload stays in the canonical arrays — cameras
-  in `CameraConfig[]` (§5), probes in `Probe[]` (§12.1) — which a node references by
-  id. The tree is **derived** from those arrays via `buildSceneTree(cameras, probes)`
-  — no separate mutable node state.
+  `{ kind: 'group' }`, `{ kind: 'camera' }`, `{ kind: 'probe' }`, and
+  `{ kind: 'section' }`. Nodes carry hierarchy and identity only; entity payload stays
+  in the canonical arrays — cameras in `CameraConfig[]` (§5), probes in `Probe[]`
+  (§12.1), sections in `Section[]` (§13.1) — which a node references by id. The tree is
+  **derived** from those arrays via `buildSceneTree(cameras, probes, sections)` — no
+  separate mutable node state.
 - **Structure.** Auto-derived collapsible groups at the root, one per entity type:
-  a **"Cameras"** group over the camera nodes, and (when any probes exist) a
-  **"Probes"** group over the probe nodes. Groups are derived by entity type, not
-  user-created; further entity types appear as sibling groups. No reordering,
-  reparenting, or user-created groups (future).
+  a **"Cameras"** group over the camera nodes, (when any probes exist) a **"Probes"**
+  group over the probe nodes, and (when any sections exist) a **"Sections"** group over
+  the section nodes. Groups are derived by entity type, not user-created; further entity
+  types appear as sibling groups. No reordering, reparenting, or user-created groups
+  (future).
 - **Rows.** A generic `TreeRow` renders indentation, the expand caret, label,
   selection highlight, and click routing; kind-specific content is dispatched on
   `node.kind`. Camera rows keep the existing checkbox toggle (§5.4), coverage dot,
@@ -301,25 +315,30 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   plus a small **"seen by K" badge** — the count of enabled cameras that see the probe
   (`popcount` of its mask, §12.2), mirroring the camera coverage-rate badge; full
   detail lives in the probe panel (§12.3). The badge is omitted when there is no usable
-  mask (no run yet, or no coverage data at the point — §12.3). A group header shows a
-  caret, label, and passive child count.
-- **Selection.** The app holds a single **unified selection** — a camera *or* a probe
-  (`{ kind: 'camera' | 'probe'; id } | null`) — so selecting one deselects the other
-  and only one `TransformControls` gizmo is ever attached. Clicking a camera or probe
-  node selects that entity (drives the §5.2 panel and gizmo). Clicking a group header
-  only expands/collapses it and does not change the current selection.
+  mask (no run yet, or no coverage data at the point — §12.3). Section rows keep a
+  **visibility checkbox** (§13.6) and show a small badge with the section's
+  **orientation** and its **aggregated coverage** (e.g. `H · mean 47%`), mirroring the
+  camera coverage-rate badge; the coverage part is omitted when there is no usable run.
+  A group header shows a caret, label, and passive child count.
+- **Selection.** The app holds a single **unified selection** — a camera, a probe, *or*
+  a section (`{ kind: 'camera' | 'probe' | 'section'; id } | null`) — so selecting one
+  deselects the others and only one `TransformControls` gizmo is ever attached. Clicking
+  a camera, probe, or section node selects that entity (drives the §5.2 panel and
+  gizmo). Clicking a group header only expands/collapses it and does not change the
+  current selection.
 - **Adding entities.** The "Scene" panel header carries a **"+" icon button** at its
-  top-right that opens a small menu of entity types to create — **Camera** and
-  **Probe**. Creating an entity spawns it at the **workspace center** with the next
-  free id (`cam-N` / `probe-N`) and **auto-selects** it (its gizmo and panel are
-  immediately ready). Creating a camera marks the result stale (§8.1, §12.5); creating
-  a probe does not.
-- **Deleting entities.** **Right-clicking** a camera or probe row opens a context menu
-  whose action (for now) is **Delete**, which removes that entity. Deleting the
-  currently-selected entity clears the selection; deleting a camera marks the result
-  stale (§8.1). Group headers have no context menu.
+  top-right that opens a small menu of entity types to create — **Camera**, **Probe**,
+  and **Section**. Creating an entity spawns it at the **workspace center** with the
+  next free id (`cam-N` / `probe-N` / `section-N`) and **auto-selects** it (its gizmo
+  and panel are immediately ready). A new section defaults to **Horizontal** orientation
+  with its range spanning the collapse axis's **full (5 m-capped) extent** (§13.2). Creating a
+  camera marks the result stale (§8.1, §12.5); creating a probe or a section does not.
+- **Deleting entities.** **Right-clicking** a camera, probe, or section row opens a
+  context menu whose action (for now) is **Delete**, which removes that entity. Deleting
+  the currently-selected entity clears the selection; deleting a camera marks the result
+  stale (§8.1); deleting a probe or section does not. Group headers have no context menu.
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
-  (§13).
+  (§14).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
   `aria-expanded`/`aria-selected`; interaction is mouse-driven (no keyboard tree
   navigation yet).
@@ -384,7 +403,8 @@ color}` and draws it as additive volumetric fog. Its technical design (shader,
 chord-length math, compositing, tests) lives in
 [`volumetric_rendering.md`](./volumetric_rendering.md). **This section owns the
 visualization**: which voxels are fed to the renderer and how coverage data maps to
-each voxel's `intensity` and `color`. Domain terms are defined in §14.
+each voxel's `intensity` and `color`. Domain terms are defined in §15. A separate,
+flat per-slab coverage visualization — the **section heatmap** — is described in §13.
 
 Voxels are extracted from streamed `ChunkResult`s using
 `accessor(result).forEachLeaf((min, size, mask, valid) => …)` and fed into the
@@ -398,7 +418,7 @@ renderer's per-voxel inputs:
 
 - **Coverage** — the default. **Every valid voxel** is fed. `color` = the
   user-selected **overlay color** (§9.2); `intensity` = the voxel's **coverage
-  fraction** (`popcount(mask) / involvedCameraCount`, 0..1, §14). Well-covered
+  fraction** (`popcount(mask) / involvedCameraCount`, 0..1, §15). Well-covered
   regions glow bright/solid; weakly covered regions are faint; blind spots
   (fraction 0) contribute nothing and are invisible. This shows **where coverage
   is**.
@@ -443,7 +463,7 @@ From `CoverageSummary`:
 - `perCamera[]` — per-camera `coverageRate`, listed alongside each camera.
   Disabled cameras (§5.4) aren't sent to the engine, so they have no entry here.
 - `validVoxels`, `elapsedMs`.
-- **Blind-spot count** — number of valid voxels no enabled camera sees (§14),
+- **Blind-spot count** — number of valid voxels no enabled camera sees (§15),
   derived as `round(validVoxels × (1 − overallRate))`. Surfaced here numerically so
   the count is available regardless of the active visualization mode (§9.1).
 - Active **compute** backend (WebGPU / CPU, §3.2) and **render** backend
@@ -477,7 +497,7 @@ participate in `compute()`, and never change the coverage field.
   array in `App.tsx`, parallel to `cameras` (§5). A probe node in the hierarchy
   (§5.5) references its probe by id; the tree carries identity only, like camera
   nodes.
-- Probes are **not persisted** (§13).
+- Probes are **not persisted** (§14).
 
 ### 12.2 Visibility query (reuse of computed masks)
 
@@ -561,21 +581,170 @@ within one throttled run.
 
 ---
 
-## 13. Out of scope / future
+## 13. Sections (2D coverage heatmap)
+
+A **section** is a user-placed, axis-aligned **slab** of the workspace whose coverage
+is aggregated along one axis and drawn as a **2D heatmap** on a plane inside the
+viewport. Like probes (§12), sections are pure **observers**: they read the most
+recent completed `compute()` run's per-voxel data and never participate in `compute()`
+or change the coverage field. Unlike the volumetric overlay (§9) — one scene-wide 3D
+fog — a section is a flat, per-cell heatmap of a chosen slice, and several can coexist.
+
+### 13.1 Model & state
+
+- A section is
+  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, aggregation: 'mean' | 'max' | 'min' | 'blind', visible: boolean }`.
+  `min`/`max` are the slab bounds in world meters **along the collapse axis** (the
+  section normal), `min ≤ max`. Sections live in a canonical `sections: Section[]`
+  array in `App.tsx`, parallel to `cameras` (§5) and `probes` (§12.1). A section node in
+  the hierarchy (§5.5) references its section by id; the tree carries identity only.
+- The **collapse axis** and the two **in-plane axes** follow the orientation:
+  - `horizontal` — collapse **Y**, heatmap spans **X×Z** (a floor plan).
+  - `vertical-x` — collapse **X**, heatmap spans **Z×Y**.
+  - `vertical-z` — collapse **Z**, heatmap spans **X×Y**.
+- Sections are **not persisted** (§14). The global colormap and its legend (§13.5) are
+  shared by all sections; everything else in the record above is per-section.
+
+### 13.2 Orientation & range (the slab)
+
+- **Orientation** — a three-way selector (Horizontal / Vertical X / Vertical Z),
+  choosing the collapse axis per §13.1.
+- **Range** — a single **thickness** slider, **0.1–5 m**. Changing it keeps the slab's
+  **center** (`(min + max) / 2`) fixed and grows/shrinks `[min, max]` symmetrically around
+  it — the slab's *position* is only ever changed by the viewport drag (§13.8), never by
+  this control. A new section defaults to the collapse axis's full workspace-AABB extent,
+  **capped to 5 m** and centered on that axis (so on an axis whose extent already fits
+  within 5 m, the default is the true full extent; otherwise it's a 5 m slab centered on
+  the axis). The slab is `[min, max]` along the normal.
+- The heatmap draws on a single **plane at the range midpoint** `(min + max) / 2`,
+  perpendicular to the collapse axis. Two faint, **non-interactive outline planes** at
+  `min` and `max` mark the slab's extent so the aggregated volume is visible.
+
+### 13.3 Aggregation & cell mapping
+
+The slab is divided into **cells** — one per **voxel column**: the run of voxels along
+the collapse axis at a fixed in-plane grid position `(a, b)`, clipped to `[min, max]`.
+The heatmap texture holds one texel per cell, so its resolution tracks `voxelSize` (§6)
+and reuses the workspace grid's in-plane dimensions.
+
+- **Invalid / black rule.** If a column contains **any** invalid voxel within the range
+  (wall, box, outside the sampled region, or no retained chunk), the whole cell is
+  **black** — obstacle and out-of-range footprints read as solid black silhouettes.
+  Only **fully-valid** columns ("colored cells") are aggregated.
+- **Cell value.** For a colored cell, each voxel contributes its **coverage fraction**
+  (`popcount(mask) / involvedCameraCount`, 0..1, §15); the cell value is the
+  per-section **aggregation** over the column's voxels:
+  - `mean` — average coverage fraction (the section analog of the §9.1 Coverage mode).
+  - `max` — best-covered voxel in the column.
+  - `min` — worst-covered voxel in the column.
+  - `blind` — **blind-spot fraction**: the share of the column's voxels that are blind
+    (`mask == 0`).
+- **Bit order / enabled set.** Masks decode exactly as for probes (§12.2): bit *n* is
+  the *n*-th camera in the **enabled-camera list `setCameras()` received for the
+  retained run**, snapshotted alongside the chunks; `involvedCameraCount` is that run's
+  enabled count. All mask words are read (up to `MAX_CAMERAS` = 128).
+
+### 13.4 Data source & recompute coupling
+
+- Sections read the **retained `ChunkResult`s of the most recent completed run** — the
+  same per-voxel masks that back probes (§12.2), consumed as a third stream consumer
+  alongside the overlay (§9) and probe store. No fresh ray cast and no extra spatial
+  index; lookup uses the SDK accessor's own descent over the retained SVO.
+- Changing a section's orientation, range, aggregation, its visibility, or the global
+  colormap **re-aggregates client-side instantly** and **never** triggers `compute()`.
+  Adding, moving, resizing, or deleting a section never marks coverage stale (§8.1) —
+  like probes (§12.5), sections are not part of the coverage input.
+- Because the heatmap reflects a past run, when the live scene diverges from it
+  (results stale, §8.1) the heatmap is **dimmed** and the Section stats panel shows a
+  **stale hint** (§13.7), mirroring the overlay's stale dimming and the probe panel's
+  stale hint (§12.3). With Auto-run on (the default) this reconciles within one run.
+
+### 13.5 Rendering & colormap
+
+- Each visible section draws its heatmap on the midpoint plane (§13.2),
+  **double-sided**, with **nearest** texture filtering so cells read as crisp blocks
+  rather than a smoothed gradient.
+- **Colormap.** Colored cells map their value through a single **global perceptual
+  colormap — Turbo** (0 → dark blue, 1 → red). Turbo's blue low end stays visually
+  distinct from the **black** invalid cells, which matters because a valid-but-blind
+  column reads as value 0. Invalid cells are **pure black**. The `blind` aggregation is
+  drawn through the same colormap (0 → no blind voxels, 1 → all blind); its meaning is
+  labeled in the controls and Section stats so the shared legend stays unambiguous.
+
+### 13.6 Controls & visibility
+
+- **Per-section editor** — when a section is selected (§5.2), the left detail panel
+  shows a **`SectionPanel`** in place of the camera/probe panel: header
+  `Section — <id>`, the orientation selector, the thickness slider (§13.2), and the
+  aggregation selector.
+- **Global controls** — a **"Section heatmap"** block in the right sidebar
+  (`SectionHeatmapControls`) holds the shared **colormap** (Turbo) and its **0..1
+  legend / colorbar**.
+- **Visibility.** Each section's hierarchy row has a **checkbox** toggling that one
+  heatmap's visibility (the section analog of the camera enable checkbox, §5.4, but
+  purely visual — sections never compute). The viewport top-right toolbar's **Section**
+  toggle (§2.4) is a **master show/hide-all** for the whole layer, parallel to Gizmos:
+  master off hides every heatmap; master on shows each section per its own checkbox.
+
+### 13.7 Section stats (right sidebar)
+
+A **"Section stats"** block (`SectionStatsPanel`) in the right sidebar reports coverage
+numbers for the **currently-selected section** — the section analog of the coverage
+Stats panel (§10). Numbers are computed over the **colored cells** (invalid/black
+columns excluded) so they match what the heatmap shows, on the underlying **coverage
+fraction** independent of the active display aggregation (§13.3):
+
+- **Context** — orientation and range (`min`–`max` m).
+- **Cells** — total / valid (colored) / invalid (black).
+- **Section coverage** — mean coverage fraction over the colored cells (analog of
+  `overallRate`, §10).
+- **Blind cells** — count and % of colored cells whose whole column is blind (analog of
+  the blind-spot count, §10).
+- **Min / Max** — the lowest and highest colored-cell coverage.
+- **Per camera** — for each camera enabled in the retained run, the fraction of the
+  section's colored cells it sees in **≥ 1** voxel of the column (analog of the
+  per-camera `coverageRate`, §10), decoded from the snapshotted enabled-camera list.
+
+**States without usable data** — never shown as "0": no section selected → a
+placeholder; a section selected but no `compute()` completed → *"Run coverage to see
+section stats."*; retained run diverged from the live scene → the numbers plus a
+**stale hint** (§13.4).
+
+### 13.8 Viewport interaction & selection
+
+- A section is **selected from its hierarchy row** (§5.5); the **heatmap plane is not a
+  pick target**, so clicking it passes through to the cameras/probes (or empty space)
+  behind it and the viewport pick (§5.2) is unchanged.
+- Selecting a section attaches **`TransformControls` in translate mode only, constrained
+  to the collapse axis**: dragging slides the whole slab along its normal, moving `min`
+  and `max` together (fixed thickness) — the same "keep thickness, move center" relationship
+  the thickness slider (§13.2) mirrors in the other direction (keep center, change
+  thickness). Rotate mode and the space toggle (§2.4) are ignored while a section is
+  selected (a slab has no orientation to rotate, and translation is axis-locked).
+  **Thickness** is changed only via the thickness slider (§13.2), not in the viewport;
+  **position** is changed only via the viewport drag, not the panel.
+
+---
+
+## 14. Out of scope / future
 
 - Mode 2 (coverage-count thresholding), per-camera coverage isolation view.
 - Height-band / box sampling regions as a live control.
 - Scene editing (adding/removing boxes), mesh import.
-- Persisting camera / probe layouts.
+- Persisting camera / probe / section layouts.
 - Scene-hierarchy: further entity types (lights, meshes), user-created groups,
   reordering/reparenting, keyboard navigation.
 - Probes: richer per-camera detail (distance / angle), sub-voxel visibility (a true
   per-point ray cast instead of reusing the voxel mask), and sightlines for
   non-selected probes.
+- Sections: per-section colormaps, non-axis-aligned (oblique) sections, selecting a
+  section by clicking its heatmap plane, draggable slab bound handles (editing thickness
+  in the viewport), sub-voxel/continuous sampling instead of the voxel-column
+  aggregate, and persisting section layouts.
 
 ---
 
-## 14. Terminology
+## 15. Terminology
 
 Canonical domain language for the app. The rendering primitive that draws the
 visualization is described in
@@ -593,3 +762,16 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
 - **Blind spot** — a valid free-space voxel that no enabled camera sees (coverage
   fraction 0). Invisible in the Coverage mode; surfaced by the dedicated Blind spots
   mode (§9.1) and numerically in the stats panel (§10).
+- **Section** — a user-placed, axis-aligned slab of the workspace whose coverage is
+  aggregated along one axis into a 2D heatmap (§13). A pure observer, like a probe.
+- **Collapse axis** — a section's normal: the axis along which its voxels are
+  aggregated. The heatmap spans the other two (in-plane) axes (§13.1).
+- **Column** — the run of voxels along the collapse axis at one in-plane grid position,
+  clipped to the slab range; the unit aggregated into one heatmap **cell** (§13.3).
+- **Cell** — one texel of a section heatmap, the aggregate of one column. A **colored
+  cell** is a fully-valid column; a **black (invalid) cell** is a column containing any
+  invalid voxel (§13.3).
+- **Blind cell** — a colored cell whose entire column is blind (every voxel `mask ==
+  0`); counted in Section stats (§13.7).
+- **Section coverage** — the mean coverage fraction over a section's colored cells; the
+  section analog of overall coverage (§13.7).

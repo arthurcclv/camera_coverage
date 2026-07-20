@@ -37,19 +37,23 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
   `flaggedCameras`. `EngineState = { status, backend, errorMessage,
   flaggedCameras, sceneStats, samplingStats }`.
 - **`App.tsx` `handleRun`** re-inits only when voxel size changed, filters out
-  disabled cameras, builds a `WorkspaceGrid`, resets probe-visibility and overlay,
-  then `compute({ mode: 1, onChunkDone })` feeds each streamed chunk into **both**
-  the coverage overlay and the probe-visibility retention store.
+  disabled cameras, builds a `WorkspaceGrid`, resets probe-visibility, the
+  section-heatmap store, and overlay, then `compute({ mode: 1, onChunkDone })`
+  feeds each streamed chunk into **three** retained-data consumers: the coverage
+  overlay, the probe-visibility store, and the section-heatmap store.
 
 ## State management
 
-All state lives in `App.tsx` `useState` — cameras, probes, selection,
+All state lives in `App.tsx` `useState` — cameras, probes, sections, selection,
 `disabledIds`, `collapsedIds`, overlay options, `voxelSize` (debounced 250 ms),
-summary, stale flag, `autoRun`, transform mode/space, gizmo visibility, probe
-queries, `masksVersion`, inspector split height. Live values are mirrored into
-`useRef`s so the imperative Three.js callbacks read current state without
-re-subscribing. **Auto-run** is a 10 Hz `setInterval` that fires `handleRun` when
-inputs are stale and the engine is idle and error-free (spec §8.1 throttle).
+summary, stale flag, `autoRun`, transform mode/space, gizmo visibility,
+`sectionsVisible` (the viewport master toggle), probe queries, `masksVersion`,
+inspector split height. Per-section `SectionCellGrid`s are derived state
+(`useMemo` over `sections` + `masksVersion`), not stored directly. Live values
+are mirrored into `useRef`s so the imperative Three.js callbacks read current
+state without re-subscribing. **Auto-run** is a 10 Hz `setInterval` that fires
+`handleRun` when inputs are stale and the engine is idle and error-free (spec
+§8.1 throttle).
 
 ## Module responsibilities
 
@@ -71,12 +75,24 @@ inputs are stale and the engine is idle and error-free (spec §8.1 throttle).
 - `probeGizmos.ts` — per-probe octahedron markers + green sightlines to visible
   cameras.
 - `probeVisibility.ts` — `Probe` type, retained-chunk store, world-point → voxel
-  mask decode (pure `locateVoxel`).
+  mask decode (pure `locateVoxel` / `chunkLocalForGlobalIndex`, the latter shared
+  with the section column walker).
 - `volumetric.ts` — instanced-cube TSL volumetric renderer + pure-TS
   slab/chord/composite reference.
 - `coverageOverlay.ts` — maps `ChunkResult` leaves → volumetric voxels per mode;
-  hue helper.
-- `sceneTree.ts` — `SceneNode` union + `buildSceneTree` / `flattenVisible`.
+  hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`).
+- `sectionHeatmap.ts` — `Section` model, retained-chunk store, cross-chunk column
+  aggregation, Turbo-style colormap, texture-data + stats generation (§13), plus
+  `sectionPlaneRotation`/`collapseAxisNormalSign` (the plane-orientation math
+  `sectionGizmos.ts` renders with — kept here, not there, so it's unit-tested;
+  see DECISIONS.md's "mirrored along its in-plane Z axis" entry for why that
+  mattered). Pure data layer — no Three.js.
+- `sectionGizmos.ts` — per-section heatmap plane (`DataTexture`) + min/max bound
+  outlines + axis-constrained TransformControls target; consumes
+  `sectionHeatmap.ts`'s output (including its rotation/sign math), owns no
+  aggregation logic.
+- `sceneTree.ts` — `SceneNode` union (camera/probe/section) + `buildSceneTree` /
+  `flattenVisible`.
 - `viewportSelection.ts` — pure click-vs-drag + unified selection decision.
 - `transformSpace.ts` — pure local/global ↔ Three.js space mapping + icon/tooltip.
 
@@ -88,8 +104,14 @@ inputs are stale and the engine is idle and error-free (spec §8.1 throttle).
 - `SceneHierarchy.tsx` — tree view, add menu, delete context menu, per-kind rows.
 - `CameraPanel.tsx` — selected-camera position / Euler / FOV sliders.
 - `ProbePanel.tsx` — probe position sliders + visibility readout + stale hint.
+- `SectionPanel.tsx` — orientation / thickness / aggregation editor for the
+  selected section (thickness keeps the section's center fixed; position only
+  changes via the viewport drag).
 - `OverlayControls.tsx` — resolution slider + overlay mode / color / intensity.
+- `SectionHeatmapControls.tsx` — the shared Turbo legend/colorbar.
 - `StatsPanel.tsx` — coverage summary + compute/render backend readout.
+- `SectionStatsPanel.tsx` — selected-section coverage stats (colored-cell mean /
+  blind / min / max / per-camera).
 - `RunBar.tsx` — run button, auto-run, backend / stale / error indicators.
 - `Slider.tsx` — reusable labeled range slider (optional gradient track).
 - `leftPanelSplit.ts` — pure clamp + `localStorage` (de)serialization for the
@@ -97,8 +119,11 @@ inputs are stale and the engine is idle and error-free (spec §8.1 throttle).
 
 ## Selection model
 
-A single unified selection: `Selection = { kind: 'camera' | 'probe', id } |
-null` (`scene/viewportSelection.ts`). A viewport click picks the nearest hit
-across cameras and probes; drag-tail clicks (> 5 px travel) are ignored. Exactly
-one `TransformControls` gizmo is attached at a time; selecting a probe forces
-translate-only.
+A single unified selection: `Selection = { kind: 'camera' | 'probe' | 'section',
+id } | null` (`scene/viewportSelection.ts`). A viewport click picks the nearest
+hit across cameras and probes only — a section's heatmap plane is never a pick
+target (§13.8), so it's selected from its hierarchy row; drag-tail clicks (> 5 px
+travel) are ignored. Exactly one `TransformControls` gizmo is attached at a time;
+selecting a probe forces translate-only, selecting a section forces
+translate-only **and** constrains the visible handle to its collapse axis
+(`showX`/`showY`/`showZ` on `TransformControls`, reset to all-true otherwise).

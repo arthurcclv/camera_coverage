@@ -75,7 +75,8 @@ export function coverageFraction(camCount: number, involvedCameraCount: number):
   return Math.max(0, Math.min(1, camCount / denom));
 }
 
-function popcount32(x: number): number {
+/** Bit population count of a 32-bit mask word. Shared with `sectionHeatmap.ts` (§13.3). */
+export function popcount32(x: number): number {
   let v = x >>> 0;
   v = v - ((v >> 1) & 0x55555555);
   v = (v & 0x33333333) + ((v >> 2) & 0x33333333);

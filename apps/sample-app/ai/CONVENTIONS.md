@@ -59,7 +59,7 @@ functions.
 - **Tests target pure functions only** — never the React render tree or live
   Three.js/WebGPU. Existing suites: `sceneTree`, `coverageOverlay`,
   `transformSpace`, `volumetric`, `leftPanelSplit`, `probeVisibility`,
-  `viewportSelection`.
+  `viewportSelection`, `sectionHeatmap`.
 - **Every change ships with a test.** When adding behavior, extract the decision
   logic into a pure function in `scene/`/`ui/` and test that, rather than testing
   through React.

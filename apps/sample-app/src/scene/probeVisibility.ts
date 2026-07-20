@@ -39,19 +39,20 @@ export interface ProbeVisibilityOk {
 export type ProbeVisibilityResult = { status: 'no-data' } | ProbeVisibilityOk;
 
 /**
- * Map a world point to the retained voxel that contains it (spec §12.2):
- * world → global voxel `floor((p − worldMin) / voxelSize)` → `(chunkId, i, j, k)`.
- * Returns null when the point lies outside the logical voxel grid. Pure so it can
- * be unit-tested without a compute run.
+ * Map global voxel indices to the retained voxel that contains them:
+ * `(gi, gj, gk)` → `(chunkId, i, j, k)`. Returns null when a global index lies
+ * outside the logical voxel grid. Shared by {@link locateVoxel} (a single world
+ * point) and the section heatmap's column walker (`sectionHeatmap.ts`, spec
+ * §13.3), which advances `gi`/`gk` across chunk boundaries one voxel at a time.
+ * Pure so it can be unit-tested without a compute run.
  */
-export function locateVoxel(
+export function chunkLocalForGlobalIndex(
   grid: WorkspaceGrid,
-  p: Vec3,
+  gi: number,
+  gj: number,
+  gk: number,
 ): { chunkId: number; i: number; j: number; k: number } | null {
-  const { worldMin, voxelSize, gridDims, chunkVoxels, chunkCountX } = grid;
-  const gi = Math.floor((p[0] - worldMin[0]) / voxelSize);
-  const gj = Math.floor((p[1] - worldMin[1]) / voxelSize);
-  const gk = Math.floor((p[2] - worldMin[2]) / voxelSize);
+  const { gridDims, chunkVoxels, chunkCountX } = grid;
   if (
     gi < 0 || gj < 0 || gk < 0 ||
     gi >= gridDims[0] || gj >= gridDims[1] || gk >= gridDims[2]
@@ -67,6 +68,23 @@ export function locateVoxel(
     j: gj, // chunks span the full Y extent, so the base J is always 0
     k: gk - cz * vpcZ,
   };
+}
+
+/**
+ * Map a world point to the retained voxel that contains it (spec §12.2):
+ * world → global voxel `floor((p − worldMin) / voxelSize)` → `(chunkId, i, j, k)`.
+ * Returns null when the point lies outside the logical voxel grid. Pure so it can
+ * be unit-tested without a compute run.
+ */
+export function locateVoxel(
+  grid: WorkspaceGrid,
+  p: Vec3,
+): { chunkId: number; i: number; j: number; k: number } | null {
+  const { worldMin, voxelSize } = grid;
+  const gi = Math.floor((p[0] - worldMin[0]) / voxelSize);
+  const gj = Math.floor((p[1] - worldMin[1]) / voxelSize);
+  const gk = Math.floor((p[2] - worldMin[2]) / voxelSize);
+  return chunkLocalForGlobalIndex(grid, gi, gj, gk);
 }
 
 export class ProbeVisibility {
