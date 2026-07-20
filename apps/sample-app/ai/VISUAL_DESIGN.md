@@ -1,0 +1,147 @@
+# VISUAL_DESIGN.md — sample-app
+
+The app's visual language and UI guidelines. Values below are the ones actually
+in `src/index.css` and the `scene/*` gizmo modules — treat this as the reference
+when adding UI, and keep it in sync with the CSS. See
+[CONVENTIONS.md](./CONVENTIONS.md) for the code side and
+[DESIGN.md](./DESIGN.md) for product intent.
+
+The app is a **dark, dense, desktop tool UI**: a neutral slate palette, one blue
+accent, flat cards, and small semantic status colors — chrome that stays out of
+the way of the 3D viewport.
+
+## Color
+
+Defined ad hoc in `index.css` (no CSS custom properties yet — if you find
+yourself repeating a value, promote it to a `:root` variable).
+
+### Surfaces & structure
+| Role | Hex | Used for |
+|---|---|---|
+| App background | `#14161a` | `body`, number inputs |
+| Sidebar / left panel | `#1b1e24` | side columns |
+| Panel card | `#20242b` | `.panel` |
+| Row hover / menu | `#262b33` | tree/probe row hover, popover menus |
+| Border (subtle) | `#2a2e36` | panel/column borders, `.btn.secondary` |
+| Border / control (raised) | `#384252` | scrollbar thumb, divider grip, disabled btn, menu border |
+| Border hover | `#55606f` | scrollbar/divider hover |
+
+### Text
+| Role | Hex |
+|---|---|
+| Primary text | `#e6e8eb` |
+| Secondary body | `#c4cad3` / `#b7bec9` |
+| Muted label / hint | `#9aa3b0` / `#7c8592` |
+| Faint (caret, counts) | `#7a828f` |
+
+### Accent & semantic
+| Role | Hex | Notes |
+|---|---|---|
+| Primary accent (blue) | `#2c66c9` → hover `#3574e0` | buttons, active toggles, selection border `#3a5ba0`, selected row bg `#24304a` |
+| Accent text / numeric | `#7fb8e6` | value chips, spinner, CPU badge |
+| Success / visible (green) | `#4de08a` on `#123a2b` | WebGPU badge, "seen" marks, sightlines |
+| Warning / stale (amber) | `#ffb84d` on `#4a3410` | stale badge, warning hints |
+| Error / flagged (red) | `#ff7d7d` / `#ff9d9d` on `#4a1414` / `#3a1414` | flagged-camera badge, error banner |
+
+Semantic colors always pair a bright foreground with a dark, desaturated
+background of the same hue (the badge pattern) — reuse that pattern for any new
+status chip.
+
+### 3D viewport (Three.js gizmos, not CSS)
+| Element | Color | Source |
+|---|---|---|
+| Camera body (default) | `0x5da9e0` | `scene/cameraGizmos.ts` |
+| Camera frustum helper (default) | `0x7fb8e6`, opacity 0.85 | |
+| Camera selected (body + helper) | `0xffd23f` (yellow), body scaled ×1.4 | |
+| Camera flagged "inside geometry" | `0xe0524f` (red) | |
+| Camera disabled | body opacity 0.3, helper hidden | |
+| Probe marker | `0xff9d3f` (amber diamond) | `scene/probeGizmos.ts` |
+| Probe selected | `0xffd23f` | |
+| Sightline (probe → visible camera) | `0x4de08a` (green), opacity 0.9 | spec §12.4 |
+| Coverage overlay fog | user hue, default **red** (hue 0), `hsl(h,100%,50%)` | `scene/coverageOverlay.ts` |
+
+The overlay is intensity-modulated volumetric fog (a single instanced-cube TSL
+pass), not opaque voxels — see [DECISIONS.md](./DECISIONS.md). Hue is
+user-controlled via a rainbow spectrum slider; intensity encodes coverage
+fraction (Coverage mode) or is flat (Blind-spots mode).
+
+## Typography
+
+- **Font:** system stack — `-apple-system, BlinkMacSystemFont, 'Segoe UI',
+  Roboto, sans-serif`. No web fonts.
+- **Scale:** 11 px (chips, hints, badges, counts) · 12 px (default UI text,
+  labels, rows, stats) · 13 px (buttons) · 15 px (add-menu "+"). The viewport is
+  the focus, so body copy stays small and dense.
+- **Weights:** 400 body, 500 group rows, 600 emphasis (buttons, badges, panel
+  titles, `<b>` stat values).
+- **Panel titles:** 12 px, 600, `text-transform: uppercase`, `letter-spacing:
+  0.04em`, muted `#9aa3b0` — the standard section header.
+- **Numerics:** always `font-variant-numeric: tabular-nums` for values, rates,
+  and counts so digits don't jitter as they update.
+
+## Spacing, radius, layout
+
+- **Rhythm:** multiples of ~4/6 px. Column & panel padding `12px`; panel card
+  padding `10px 12px`; standard gap `12px` between panels, `6–8px` within rows.
+- **Radius:** `4px` (inputs, menu items, small chips) · `6px` (buttons, rows,
+  banners, menus) · `8px` (panel cards) · `999px` (pill badges).
+- **Layout:** three columns in a full-viewport flex row — left inspector `340px`
+  (hierarchy tree grows, object-detail panel below with a draggable `8px`
+  `row-resize` divider), center viewport (`flex: 1`, `min-width: 0`) with absolute
+  top-left and top-right icon toolbars, right sidebar `340px`. Side columns
+  scroll; the app shell never scrolls (`overflow: hidden`).
+- **Scrollbars:** custom 8 px thin thumbs (`#384252`, hover `#55606f`), WebKit via
+  `::-webkit-scrollbar` and Firefox via a `@supports` block — kept apart
+  deliberately (see the comment in `index.css`). Scroll containers reserve space
+  with `scrollbar-gutter: stable`.
+
+## Component patterns
+
+- **Panel** (`.panel`): the base card — dark surface, subtle border, 8 px radius,
+  an uppercase `.panel-title`, then rows. Scrolling panels keep the title fixed
+  and scroll only `.panel-body`.
+- **Row** (`.row`): label left, control right, space-between, 12 px label +
+  right-aligned `.value-chip`. `Slider.tsx` is the one reusable control (plain
+  range, plus a `.spectrum` rainbow variant with a white thumb for hue).
+- **Button** (`.btn`): blue primary; `.secondary` neutral; `.active` = blue
+  (toggle "on"); disabled goes flat grey. `.icon-btn` for the square viewport
+  toolbar buttons (inline SVG icons live in `App.tsx`). `.segmented` groups
+  buttons into an equal-width segmented control.
+- **Badge** (`.badge`): pill, 11 px/600 — variants `stale`, `backend-webgpu`,
+  `backend-cpu`, `flagged`.
+- **Tree row** (`.tree-row`): caret + colored `.dot` + ellipsized `.label` +
+  right-aligned rate/count; `.selected` (blue bg + border), `.disabled` (opacity
+  0.45), `.group` (lighter, 500). Probe dots are rotated squares (`.probe-dot`).
+- **Menu** (`.menu`): popover for the add-entity menu and right-click Delete
+  context menu — dark surface, shadow `0 6px 20px rgba(0,0,0,.45)`, blue hover.
+- **Spinner** (`.spinner`): 12 px ring, blue top border, 0.7 s spin.
+- **Error banner** (`.error-banner`): dark-red surface + border, for engine
+  errors.
+
+## Accessibility
+
+- **Semantic roles are expected on every interactive structure:** the hierarchy
+  is `role="tree"` / `treeitem` / `group` with `aria-expanded` / `aria-selected`;
+  menus use `role="menu"`; the overlay-mode control is a `radiogroup`; the panel
+  divider is a `separator`. Preserve these when editing components.
+- **Never encode state in color alone.** Camera state carries a text badge
+  ("inside geometry"), coverage carries a numeric % and count next to the dot,
+  probe visibility uses a ✓/– `.mark` glyph alongside color, and the compute/render
+  backend is a labeled badge. Keep the redundant text/glyph cue when you add color.
+- **Contrast:** primary text `#e6e8eb` on the dark surfaces is high-contrast;
+  muted greys (`#7c8592`, `#7a828f`) are for secondary/hint text only, not primary
+  reading content — don't push important text into them.
+- **Pointer targets:** thin visual affordances get larger hit areas (the 8 px
+  divider grip has a 3 px visible bar; the 5 px drag threshold in
+  `viewportSelection` prevents accidental deselect). Maintain that split when
+  adding thin controls.
+- **Motion:** the only animation is the spinner; keep new motion minimal and
+  non-essential.
+
+## When adding UI
+
+Reuse the palette and the `.panel` / `.row` / `.btn` / `.badge` / `Slider`
+primitives rather than introducing new colors, fonts, or bespoke controls. New
+semantic status → follow the bright-on-dark-same-hue badge pattern. If a value
+recurs, lift it into a `:root` custom property. There is no component library or
+CSS framework, by design — keep it that way.
