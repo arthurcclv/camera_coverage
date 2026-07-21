@@ -237,6 +237,14 @@ body {
   color: #9aa3b0;
   margin: 0 0 8px;
 }
+/* A subsection heading inside a panel body — separated from the controls above. */
+.panel-title.subhead {
+  margin-top: 12px;
+}
+/* A badge trailing the title text (e.g. a volume's zone tag). */
+.panel-title .badge {
+  margin-left: 8px;
+}
 
 .row {
   display: flex;
@@ -334,6 +342,12 @@ body {
 .btn.secondary.active:hover:not(:disabled) {
   background: #3574e0;
 }
+/* Full-width action button stacked in a panel (e.g. "Generate from geometry"). */
+.btn.block {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+}
 
 .badge {
   display: inline-flex;
@@ -410,12 +424,28 @@ body {
   font-weight: 500;
 }
 
+/* Shared by the leaf spacer (span) and the expand/collapse control (button);
+   the button carries a reset so it reads as a bare caret. */
 .tree-caret {
   width: 12px;
   flex-shrink: 0;
   text-align: center;
   color: #7a828f;
   font-size: 10px;
+}
+button.tree-caret {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  color: #7a828f;
+}
+button.tree-caret:focus-visible {
+  outline: 2px solid #3574e0;
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
 .tree-row .label {
@@ -457,6 +487,10 @@ body {
 }
 .stat-line b {
   color: #e6e8eb;
+}
+/* A stat line set off from the controls above it (e.g. the marked-voxels readout). */
+.stat-line.spaced {
+  margin-top: 8px;
 }
 
 .hint {
@@ -630,4 +664,36 @@ body {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* --- Sampling volumes & zones (sampling_volumes.md §4, §5, §6) ------------- */
+
+/* Neutral badge (zone reference on the VolumePanel header). */
+.badge.zone {
+  background: #1f2a44;
+  color: #7fb8e6;
+}
+
+/* Dropdown (volume zone reassign §6.1) + text input (editable zone name §6.2):
+   match the numeric-input chrome in .row. */
+.select,
+.text-input {
+  flex: 1;
+  min-width: 0;
+  background: #14161a;
+  color: #e6e8eb;
+  border: 1px solid #2a2e36;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+/* Zone rows: teal bullseye swatch; volume rows: teal square (mirrors the
+   viewport gizmo edge color). */
+.tree-row .dot.zone-dot {
+  background: #8bd0c0;
+}
+.tree-row .dot.volume-dot {
+  background: #8bd0c0;
+  border-radius: 2px;
 }

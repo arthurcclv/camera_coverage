@@ -6,6 +6,66 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## "% of full" denominator comes from full-volume sampling, not the run
+
+Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §6.3/§7.4.
+When zones are active the SDK samples only the boxes' neighborhood (§7.1), so the
+retained `ChunkResult`s never cover the workspace — deriving the "% of full"
+denominator from them would divide the marked count by the box union (≈100%,
+inverting the tool's payoff). Instead `EngineState.fullValidVoxels` snapshots the
+SDK's full-volume `SamplingStats.validVoxels` at init/re-init; the box-restricted
+`setSampling` of a run updates `samplingStats` but deliberately leaves it untouched.
+`computeZoneCoverage` therefore reports only what its chunks support (per-zone +
+enabled-union summaries) and no longer a workspace-full count. **Why:** re-init is
+exactly when the workspace valid count can change (`voxelSize` or geometry), so the
+snapshot is always current, and no separate full-workspace pass is needed.
+
+## Sampling volumes & zones with zero SDK changes
+
+Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md). The
+region-of-interest tool (editable oriented boxes grouped into zones, each with its
+own coverage results) lives **entirely in the app** — the SDK was not touched.
+Three choices make that possible:
+
+**Narrow SDK to box AABBs; refine rotation client-side.** The run derives the SDK's
+existing `{ type: 'box' }` sampling regions from the **world AABB** of every
+volume's OBB (`regionsFromVolumes`), so the SDK computes only the boxes'
+neighborhood. Rotation — the one thing the SDK's axis-aligned regions can't express
+— is an app-side filter (`makeMarkedFilter` → `inVolume`) over the retained masks.
+**Why:** no new OBB region type in the engine; a rotated box costs only a small
+conservative over-compute that the client-side marked-set filter trims back. (An
+OBB SDK region is explicitly out of scope, `sampling_volumes.md` §13.)
+
+**Per-zone results are client-side aggregation, one compute pass.** Visibility is
+per-voxel and grouping-independent, so a single `setSampling`/`compute` over the
+union of all volumes suffices; `ZoneCoverageStore` (a 4th retained-chunk consumer
+alongside the overlay, probe, and section stores) partitions the masks per zone in
+one pass (`computeZoneCoverage`), producing per-zone summaries plus the
+enabled-zones union. **Why:** zones never change *what* the SDK computes, only *how*
+the app aggregates it — so adding/renaming zones or enabling/disabling a zone is
+client-side only, no recompute.
+
+**App-side BVH from public SDK building blocks.** "Generate from geometry" builds
+its own BVH from the merged collision mesh via the already-exported `cleanMesh` +
+`buildBvh` (identical to the worker's — both use the default TS kernels) and walks
+the flattened node array (`extractZonesAndVolumes`) to cut zones/volumes at two
+levels. **Why:** nothing new crosses the worker boundary; the walk is pure and
+unit-testable against a hand-built node array. The built BVH is cached per `room`
+and re-cut on level-slider changes without rebuilding.
+
+**Enabled zones are a client-side re-filter, not a recompute.** Each zone has an
+independent `enabled` flag (like cameras/sections), decoupled from selection; the
+visualized marked set is the **union of the enabled zones**. The overlay
+(`setMarkedFilter`) and section columns (a `marked` predicate → black outside the
+union) filter the retained masks by that union; the main StatsPanel overrides its
+coverage numbers from the enabled-union summary. Enabling/disabling or renaming a
+zone never marks the result stale — only volume/zone-membership/`useZones` changes
+set the sampling-dirty flag that triggers a re-run. (This replaced an earlier
+single-"focus" model — All-zones-or-one — with the more consistent multi-enable
+union.)
+
+---
+
 ## Removed the "Reset to default" button
 
 **Decision:** dropped the in-app Reset action from `SceneFileControls`/§14.7 —

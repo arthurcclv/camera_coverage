@@ -20,6 +20,7 @@ import {
   DEFAULT_INTENSITY_SCALE,
   type Voxel,
 } from './volumetric.ts';
+import type { MarkedFilter } from './samplingVolumes.ts';
 
 export type OverlayMode = 'coverage' | 'blindspots';
 
@@ -88,6 +89,9 @@ export class CoverageOverlay {
   readonly object = this.renderer.object;
 
   private leaves: Leaf[] = [];
+  // The marked-set filter (union of enabled zones' volumes, `sampling_volumes.md`
+  // §7.3); `null` ⇒ draw every valid voxel (full-volume fallback).
+  private markedFilter: MarkedFilter | null = null;
   private opts: OverlayOptions = {
     visible: true,
     mode: 'coverage',
@@ -99,6 +103,17 @@ export class CoverageOverlay {
   /** Clear accumulated chunks before starting a new compute() run. */
   reset(): void {
     this.leaves = [];
+    this.rebuild();
+  }
+
+  /**
+   * Restrict which voxels are drawn to the marked set — the union of enabled
+   * zones' volumes (`sampling_volumes.md` §7.3). `null` restores full-volume
+   * drawing. A pure client-side re-filter of the retained leaves — no recompute —
+   * so enabling/disabling a zone is instant.
+   */
+  setMarkedFilter(filter: MarkedFilter | null): void {
+    this.markedFilter = filter;
     this.rebuild();
   }
 
@@ -138,6 +153,9 @@ export class CoverageOverlay {
     const color = hueToRgb(this.opts.overlayHue);
     const voxels: Voxel[] = [];
     for (const leaf of this.leaves) {
+      // Marked-set filter (§7.3): outside the enabled zones' union, the voxel
+      // reads as unmarked and the overlay draws nothing there.
+      if (this.markedFilter && !this.markedFilter(leaf.cx, leaf.cy, leaf.cz)) continue;
       const center: [number, number, number] = [leaf.cx, leaf.cy, leaf.cz];
       if (this.opts.mode === 'blindspots') {
         // Only blind spots (no enabled camera sees them); fixed full intensity

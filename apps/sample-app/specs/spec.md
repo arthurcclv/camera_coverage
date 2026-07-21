@@ -74,7 +74,9 @@ apps/sample-app/
       coverageOverlay.ts   maps ChunkResult coverage → volumetric voxels (§9)
       sectionHeatmap.ts    retained ChunkResults → per-section column aggregate + heatmap texture + stats (§13)
       sectionGizmos.ts     per-section heatmap plane + faint bound outlines + transform target (§13.5, §13.8)
-      sceneTree.ts         scene hierarchy node model + derivation (camera + probe + section) (§5.5)
+      sceneTree.ts         scene hierarchy node model + derivation (camera + probe + section + zone/volume) (§5.5)
+      samplingVolumes.ts   zone/volume model + OBB math + BVH seeding + marked filter + per-zone aggregation (sampling_volumes.md)
+      samplingVolumeGizmos.ts  per-volume wireframe boxes + transform target (sampling_volumes.md §5)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
@@ -82,9 +84,12 @@ apps/sample-app/
       CameraPanel.tsx      selected-camera editors
       ProbePanel.tsx       selected-probe position + per-camera visibility readout (§12.3)
       SectionPanel.tsx     selected-section orientation + range + aggregation editor (§13.6)
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups, enable/visibility toggle, add "+" menu, delete context menu) (§5.5)
+      VolumePanel.tsx      selected-volume position/rotation/size + zone reassign (sampling_volumes.md §6.1)
+      ZonePanel.tsx        selected-zone name + member count + per-zone stats (sampling_volumes.md §6.2)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones umbrella, enable/visibility toggle, add "+" menu, delete context menu) (§5.5)
       OverlayControls.tsx  overlay visibility + mode + intensity scale + resolution slider
       SectionHeatmapControls.tsx  global section colormap + legend (§13.6)
+      SamplingVolumeControls.tsx  zone tool: useZones toggle, generate, levels, marked readout (sampling_volumes.md §6.3)
       StatsPanel.tsx       coverage summary readout
       SectionStatsPanel.tsx  selected-section coverage stats (§13.7)
       RunBar.tsx           Run button + auto-run toggle + stale/backend indicators
@@ -95,7 +100,7 @@ The app is a **three-column** flex layout (desktop only, §1):
 - **Left panel** — the scene inspector: a **"Scene"** panel with **Load**/**Save**
   scene-file actions (`SceneFileControls`, §14.7) at the top, then the
   `SceneHierarchy` tree, then the selected entity's editor
-  (`CameraPanel`/`ProbePanel`/`SectionPanel`) below it. The
+  (`CameraPanel`/`ProbePanel`/`SectionPanel`/`VolumePanel`/`ZonePanel`) below it. The
   hierarchy grows to fill the column and scrolls internally; the detail panel
   sits below (and shows a placeholder when nothing is selected). A **draggable
   divider** between the two resizes the split: dragging sets the detail panel's
@@ -108,8 +113,9 @@ The app is a **three-column** flex layout (desktop only, §1):
   chosen split is remembered across reloads (localStorage).
 - **Center** — the 3D viewport with its overlaid toolbars (§2.4).
 - **Right sidebar** — the run/results controls: `RunBar`, `OverlayControls`,
-  `SectionHeatmapControls`, `StatsPanel`, and (when a section is selected)
-  `SectionStatsPanel` (§13.7).
+  `SectionHeatmapControls`, `SamplingVolumeControls` (the zone tool, above the
+  stats since it governs the coverage denominator), `StatsPanel`, and (when a
+  section is selected) `SectionStatsPanel` (§13.7).
 
 Both side columns share the same fixed width and are not collapsible; only the
 left column's internal hierarchy/detail split is adjustable (via the divider above).
@@ -136,10 +142,13 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
 
 Two toolbars overlay the 3D viewport itself (independent of the side panels):
 
-- **Top-left** — transform controls for the selected camera (§5.2):
-  - Transform **mode** toggle: **Move** / **Rotate** icon buttons, switching
-    `TransformControls`'s mode. Each shows its name as a tooltip on hover and
-    is highlighted ("active") when its mode is current.
+- **Top-left** — transform controls for the selected entity (§5.2):
+  - Transform **mode** toggle: **Move** / **Rotate** / **Scale** icon buttons,
+    switching `TransformControls`'s mode. Each shows its name as a tooltip on hover
+    and is highlighted ("active") when its mode is current. **Scale** is a
+    volume-only mode (`sampling_volumes.md` §5) — enabled only while a sampling
+    volume is selected (cameras keep Move/Rotate; probes and sections are
+    Move-only); on any other selection it falls back to Move.
   - Transform **space** toggle: a single icon button that flips the gizmo
     between **Local** and **Global** space (`TransformControls.setSpace`,
     mapping Local→`'local'` and Global→`'world'`). In Local space the gizmo
@@ -154,8 +163,8 @@ Two toolbars overlay the 3D viewport itself (independent of the side panels):
     option, §9.2). This is the only control for overlay visibility — the
     sidebar has no separate checkbox for it.
   - **Section** — a **master** show/hide-all for the section heatmap layer (§13):
-    off hides every section's heatmap; on shows each section per its own
-    per-section visibility checkbox (§13.6), parallel to how **Gizmos** relates
+    off hides every section's heatmap; on shows each **enabled** section per its own
+    per-section enabled checkbox (§13.6), parallel to how **Gizmos** relates
     to per-camera state. Defaults to visible.
   - **Gizmos** — shows/hides all camera frustum gizmos (§5.3) at once.
     Independent of per-camera enable/disable (§5.4): a camera stays
@@ -264,12 +273,13 @@ for **both**:
 
 - **Select** a camera by clicking its frustum gizmo in the viewport or its camera
   node in the scene hierarchy (§5.5). Selection is **unified** across cameras, probes,
-  and sections (§5.5, §12.4, §13.8): the viewport pick returns the nearest hit across
-  cameras and probes; sections are selected from the hierarchy only (their heatmap
-  plane is not pickable, §13.8). Selecting any one entity deselects the others, so only
-  one editor and at most one `TransformControls` gizmo is ever active.
+  sections, zones, and volumes (§5.5, §12.4, §13.8; `sampling_volumes.md` §4.1, §5): the
+  viewport pick returns the nearest hit across cameras, probes, and **volumes**; sections
+  and zones are selected from the hierarchy only (they have no pickable viewport body).
+  Selecting any one entity deselects the others, so only one editor and at most one
+  `TransformControls` gizmo is ever active.
 - **Deselect** by clicking empty space in the viewport (a click that hits no gizmo
-  body — camera *or* probe — clears the current selection, detaching the
+  body — camera, probe, *or* volume — clears the current selection, detaching the
   TransformControls gizmo). Only a genuine click deselects: a click that concludes a
   camera-orbit or TransformControls drag (pointer moved past a small threshold between
   press and release) is ignored and leaves the selection unchanged.
@@ -308,18 +318,23 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 (e.g. lights, meshes) in the future.
 
 - **Node model.** An app-level `SceneNode` discriminated union (`scene/sceneTree.ts`):
-  `{ kind: 'group' }`, `{ kind: 'camera' }`, `{ kind: 'probe' }`, and
-  `{ kind: 'section' }`. Nodes carry hierarchy and identity only; entity payload stays
-  in the canonical arrays — cameras in `CameraConfig[]` (§5), probes in `Probe[]`
-  (§12.1), sections in `Section[]` (§13.1) — which a node references by id. The tree is
-  **derived** from those arrays via `buildSceneTree(cameras, probes, sections)` — no
-  separate mutable node state.
+  `{ kind: 'group' }`, `{ kind: 'camera' }`, `{ kind: 'probe' }`, `{ kind: 'section' }`,
+  and — for the region-of-interest tool — `{ kind: 'zone' }` (**both selectable and
+  expandable**) and `{ kind: 'volume' }` (a selectable leaf). Nodes carry hierarchy and
+  identity only; entity payload stays in the canonical arrays — cameras in
+  `CameraConfig[]` (§5), probes in `Probe[]` (§12.1), sections in `Section[]` (§13.1),
+  zones in `Zone[]`, volumes in `SamplingVolume[]` (`sampling_volumes.md` §2) — which a
+  node references by id. The tree is **derived** via
+  `buildSceneTree(cameras, probes, sections, zones, volumes)` — no separate mutable node
+  state.
 - **Structure.** Auto-derived collapsible groups at the root, one per entity type:
   a **"Cameras"** group over the camera nodes, (when any probes exist) a **"Probes"**
-  group over the probe nodes, and (when any sections exist) a **"Sections"** group over
-  the section nodes. Groups are derived by entity type, not user-created; further entity
-  types appear as sibling groups. No reordering, reparenting, or user-created groups
-  (future).
+  group over the probe nodes, (when any sections exist) a **"Sections"** group, and
+  (when any **zone** exists — including an empty one) a passive **"Zones"** umbrella
+  over **selectable+expandable zone nodes**, each holding its volume children
+  (`sampling_volumes.md` §4.1) — the first
+  user-created sub-groups (all other groups are auto-derived by type). No reordering,
+  reparenting beyond this one level (future).
 - **Rows.** A generic `TreeRow` renders indentation, the expand caret, label,
   selection highlight, and click routing; kind-specific content is dispatched on
   `node.kind`. Camera rows keep the existing checkbox toggle (§5.4), coverage dot,
@@ -327,28 +342,34 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   plus a small **"seen by K" badge** — the count of enabled cameras that see the probe
   (`popcount` of its mask, §12.2), mirroring the camera coverage-rate badge; full
   detail lives in the probe panel (§12.3). The badge is omitted when there is no usable
-  mask (no run yet, or no coverage data at the point — §12.3). Section rows keep a
-  **visibility checkbox** (§13.6) and show a small badge with the section's
+  mask (no run yet, or no coverage data at the point — §12.3). Section rows keep an
+  **enabled checkbox** ("Enable/Disable section", §13.6) and show a small badge with the section's
   **orientation** and its **aggregated coverage** (e.g. `H · mean 47%`), mirroring the
   camera coverage-rate badge; the coverage part is omitted when there is no usable run.
   A group header shows a caret, label, and passive child count.
-- **Selection.** The app holds a single **unified selection** — a camera, a probe, *or*
-  a section (`{ kind: 'camera' | 'probe' | 'section'; id } | null`) — so selecting one
-  deselects the others and only one `TransformControls` gizmo is ever attached. Clicking
-  a camera, probe, or section node selects that entity (drives the §5.2 panel and
-  gizmo). Clicking a group header only expands/collapses it and does not change the
-  current selection.
-- **Adding entities.** The "Hierarchy" panel header carries a **"+" icon button** at its
-  top-right that opens a small menu of entity types to create — **Camera**, **Probe**,
-  and **Section**. Creating an entity spawns it at the **workspace center** with the
-  next free id (`cam-N` / `probe-N` / `section-N`) and **auto-selects** it (its gizmo
-  and panel are immediately ready). A new section defaults to **Horizontal** orientation
-  with its range spanning the collapse axis's **full (5 m-capped) extent** (§13.2). Creating a
-  camera marks the result stale (§8.1, §12.5); creating a probe or a section does not.
-- **Deleting entities.** **Right-clicking** a camera, probe, or section row opens a
-  context menu whose action (for now) is **Delete**, which removes that entity. Deleting
-  the currently-selected entity clears the selection; deleting a camera marks the result
-  stale (§8.1); deleting a probe or section does not. Group headers have no context menu.
+- **Selection.** The app holds a single **unified selection** — a camera, probe,
+  section, zone, *or* volume (`{ kind: 'camera' | 'probe' | 'section' | 'zone' |
+  'volume'; id } | null`) — so selecting one deselects the others and only one
+  `TransformControls` gizmo is ever attached. Clicking a camera, probe, section, or
+  volume node selects that entity (drives the §5.2 panel and gizmo). Clicking a **zone**
+  node selects it (drives its panel); its own caret handles expand/collapse. A zone's
+  row **enabled checkbox** (independent per zone, decoupled from selection) controls
+  whether it contributes to the visualized marked set (`sampling_volumes.md` §7.3).
+  Clicking a group header (incl. the "Zones" umbrella) only expands/collapses it and
+  does not change the selection.
+- **Adding entities.** The "Hierarchy" panel header **"+" menu** creates — **Camera**,
+  **Probe**, **Section**, **Zone**, or **Volume**. Cameras/probes/sections spawn at the
+  **workspace center** with the next free id and auto-select. A **Zone** creates an empty
+  zone (`zone-N`); a **Volume** adds a 1 m cube at the center into the target zone
+  (creating "Zone 1" first if none exist) (`sampling_volumes.md` §4.1). Creating a camera
+  or a volume marks the result stale (§8.1); creating a probe, section, or empty zone
+  does not.
+- **Deleting entities.** **Right-clicking** a camera, probe, section, zone, or volume row
+  opens a context menu whose action is **Delete**. Deleting a **zone** removes it **and
+  all its volumes**. Deleting the selected
+  entity clears the selection; deleting a camera, a volume, or a non-empty zone marks the
+  result stale (§8.1); deleting a probe, section, or empty zone does not. Group headers
+  have no context menu.
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
   (§15).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
@@ -371,9 +392,24 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 
 ## 7. Sampling
 
-- Fixed to full volume: `setSampling({ regions: [{ type: 'full' }] })`.
-- Coverage is evaluated over every valid (free-space `EMPTY_SPACE`) voxel in the
-  room. Voxels inside walls/boxes are invalid and excluded by the SDK.
+- **Default (no zones):** the full volume,
+  `setSampling({ regions: [{ type: 'full' }] })`. Coverage is evaluated over every
+  valid (free-space `EMPTY_SPACE`) voxel in the room; voxels inside walls/boxes are
+  invalid and excluded by the SDK.
+- **Zone-driven (region of interest):** when the user enables zones and at least
+  one **sampling volume** exists, the run derives the SDK regions from the world
+  AABB of every volume — `setSampling({ regions: volumes.map(v => ({ type: 'box',
+  … })) })` — narrowing the sampled set below the full volume. This is the
+  region-of-interest tool: user-editable oriented boxes grouped into **zones**,
+  seeded from the scene BVH, each zone reporting its own coverage results.
+
+> **Companion spec.** The full behavior of sampling volumes & zones — the model,
+> BVH seeding, per-zone aggregation, the enabled-zones marked set, and hierarchy/panel
+> integration — lives in [`sampling_volumes.md`](./sampling_volumes.md), which is
+> the source of truth for that feature. The edits it made to this document (this
+> section among them) keep the two consistent (its §12 table). When zones are
+> disabled or no volume exists, sampling falls back to the full volume above, so
+> scenes that don't use the tool are unchanged.
 
 ---
 
@@ -405,6 +441,15 @@ resolution slider:
 Camera edits require only `setCameras(...)` + `compute(...)` (no re-init).
 Resolution edits require the full re-init pipeline (§6).
 
+**Sampling (zone/volume) edits** feed `setSampling`, so a **sampling-dirty** flag
+is set whenever the volume set, a volume transform, its `zoneId`, a non-empty
+zone's deletion, or the `useZones` toggle changes. A run applies
+`setSampling(regionsFromVolumes())` when the flag is set (or after a re-init reset
+it), then `setCameras` + `compute`, then recomputes per-zone summaries — no re-init
+needed (only a `voxelSize` change requires that). **Enabling/disabling a zone** or
+**renaming a zone** never marks stale — they re-filter/relabel client-side
+(`sampling_volumes.md` §7.2, §7.3, §8).
+
 ---
 
 ## 9. Coverage visualization
@@ -422,6 +467,12 @@ Voxels are extracted from streamed `ChunkResult`s using
 `accessor(result).forEachLeaf((min, size, mask, valid) => …)` and fed into the
 renderer incrementally as chunks arrive. Each valid leaf becomes one voxel at world
 position `min` with edge `size`; `intensity` and `color` depend on the active mode.
+
+When zones are active, the overlay is filtered to the **enabled-zones marked set**
+(`sampling_volumes.md` §7.3): a valid voxel is drawn only if its center falls in the
+union of the enabled zones' volumes; voxels outside it read as unmarked and draw
+nothing. Enabling/disabling a zone re-filters the retained leaves client-side, with
+no recompute.
 
 ### 9.1 Visualization modes
 
@@ -480,6 +531,13 @@ From `CoverageSummary`:
   the count is available regardless of the active visualization mode (§9.1).
 - Active **compute** backend (WebGPU / CPU, §3.2) and **render** backend
   (WebGPU / WebGL2, §2.3), plus current `voxelSize` / voxel count.
+
+When zones are active, these numbers reflect the **enabled-zones union** rather than
+the full volume (`sampling_volumes.md` §7.4): `overallRate`, `perCamera`,
+`validVoxels`, and the blind-spot count come from the client-side aggregation over
+the union of the enabled zones, keeping the SDK summary's elapsed time. Per-zone
+numbers are also shown on each zone row and in the `ZonePanel`. With zones off, the
+panel is exactly as above (the SDK summary).
 
 ---
 
@@ -606,7 +664,7 @@ fog — a section is a flat, per-cell heatmap of a chosen slice, and several can
 ### 13.1 Model & state
 
 - A section is
-  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, aggregation: 'mean' | 'max' | 'min' | 'blind', visible: boolean }`.
+  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, aggregation: 'mean' | 'max' | 'min' | 'blind', enabled: boolean }`.
   `min`/`max` are the slab bounds in world meters **along the collapse axis** (the
   section normal), `min ≤ max`. Sections live in a canonical `sections: Section[]`
   array in `App.tsx`, parallel to `cameras` (§5) and `probes` (§12.1). A section node in
@@ -642,9 +700,11 @@ The heatmap texture holds one texel per cell, so its resolution tracks `voxelSiz
 and reuses the workspace grid's in-plane dimensions.
 
 - **Invalid / black rule.** If a column contains **any** invalid voxel within the range
-  (wall, box, outside the sampled region, or no retained chunk), the whole cell is
-  **black** — obstacle and out-of-range footprints read as solid black silhouettes.
-  Only **fully-valid** columns ("colored cells") are aggregated.
+  (wall, box, outside the sampled region, or no retained chunk) — **or**, when zones are
+  active, any voxel **outside the enabled-zones union** (`sampling_volumes.md` §7.3) — the
+  whole cell is **black**. Obstacle, out-of-range, and out-of-marked-set footprints read as
+  solid black silhouettes; only columns **fully inside** the marked set (and valid)
+  ("colored cells") are aggregated. Enabling/disabling a zone re-filters client-side, no recompute.
 - **Cell value.** For a colored cell, each voxel contributes its **coverage fraction**
   (`popcount(mask) / involvedCameraCount`, 0..1, §16); the cell value is the
   per-section **aggregation** over the column's voxels:
@@ -664,7 +724,7 @@ and reuses the workspace grid's in-plane dimensions.
   same per-voxel masks that back probes (§12.2), consumed as a third stream consumer
   alongside the overlay (§9) and probe store. No fresh ray cast and no extra spatial
   index; lookup uses the SDK accessor's own descent over the retained SVO.
-- Changing a section's orientation, range, aggregation, its visibility, or the global
+- Changing a section's orientation, range, aggregation, its enabled state, or the global
   colormap **re-aggregates client-side instantly** and **never** triggers `compute()`.
   Adding, moving, resizing, or deleting a section never marks coverage stale (§8.1) —
   like probes (§12.5), sections are not part of the coverage input.
@@ -675,7 +735,7 @@ and reuses the workspace grid's in-plane dimensions.
 
 ### 13.5 Rendering & colormap
 
-- Each visible section draws its heatmap on the midpoint plane (§13.2),
+- Each enabled section draws its heatmap on the midpoint plane (§13.2),
   **double-sided**, with **nearest** texture filtering so cells read as crisp blocks
   rather than a smoothed gradient.
 - **Colormap.** Colored cells map their value through a single **global perceptual
@@ -685,7 +745,7 @@ and reuses the workspace grid's in-plane dimensions.
   drawn through the same colormap (0 → no blind voxels, 1 → all blind); its meaning is
   labeled in the controls and Section stats so the shared legend stays unambiguous.
 
-### 13.6 Controls & visibility
+### 13.6 Controls & enablement
 
 - **Per-section editor** — when a section is selected (§5.2), the left detail panel
   shows a **`SectionPanel`** in place of the camera/probe panel: header
@@ -694,11 +754,13 @@ and reuses the workspace grid's in-plane dimensions.
 - **Global controls** — a **"Section heatmap"** block in the right sidebar
   (`SectionHeatmapControls`) holds the shared **colormap** (Turbo) and its **0..1
   legend / colorbar**.
-- **Visibility.** Each section's hierarchy row has a **checkbox** toggling that one
-  heatmap's visibility (the section analog of the camera enable checkbox, §5.4, but
-  purely visual — sections never compute). The viewport top-right toolbar's **Section**
-  toggle (§2.4) is a **master show/hide-all** for the whole layer, parallel to Gizmos:
-  master off hides every heatmap; master on shows each section per its own checkbox.
+- **Enabled.** Each section's hierarchy row has an **enabled checkbox**
+  ("Enable/Disable section") toggling that one heatmap on/off (the section analog of
+  the camera enable checkbox, §5.4, and the unified `onToggleEnabled` handler, but
+  purely visual — sections never compute); a disabled section dims in the tree. The
+  viewport top-right toolbar's **Section** toggle (§2.4) is a **master show/hide-all**
+  for the whole layer, parallel to Gizmos: master off hides every heatmap; master on
+  shows each **enabled** section.
 
 ### 13.7 Section stats (right sidebar)
 
@@ -752,7 +814,10 @@ scale, panel split) are **not** part of the scene file — they remain app-local
 ### 14.1 Unified `Scene` model
 
 - All scene entities live in a single in-memory `Scene`:
-  `{ geometry: GeometryObject[], cameras: CameraConfig[], probes: Probe[], sections: Section[] }`.
+  `{ geometry: GeometryObject[], cameras: CameraConfig[], probes: Probe[],
+  sections: Section[], zones: Zone[], volumes: SamplingVolume[], useZones: boolean }`.
+  `defaultScene()` seeds `zones`/`volumes` **empty** and `useZones` **false**
+  (`sampling_volumes.md` §9).
 - The startup scene is **constructed in code** as a `Scene` from today's defaults
   (`buildRoom.ts` geometry + `cameras/defaults.ts`); no folder is opened at boot (the
   File System Access API requires a user gesture). `defaultScene()` is the single
@@ -776,8 +841,9 @@ scale, panel split) are **not** part of the scene file — they remain app-local
 
 ### 14.3 `scene.json` format
 
-- **`formatVersion`** — integer, currently `1`. An unknown/newer version is rejected
-  (§14.8).
+- **`formatVersion`** — integer, currently `2` (bumped from 1 for zones/volumes).
+  The reader **accepts 1 and 2**; a v1 file reads with empty `zones`/`volumes` and
+  `useZones` false. A version **> 2** is rejected (§14.8).
 - **Coordinates / units** — world space, meters, right-handed **Y-up**: the same frame
   as the SDK and glTF. Rotations are **quaternions `[x, y, z, w]`** throughout (matching
   `CameraConfig.rotation`, §5.1).
@@ -788,14 +854,23 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   - `box` — axis-aligned obstacle (`min`, `max`) in the object's local frame.
   - `gltf` — a `src` reference (§14.2) to a GLB/GLTF asset.
 - **`cameras`** / **`probes`** / **`sections`** — the serialized `CameraConfig[]`,
-  `Probe[]`, and `Section[]` (§5, §12.1, §13.1).
+  `Probe[]`, and `Section[]` (§5, §12.1, §13.1). A section's per-entity flag is
+  **`enabled`** (renamed from the legacy `visible`, which the reader still accepts
+  for back-compat, §14.8).
+- **`zones`** / **`volumes`** / **`useZones`** — the region-of-interest state
+  (`sampling_volumes.md` §9). Each zone is `{ id, name, enabled }` (the user-edited
+  `name` round-trips; blank/missing reads as the default `Zone N`; `enabled` defaults
+  to `true` when absent); each volume is `{ id, zoneId, position, rotation, size }`.
+  `useZones` is a persisted analysis setting (default `false` when absent).
+  Generation levels are **not** persisted (tool state).
 - **Ids** are unique within each category; duplicates are rejected (§14.8).
 
 Sketch:
 
 ```json
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
+  "useZones": false,
   "geometry": [
     { "kind": "room", "halfX": 10, "halfZ": 10, "height": 6, "thickness": 0.3,
       "position": [0,0,0], "rotation": [0,0,0,1], "scale": [1,1,1] },
@@ -811,7 +886,12 @@ Sketch:
   "probes": [ { "id": "probe-1", "position": [0,1,0] } ],
   "sections": [
     { "id": "section-1", "orientation": "horizontal", "min": 0, "max": 2,
-      "aggregation": "mean", "visible": true }
+      "aggregation": "mean", "enabled": true }
+  ],
+  "zones": [ { "id": "zone-1", "name": "West wing", "enabled": true } ],
+  "volumes": [
+    { "id": "volume-1", "zoneId": "zone-1",
+      "position": [3,1.5,-2], "rotation": [0,0.259,0,0.966], "size": [4,3,6] }
   ]
 }
 ```
@@ -820,7 +900,10 @@ Sketch:
 
 1. User picks a folder (`showDirectoryPicker`).
 2. Read and parse `scene.json`, then **validate all-or-nothing** — schema,
-   `formatVersion`, id uniqueness, object `kind`s, and asset-path safety (§14.2).
+   `formatVersion`, id uniqueness (per category), object `kind`s, asset-path safety
+   (§14.2), and — for sampling — every `volume.zoneId` referencing an existing zone
+   and `size` components > 0 (`sampling_volumes.md` §9). Import replaces
+   `zones`/`volumes`/`useZones` too (each zone's `enabled` flag comes from the file).
 3. Load **every** referenced GLB/GLTF via `GLTFLoader` (from `three/examples`, no new
    npm dependency). Any missing-file or parse failure aborts the import.
 4. Only if all of the above succeed: build the merged collision mesh (§14.6),
@@ -870,9 +953,10 @@ Sketch:
 |---|---|
 | User cancels the folder picker | no-op, scene unchanged |
 | `scene.json` missing / not JSON / schema-invalid | abort, keep current scene, show error |
-| Unknown / newer `formatVersion` | abort, keep current scene, show error |
-| Duplicate id within a category | abort, keep current scene, show error |
+| Newer `formatVersion` (> 2) | abort, keep current scene, show error (v1 and v2 are accepted) |
+| Duplicate id within a category (incl. zones, volumes) | abort, keep current scene, show error |
 | Unknown geometry `kind` | abort, keep current scene, show error |
+| `volume.zoneId` referencing no zone, or non-positive `size` | abort, keep current scene, show error |
 | Unsafe `src` (absolute / URL / `..` / outside folder) | abort, keep current scene, show error |
 | Referenced GLB missing or fails to parse | abort, keep current scene, show error |
 | Export write denied / fails | keep in-memory scene, show error |
@@ -891,7 +975,11 @@ Sketch:
 ## 15. Out of scope / future
 
 - Mode 2 (coverage-count thresholding), per-camera coverage isolation view.
-- Height-band / box sampling regions as a live control.
+- Height-band sampling regions as a live control. (Box/oriented-box sampling
+  regions grouped into zones **shipped** as sampling volumes & zones —
+  [`sampling_volumes.md`](./sampling_volumes.md); its §13 lists that feature's own
+  out-of-scope items — subtractive volumes, an OBB SDK region, multi-zone
+  membership, simultaneous multi-zone overlays, per-zone colors.)
 - In-app scene *editing* — adding/removing/transforming geometry through the UI. The
   scene file (§14) can carry imported geometry (including GLB meshes), but authoring it
   in-app is out of scope.
@@ -940,3 +1028,17 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
   0`); counted in Section stats (§13.7).
 - **Section coverage** — the mean coverage fraction over a section's colored cells; the
   section analog of overall coverage (§13.7).
+- **Sampling volume** — a user-placed, editable **oriented box**. Unlike a
+  probe/section observer, it is **coverage input**: it changes which voxels are
+  counted. Belongs to exactly one zone (`sampling_volumes.md` §2, §10).
+- **Zone** — a named unit of sampling volumes with its **own coverage results**,
+  aggregated over the union of its volumes (`M(z)`). The primary region-of-interest
+  unit; a first-class, selectable+expandable scene-hierarchy entity.
+- **Marked set** — the valid voxels counted for a given aggregation: `M(z)` for a
+  zone, the union of the enabled zones for the visualized set, or all valid voxels
+  when zones are inactive.
+- **Enabled zone** — a zone whose per-zone `enabled` flag is on, so it contributes
+  to the visualized marked set (the union of enabled zones drives the overlay,
+  sections, and the main stats panel). Toggled per zone from its hierarchy row
+  checkbox, decoupled from selection; toggling is a client-side re-filter, not a
+  recompute (`sampling_volumes.md` §7.3).

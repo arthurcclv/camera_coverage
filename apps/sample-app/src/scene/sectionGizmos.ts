@@ -207,7 +207,7 @@ export class SectionGizmoSet {
 
     entry.attachTarget.position.set(...pos);
 
-    const visible = masterVisible && section.visible;
+    const visible = masterVisible && section.enabled;
     entry.group.visible = visible;
     entry.attachTarget.visible = visible;
     if (!visible) return;

@@ -7,15 +7,17 @@
  * drag-tail click and for the resulting selection, kept pure so it can be
  * unit-tested without a React/DOM harness (test/viewportSelection.test.ts).
  *
- * Selection is unified across cameras, probes, and sections (spec §5.5, §12.4,
- * §13.8): a single value picks out one entity, so selecting one deselects the
- * others. A section, however, is only ever reachable via `hit` from the
- * hierarchy (§13.8, its heatmap plane isn't pickable) — this module doesn't care
- * which caller produced `hit`, it just applies the click-vs-drag decision.
+ * Selection is unified across cameras, probes, sections, zones, and volumes
+ * (spec §5.5, §12.4, §13.8; `sampling_volumes.md` §4.1): a single value picks out
+ * one entity, so selecting one deselects the others. Sections and zones are only
+ * ever reachable via `hit` from the hierarchy (their bodies aren't pickable);
+ * cameras, probes, and volumes are also pickable in the viewport. This module
+ * doesn't care which caller produced `hit`, it just applies the click-vs-drag
+ * decision.
  */
 
-/** The unified selection: a camera, a probe, a section, or nothing (spec §5.5). */
-export type Selection = { kind: 'camera' | 'probe' | 'section'; id: string } | null;
+/** The unified selection: one entity across every type, or nothing (spec §5.5). */
+export type Selection = { kind: 'camera' | 'probe' | 'section' | 'zone' | 'volume'; id: string } | null;
 
 /** Screen-space pointer position in CSS pixels. */
 export interface PointerPos {

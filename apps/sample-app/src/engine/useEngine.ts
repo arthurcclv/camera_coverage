@@ -12,6 +12,7 @@ import {
   type CameraConfig,
   type ComputeOptions,
   type CoverageSummary,
+  type SamplingRegion,
   type SamplingStats,
   type SceneMesh,
   type SceneStats,
@@ -27,6 +28,14 @@ export interface EngineState {
   flaggedCameras: Set<string>;
   sceneStats: SceneStats | null;
   samplingStats: SamplingStats | null;
+  /**
+   * Valid voxels in the whole workspace — the SDK's full-volume
+   * `SamplingStats.validVoxels`, captured at init/re-init and NOT overwritten by
+   * the box-restricted `setSampling` of an active run (whose regions cover only
+   * the boxes' neighborhood, `sampling_volumes.md` §7.1). This is the "% of full"
+   * denominator (§6.3, §7.4).
+   */
+  fullValidVoxels: number | null;
 }
 
 export interface InitResult {
@@ -42,6 +51,7 @@ const INITIAL_STATE: EngineState = {
   flaggedCameras: new Set(),
   sceneStats: null,
   samplingStats: null,
+  fullValidVoxels: null,
 };
 
 export function useEngine() {
@@ -102,6 +112,9 @@ export function useEngine() {
           errorMessage: null,
           sceneStats,
           samplingStats,
+          // Full-volume sampling ⇒ this is the whole-workspace valid count (the
+          // "% of full" denominator). Box-restricted runs won't overwrite it.
+          fullValidVoxels: samplingStats.validVoxels,
         }));
         return { backend, sceneStats, samplingStats };
       } catch (err) {
@@ -125,6 +138,25 @@ export function useEngine() {
     }
   }, []);
 
+  /**
+   * Update the sampled region set (`sampling_volumes.md` §8). Mirrors
+   * `setCameras`: no re-init needed (only a `voxelSize` change requires that,
+   * spec §6), so volume edits are as cheap as camera edits. Returns the
+   * `SamplingStats` (valid-voxel count for the new set), or null on failure.
+   */
+  const setSampling = useCallback(async (regions: SamplingRegion[]): Promise<SamplingStats | null> => {
+    const client = clientRef.current;
+    if (!client) return null;
+    try {
+      const samplingStats = await client.setSampling({ regions });
+      setState((s) => ({ ...s, samplingStats }));
+      return samplingStats;
+    } catch (err) {
+      setState((s) => ({ ...s, status: 'error', errorMessage: describeError(err) }));
+      return null;
+    }
+  }, []);
+
   const compute = useCallback(
     async (opts: ComputeOptions): Promise<CoverageSummary | null> => {
       const client = clientRef.current;
@@ -143,8 +175,8 @@ export function useEngine() {
   );
 
   return useMemo(
-    () => ({ state, initAndLoad, setCameras, compute }),
-    [state, initAndLoad, setCameras, compute],
+    () => ({ state, initAndLoad, setCameras, setSampling, compute }),
+    [state, initAndLoad, setCameras, setSampling, compute],
   );
 }
 

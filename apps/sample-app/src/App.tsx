@@ -20,6 +20,20 @@ import {
   type SectionCellGrid,
 } from './scene/sectionHeatmap.ts';
 import { CoverageOverlay, DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
+import { SamplingVolumeGizmoSet } from './scene/samplingVolumeGizmos.ts';
+import {
+  buildSceneBvh,
+  DEFAULT_BOX_LEVEL,
+  DEFAULT_ZONE_LEVEL,
+  defaultZoneName,
+  extractZonesAndVolumes,
+  makeMarkedFilter,
+  minVolumeSize,
+  regionsFromVolumes,
+  ZoneCoverageStore,
+  type SamplingVolume,
+  type Zone,
+} from './scene/samplingVolumes.ts';
 import {
   DEFAULT_TRANSFORM_SPACE,
   spaceIconKind,
@@ -54,6 +68,10 @@ import { StatsPanel } from './ui/StatsPanel.tsx';
 import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
 import { RunBar } from './ui/RunBar.tsx';
 import { SceneFileControls } from './ui/SceneFileControls.tsx';
+import { VolumePanel } from './ui/VolumePanel.tsx';
+import { ZonePanel } from './ui/ZonePanel.tsx';
+import { SamplingVolumeControls } from './ui/SamplingVolumeControls.tsx';
+import type { Bvh } from '@linkervision/camera-coverage-sdk';
 
 const CHUNK_SIZE_XZ = 10;
 const DEFAULT_VOXEL_SIZE = 0.5;
@@ -139,6 +157,18 @@ function RotateIcon() {
   );
 }
 
+// Scale transform-mode icon (`sampling_volumes.md` §5): a corner-drag arrow with
+// a small box, shown only while a volume is selected.
+function ScaleIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 3 14 10" />
+      <polyline points="21 9 21 3 15 3" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
 // Transform-space toggle icons (spec §2.4): a cube for local space (gizmo aligned
 // to the camera's own axes), a globe for global/world space.
 function BoxIcon() {
@@ -188,6 +218,9 @@ export function App() {
   const engine = useEngine();
   const probeVisibility = useMemo(() => new ProbeVisibility(), []);
   const sectionHeatmapStore = useMemo(() => new SectionHeatmapStore(), []);
+  // Fourth retained-run consumer (`sampling_volumes.md` §7.2): per-zone coverage
+  // aggregation over the same masks that back probes and sections.
+  const zoneCoverageStore = useMemo(() => new ZoneCoverageStore(), []);
 
   const workspaceCenter = useMemo<Vec3>(
     () => [
@@ -201,6 +234,28 @@ export function App() {
   const [cameras, setCameras] = useState<CameraConfig[]>(initialScene.cameras);
   const [probes, setProbes] = useState<Probe[]>(initialScene.probes);
   const [sections, setSections] = useState<Section[]>(initialScene.sections);
+  // Sampling zones/volumes (`sampling_volumes.md` §2). `useZones` gates whether
+  // they restrict coverage; each zone's `enabled` flag picks what the visualizers
+  // show (the union of enabled zones, §7.3). The generation levels (§3.4) are tool
+  // state and don't persist.
+  const [zones, setZones] = useState<Zone[]>(initialScene.zones);
+  const [volumes, setVolumes] = useState<SamplingVolume[]>(initialScene.volumes);
+  const [useZones, setUseZones] = useState(initialScene.useZones);
+  const [zoneLevel, setZoneLevel] = useState(DEFAULT_ZONE_LEVEL);
+  const [boxLevel, setBoxLevel] = useState(DEFAULT_BOX_LEVEL);
+
+  // Zones restrict coverage only when enabled and at least one volume exists
+  // (`sampling_volumes.md` §2.2); otherwise the full-volume fallback applies.
+  const samplingActive = useZones && volumes.length > 0;
+  // The marked-set filter for the overlay/sections (§7.3): union of enabled
+  // zones' volumes, or null ⇒ full volume. A pure client-side re-filter —
+  // recomputed on volume/zone (enable) change without any recompute.
+  const markedFilter = useMemo(
+    () => makeMarkedFilter(samplingActive, volumes, zones),
+    [samplingActive, volumes, zones],
+  );
+  // Enabled zone ids — for dimming volumes of disabled zones in the viewport (§5).
+  const enabledZoneIds = useMemo(() => new Set(zones.filter((z) => z.enabled).map((z) => z.id)), [zones]);
   // Master show/hide-all for the section heatmap layer (viewport toolbar, spec §2.4).
   const [sectionsVisible, setSectionsVisible] = useState(true);
   const [selection, setSelection] = useState<Selection>(() =>
@@ -220,7 +275,7 @@ export function App() {
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [stale, setStale] = useState(false);
   const [autoRun, setAutoRun] = useState(true);
-  const [transformMode, setTransformMode] = useState<'translate' | 'rotate'>('translate');
+  const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [transformSpace, setTransformSpace] = useState<TransformSpace>(DEFAULT_TRANSFORM_SPACE);
   const [gizmosVisible, setGizmosVisible] = useState(true);
   // Per-probe visibility queries against the retained run (spec §12.2), keyed by
@@ -241,6 +296,8 @@ export function App() {
   const selectedCameraId = selection?.kind === 'camera' ? selection.id : null;
   const selectedProbeId = selection?.kind === 'probe' ? selection.id : null;
   const selectedSectionId = selection?.kind === 'section' ? selection.id : null;
+  const selectedZoneId = selection?.kind === 'zone' ? selection.id : null;
+  const selectedVolumeId = selection?.kind === 'volume' ? selection.id : null;
 
   // Left-column hierarchy/detail split (spec §2.2): null = detail at natural
   // height until first dragged; a number pins its height (hierarchy takes the
@@ -290,6 +347,7 @@ export function App() {
   const gizmosRef = useRef<CameraGizmoSet | null>(null);
   const probeGizmosRef = useRef<ProbeGizmoSet | null>(null);
   const sectionGizmosRef = useRef<SectionGizmoSet | null>(null);
+  const volumeGizmosRef = useRef<SamplingVolumeGizmoSet | null>(null);
   const overlayRef = useRef<CoverageOverlay | null>(null);
   // Mirrors `room` for the mount effect's async IIFE (spec §2.3), which reads
   // whatever geometry is current by the time the viewport finishes setting up,
@@ -311,6 +369,25 @@ export function App() {
   probesRef.current = probes;
   const sectionsRef = useRef(sections);
   sectionsRef.current = sections;
+  const volumesRef = useRef(volumes);
+  volumesRef.current = volumes;
+  const zonesRef = useRef(zones);
+  zonesRef.current = zones;
+  const enabledZoneIdsRef = useRef(enabledZoneIds);
+  enabledZoneIdsRef.current = enabledZoneIds;
+  const samplingActiveRef = useRef(samplingActive);
+  samplingActiveRef.current = samplingActive;
+  const voxelSizeRef = useRef(voxelSize);
+  voxelSizeRef.current = voxelSize;
+  const markedFilterRef = useRef(markedFilter);
+  markedFilterRef.current = markedFilter;
+  // Set whenever the sampled region set changes (volume add/delete/transform,
+  // `zoneId`, non-empty zone deletion, `useZones`), so the next run re-applies
+  // `setSampling` (`sampling_volumes.md` §8). Cleared inside `handleRun`.
+  const samplingDirtyRef = useRef(false);
+  // Cached app-side BVH (§3.1), keyed on the `room` it was built from; rebuilt
+  // lazily on the next Generate after a geometry swap (§11).
+  const bvhRef = useRef<{ room: GeometryBuild; bvh: Bvh } | null>(null);
   const disabledIdsRef = useRef(disabledIds);
   disabledIdsRef.current = disabledIds;
   const selectionRef = useRef(selection);
@@ -340,10 +417,23 @@ export function App() {
   // section visibility checkbox. ---------------------------------------------
   const sectionCellGrids = useMemo(() => {
     const map = new Map<string, SectionCellGrid | null>();
-    for (const s of sections) map.set(s.id, sectionHeatmapStore.computeCells(s));
+    // The marked filter blacks out columns outside the enabled zones' union
+    // (spec §7.3); a volume/zone-enable change re-filters here, no recompute.
+    for (const s of sections) map.set(s.id, sectionHeatmapStore.computeCells(s, markedFilter));
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sections, masksVersion, sectionHeatmapStore]);
+  }, [sections, masksVersion, sectionHeatmapStore, markedFilter]);
+
+  // --- per-zone coverage aggregation (`sampling_volumes.md` §7.2): recomputed
+  // from the retained run whenever zone membership/enabled or a new run replaces
+  // the retained masks. Per-zone stats are broken out for every zone; the
+  // enabled-union drives the overlay/main stats (§7.3, §7.4). --------------------
+  const zoneCoverage = useMemo(
+    () => zoneCoverageStore.compute(zones, volumes),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [zones, volumes, masksVersion, zoneCoverageStore],
+  );
+  const enabledUnionSummary = zoneCoverage?.enabledUnion ?? null;
 
   // --- Three.js scene: created once, torn down on unmount ------------------
   // WebGPURenderer.init() is async (spec §2.3), so setup runs in an async IIFE
@@ -364,6 +454,7 @@ export function App() {
       const gizmos = new CameraGizmoSet();
       const probeGizmos = new ProbeGizmoSet();
       const sectionGizmos = new SectionGizmoSet();
+      const volumeGizmos = new SamplingVolumeGizmoSet();
       const overlay = new CoverageOverlay();
       // The geometry group itself is added by the dedicated sync effect below
       // (keyed on `[room, viewportReady]`) once this flips true, so the initial
@@ -371,22 +462,30 @@ export function App() {
       viewport.scene.add(gizmos.group);
       viewport.scene.add(probeGizmos.group);
       viewport.scene.add(sectionGizmos.group);
+      viewport.scene.add(volumeGizmos.group);
       viewport.scene.add(overlay.object);
 
       viewportRef.current = viewport;
       gizmosRef.current = gizmos;
       probeGizmosRef.current = probeGizmos;
       sectionGizmosRef.current = sectionGizmos;
+      volumeGizmosRef.current = volumeGizmos;
       overlayRef.current = overlay;
       setRenderBackend(viewport.renderBackend);
       setViewportReady(true);
 
       // Apply any option/camera/probe/section state that changed before setup completed.
       overlay.setOptions(overlayOptionsRef.current);
+      overlay.setMarkedFilter(markedFilterRef.current);
       const sel = selectionRef.current;
       gizmos.update(camerasRef.current, sel?.kind === 'camera' ? sel.id : null, engineFlaggedRef.current, disabledIdsRef.current);
       gizmos.group.visible = gizmosVisibleRef.current;
       probeGizmos.update(probesRef.current, sel?.kind === 'probe' ? sel.id : null);
+      volumeGizmos.update(
+        volumesRef.current,
+        sel?.kind === 'volume' ? sel.id : null,
+        enabledZoneIdsRef.current,
+      );
       sectionGizmos.update(
         sectionsRef.current,
         new Map(),
@@ -401,7 +500,7 @@ export function App() {
       viewport.transformControls.showX = initialCollapseAxis === null || initialCollapseAxis === 0;
       viewport.transformControls.showY = initialCollapseAxis === null || initialCollapseAxis === 1;
       viewport.transformControls.showZ = initialCollapseAxis === null || initialCollapseAxis === 2;
-      attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, sel);
+      attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, volumeGizmos, sel);
 
       const raycaster = new THREE.Raycaster();
       const pointer = new THREE.Vector2();
@@ -418,13 +517,19 @@ export function App() {
         pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
         pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(pointer, viewport.camera);
-        // Nearest hit across cameras and probes (spec §5.2, §12.4). Hidden camera
-        // gizmos are not clickable (spec §2.4).
+        // Nearest hit across cameras, probes, and volumes (spec §5.2, §12.4;
+        // `sampling_volumes.md` §5). Hidden camera gizmos are not clickable (spec
+        // §2.4). Zones/sections have no viewport body.
+        const candidates: { sel: Selection; distance: number }[] = [];
         const camHit = gizmosVisibleRef.current ? gizmos.pickHit(raycaster) : null;
+        if (camHit) candidates.push({ sel: { kind: 'camera', id: camHit.id }, distance: camHit.distance });
         const probeHit = probeGizmos.pickHit(raycaster);
-        let hit: Selection = null;
-        if (camHit && (!probeHit || camHit.distance <= probeHit.distance)) hit = { kind: 'camera', id: camHit.id };
-        else if (probeHit) hit = { kind: 'probe', id: probeHit.id };
+        if (probeHit) candidates.push({ sel: { kind: 'probe', id: probeHit.id }, distance: probeHit.distance });
+        const volumeHit = volumeGizmos.pickHit(raycaster);
+        if (volumeHit) candidates.push({ sel: { kind: 'volume', id: volumeHit.id }, distance: volumeHit.distance });
+        const hit: Selection = candidates.length
+          ? candidates.reduce((best, c) => (c.distance < best.distance ? c : best)).sel
+          : null;
         setSelection((prev) => selectionAfterClick(prev, hit, down, { x: ev.clientX, y: ev.clientY }));
       };
       viewport.renderer.domElement.addEventListener('pointerdown', onPointerDown);
@@ -445,7 +550,20 @@ export function App() {
           const position = probeGizmos.readPosition(sel.id);
           if (!position) return;
           setProbes((prev) => prev.map((p) => (p.id === sel.id ? { ...p, position } : p)));
-        } else {
+        } else if (sel.kind === 'volume') {
+          // Translate/rotate/scale a volume; scale is floored per axis (≥ a voxel)
+          // so a box never degenerates (`sampling_volumes.md` §5). Marks stale
+          // (§4.2) via the volumes effect below.
+          const t = volumeGizmos.readTransform(sel.id);
+          if (!t) return;
+          const minSize = minVolumeSize(voxelSizeRef.current);
+          const size: Vec3 = [
+            Math.max(minSize, t.size[0]),
+            Math.max(minSize, t.size[1]),
+            Math.max(minSize, t.size[2]),
+          ];
+          setVolumes((prev) => prev.map((v) => (v.id === sel.id ? { ...v, position: t.position, rotation: t.rotation, size } : v)));
+        } else if (sel.kind === 'section') {
           // Axis-constrained slide: the target's position on the collapse axis is
           // the slab's new midpoint; thickness (max - min) stays fixed (spec §13.8).
           // Never marks results stale (spec §13.4).
@@ -470,11 +588,13 @@ export function App() {
         gizmos.dispose();
         probeGizmos.dispose();
         sectionGizmos.dispose();
+        volumeGizmos.dispose();
         viewport.dispose();
         viewportRef.current = null;
         gizmosRef.current = null;
         probeGizmosRef.current = null;
         sectionGizmosRef.current = null;
+        volumeGizmosRef.current = null;
         overlayRef.current = null;
         setViewportReady(false);
       };
@@ -514,20 +634,35 @@ export function App() {
     sectionGizmosRef.current?.update(sections, sectionCellGrids, sectionsVisible, stale, room.worldMin, room.worldMax);
   }, [sections, sectionCellGrids, sectionsVisible, stale, room]);
 
+  // --- push volume state into gizmos; dim volumes of disabled zones (spec §5) --
+  useEffect(() => {
+    volumeGizmosRef.current?.update(volumes, selectedVolumeId, enabledZoneIds);
+  }, [volumes, selectedVolumeId, enabledZoneIds]);
+
+  // --- push the marked-set filter into the overlay (spec §7.3): a pure
+  // client-side re-filter of the retained leaves, no recompute -----------------
+  useEffect(() => {
+    overlayRef.current?.setMarkedFilter(markedFilter);
+  }, [markedFilter]);
+
   // --- TransformControls attachment + mode per selection kind (spec §12.4, §13.8) ---
   useEffect(() => {
     const viewport = viewportRef.current;
     const gizmos = gizmosRef.current;
     const probeGizmos = probeGizmosRef.current;
     const sectionGizmos = sectionGizmosRef.current;
-    if (!viewport || !gizmos || !probeGizmos || !sectionGizmos) return;
-    attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, selection);
+    const volumeGizmos = volumeGizmosRef.current;
+    if (!viewport || !gizmos || !probeGizmos || !sectionGizmos || !volumeGizmos) return;
+    attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, volumeGizmos, selection);
   }, [selection]);
 
   useEffect(() => {
-    // A probe is a point and a section slides along one axis — both are
-    // translate only, ignoring the rotate mode (spec §12.4, §13.8).
-    const mode = selection?.kind === 'probe' || selection?.kind === 'section' ? 'translate' : transformMode;
+    // A probe is a point and a section slides along one axis — both translate
+    // only (spec §12.4, §13.8). Scale is a volume-only mode (`sampling_volumes.md`
+    // §5); on a non-volume selection it falls back to translate.
+    let mode: 'translate' | 'rotate' | 'scale' = transformMode;
+    if (selection?.kind === 'probe' || selection?.kind === 'section') mode = 'translate';
+    else if (transformMode === 'scale' && selection?.kind !== 'volume') mode = 'translate';
     viewportRef.current?.transformControls.setMode(mode);
   }, [transformMode, selection]);
 
@@ -571,6 +706,16 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameras, debouncedVoxelSize, disabledIds]);
 
+  // --- volumes/useZones are coverage input (`sampling_volumes.md` §4.2, §8):
+  // any change marks the result stale *and* the sampled region set dirty, so the
+  // next run re-applies `setSampling`. Adding an empty zone or renaming a zone
+  // touches only `zones`, so neither marks stale (§4.2). --------------------------
+  useEffect(() => {
+    samplingDirtyRef.current = true;
+    if (hasRunOnce) setStale(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [volumes, useZones]);
+
   // --- probe visibility queries (spec §12.2): recompute for every probe when a
   // probe moves or a completed run replaces the retained masks -----------------
   useEffect(() => {
@@ -602,13 +747,23 @@ export function App() {
     probeGizmos.setSightlines(probe.position, targets);
   }, [selection, probeQueries, probes, cameras]);
 
-  const handleToggleEnabled = useCallback((id: string) => {
-    setDisabledIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  // Unified enable/disable for the hierarchy row checkboxes (spec §5.4, §13, §7.3):
+  // a camera (compute participation), a section (heatmap on/off), or a zone
+  // (contributes to the marked set). Toggling a section or zone is a client-side
+  // re-filter only — neither marks the coverage result stale.
+  const handleToggleEnabled = useCallback((kind: 'camera' | 'section' | 'zone', id: string) => {
+    if (kind === 'camera') {
+      setDisabledIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    } else if (kind === 'section') {
+      setSections((prev) => prev.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)));
+    } else {
+      setZones((prev) => prev.map((z) => (z.id === id ? { ...z, enabled: !z.enabled } : z)));
+    }
   }, []);
 
   const handleCameraChange = useCallback((id: string, patch: Partial<CameraConfig>) => {
@@ -651,10 +806,6 @@ export function App() {
     setSections((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   }, []);
 
-  const handleToggleSectionVisible = useCallback((id: string) => {
-    setSections((prev) => prev.map((s) => (s.id === id ? { ...s, visible: !s.visible } : s)));
-  }, []);
-
   const handleDeleteCamera = useCallback((id: string) => {
     setCameras((prev) => prev.filter((c) => c.id !== id));
     setDisabledIds((prev) => {
@@ -676,12 +827,115 @@ export function App() {
     setSelection((prev) => (prev?.kind === 'section' && prev.id === id ? null : prev));
   }, []);
 
+  // --- zones & volumes (`sampling_volumes.md` §3, §4, §6, §7.3) --------------
+  // Creating an empty zone does not mark stale (an empty zone marks no voxels, §4).
+  // New zones are enabled by default (§7.3).
+  const handleAddZone = useCallback(() => {
+    const id = nextFreeId('zone', zonesRef.current.map((z) => z.id));
+    setZones((prev) => [...prev, { id, name: defaultZoneName(id), enabled: true }]);
+    setSelection({ kind: 'zone', id });
+  }, []);
+
+  // Adds a 1 m cube at the workspace center into the target zone (the selected
+  // zone, or the selected volume's zone, or the first zone; creating "Zone 1"
+  // first if none exist). Marks stale via the volumes effect (§4).
+  const handleAddVolume = useCallback(() => {
+    const currentZones = zonesRef.current;
+    const currentVolumes = volumesRef.current;
+    const sel = selectionRef.current;
+    let targetZoneId =
+      sel?.kind === 'zone'
+        ? sel.id
+        : sel?.kind === 'volume'
+          ? currentVolumes.find((v) => v.id === sel.id)?.zoneId ?? null
+          : null;
+    let nextZones = currentZones;
+    if (targetZoneId === null || !currentZones.some((z) => z.id === targetZoneId)) {
+      targetZoneId = currentZones[0]?.id ?? null;
+    }
+    if (targetZoneId === null) {
+      const zoneId = nextFreeId('zone', currentZones.map((z) => z.id));
+      nextZones = [...currentZones, { id: zoneId, name: defaultZoneName(zoneId), enabled: true }];
+      targetZoneId = zoneId;
+      setZones(nextZones);
+    }
+    const id = nextFreeId('volume', currentVolumes.map((v) => v.id));
+    setVolumes((prev) => [
+      ...prev,
+      { id, zoneId: targetZoneId!, position: [...workspaceCenter] as Vec3, rotation: [0, 0, 0, 1], size: [1, 1, 1] },
+    ]);
+    setSelection({ kind: 'volume', id });
+  }, [workspaceCenter]);
+
+  const handleVolumeChange = useCallback((id: string, patch: Partial<SamplingVolume>) => {
+    setVolumes((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
+  }, []);
+
+  // Renaming is a pure display-label edit: never marks stale (§6.2).
+  const handleRenameZone = useCallback((id: string, name: string) => {
+    setZones((prev) => prev.map((z) => (z.id === id ? { ...z, name } : z)));
+  }, []);
+
+  const handleToggleUseZones = useCallback((v: boolean) => setUseZones(v), []);
+
+  const handleZoneLevelChange = useCallback((v: number) => {
+    setZoneLevel(v);
+    setBoxLevel((b) => Math.max(b, v)); // box level clamped ≥ zone level (§3.4)
+  }, []);
+  const handleBoxLevelChange = useCallback((v: number) => setBoxLevel(Math.max(v, zoneLevel)), [zoneLevel]);
+
+  // Generate replaces the entire zone+volume set from the cached BVH (§3.4),
+  // discarding hand-edits, and auto-selects the first new zone (all enabled).
+  const handleGenerate = useCallback(() => {
+    let cache = bvhRef.current;
+    if (!cache || cache.room !== room) {
+      cache = { room, bvh: buildSceneBvh(room.sceneMesh) };
+      bvhRef.current = cache;
+    }
+    const { bvh } = cache;
+    const { zones: nextZones, volumes: nextVolumes } = extractZonesAndVolumes(
+      bvh.f32,
+      bvh.u32,
+      bvh.nodeCount,
+      bvh.triangleCount,
+      zoneLevel,
+      boxLevel,
+      voxelSize,
+    );
+    setZones(nextZones);
+    setVolumes(nextVolumes);
+    setSelection(nextZones[0] ? { kind: 'zone', id: nextZones[0].id } : null);
+  }, [room, zoneLevel, boxLevel, voxelSize]);
+
+  // Deleting a volume marks stale (§4). Clears selection if it was selected.
+  const handleDeleteVolume = useCallback((id: string) => {
+    setVolumes((prev) => prev.filter((v) => v.id !== id));
+    setSelection((prev) => (prev?.kind === 'volume' && prev.id === id ? null : prev));
+  }, []);
+
+  // Deleting a zone removes it and all its volumes (§4); the volumes removal
+  // marks stale when it had any.
+  const handleDeleteZone = useCallback((id: string) => {
+    setVolumes((prev) => prev.filter((v) => v.zoneId !== id));
+    setZones((prev) => prev.filter((z) => z.id !== id));
+    setSelection((prev) => (prev?.kind === 'zone' && prev.id === id ? null : prev));
+  }, []);
+
   // --- scene file: import / export / reset (spec §14) ------------------------
   // Replaces the whole Scene at once: geometry, cameras, probes, sections, plus
   // every derived/retained-run bit of state, so nothing from the outgoing scene
   // lingers (spec §14.4).
   const applyScene = useCallback(
-    (next: { geometry: GeometryObject[]; build: GeometryBuild; cameras: CameraConfig[]; probes: Probe[]; sections: Section[] }) => {
+    (next: {
+      geometry: GeometryObject[];
+      build: GeometryBuild;
+      cameras: CameraConfig[];
+      probes: Probe[];
+      sections: Section[];
+      zones: Zone[];
+      volumes: SamplingVolume[];
+      useZones: boolean;
+    }) => {
       runGenerationRef.current += 1;
       disposeGeometryBuild(roomRef.current);
       setRoom(next.build);
@@ -689,6 +943,14 @@ export function App() {
       setCameras(next.cameras);
       setProbes(next.probes);
       setSections(next.sections);
+      // Import replaces zones/volumes from the file (may be empty, §11); the
+      // cached BVH is invalidated (rebuilt lazily on the next Generate). The
+      // sampled set must be re-applied on the next run.
+      setZones(next.zones);
+      setVolumes(next.volumes);
+      setUseZones(next.useZones);
+      bvhRef.current = null;
+      samplingDirtyRef.current = true;
       setDisabledIds(new Set());
       setSelection(next.cameras[0] ? { kind: 'camera', id: next.cameras[0].id } : null);
       setSummary(null);
@@ -699,10 +961,11 @@ export function App() {
       overlayRef.current?.reset();
       probeVisibility.clear();
       sectionHeatmapStore.clear();
+      zoneCoverageStore.clear();
       setMasksVersion((v) => v + 1);
       setSceneError(null);
     },
-    [probeVisibility, sectionHeatmapStore],
+    [probeVisibility, sectionHeatmapStore, zoneCoverageStore],
   );
 
   const handleImportScene = useCallback(async () => {
@@ -717,7 +980,16 @@ export function App() {
     setSceneIOBusy(true);
     try {
       const { scene: imported, build } = await importSceneFromDirectory(dir);
-      applyScene({ geometry: imported.geometry, build, cameras: imported.cameras, probes: imported.probes, sections: imported.sections });
+      applyScene({
+        geometry: imported.geometry,
+        build,
+        cameras: imported.cameras,
+        probes: imported.probes,
+        sections: imported.sections,
+        zones: imported.zones,
+        volumes: imported.volumes,
+        useZones: imported.useZones,
+      });
     } catch (err) {
       // Nothing above this point touched app state, so the current scene is
       // left completely untouched on failure (spec §14.4, §14.8).
@@ -738,7 +1010,7 @@ export function App() {
     }
     setSceneIOBusy(true);
     try {
-      const current: Scene = { geometry: geometryObjects, cameras, probes, sections };
+      const current: Scene = { geometry: geometryObjects, cameras, probes, sections, zones, volumes, useZones };
       await exportSceneToDirectory(dir, current);
       setSceneError(null);
     } catch (err) {
@@ -746,7 +1018,7 @@ export function App() {
     } finally {
       setSceneIOBusy(false);
     }
-  }, [geometryObjects, cameras, probes, sections]);
+  }, [geometryObjects, cameras, probes, sections, zones, volumes, useZones]);
 
   const handleRun = useCallback(async () => {
     // Snapshot the scene "generation": if `applyScene` (import/reset) bumps
@@ -767,6 +1039,16 @@ export function App() {
       initializedRoomRef.current = room;
     }
 
+    // Re-apply the sampled region set when it changed or a re-init reset it to
+    // full (`sampling_volumes.md` §8). A sampling change needs no re-init (§6),
+    // so this is as cheap as a camera edit.
+    if (needsReinit || samplingDirtyRef.current) {
+      const stats = await engine.setSampling(regionsFromVolumes(samplingActiveRef.current, volumesRef.current));
+      if (gen !== runGenerationRef.current) return;
+      if (!stats) return;
+      samplingDirtyRef.current = false;
+    }
+
     const enabledCameras = camerasRef.current.filter((c) => !disabledIdsRef.current.has(c.id));
     const ok = engine.setCameras(enabledCameras);
     if (!ok) return;
@@ -781,6 +1063,7 @@ export function App() {
     });
     probeVisibility.reset(grid, enabledCameras.map((c) => c.id));
     sectionHeatmapStore.reset(grid, enabledCameras.map((c) => c.id));
+    zoneCoverageStore.reset(enabledCameras.map((c) => c.id));
     overlayRef.current?.reset();
     const result = await engine.compute({
       mode: 1,
@@ -791,6 +1074,7 @@ export function App() {
         overlayRef.current?.addChunk(chunkResult);
         probeVisibility.addChunk(chunkResult);
         sectionHeatmapStore.addChunk(chunkResult);
+        zoneCoverageStore.addChunk(chunkResult);
       },
     });
     if (gen !== runGenerationRef.current) return;
@@ -800,7 +1084,7 @@ export function App() {
       setStale(false);
       setMasksVersion((v) => v + 1);
     }
-  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, probeVisibility, sectionHeatmapStore]);
+  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, probeVisibility, sectionHeatmapStore, zoneCoverageStore]);
 
   // --- auto-run: recompute automatically once results go stale, throttled to
   // at most AUTO_RUN_MAX_HZ runs/sec ------------------------------------------
@@ -827,6 +1111,31 @@ export function App() {
   const selectedCamera = cameras.find((c) => c.id === selectedCameraId) ?? null;
   const selectedProbe = probes.find((p) => p.id === selectedProbeId) ?? null;
   const selectedSection = sections.find((s) => s.id === selectedSectionId) ?? null;
+  const selectedZone = zones.find((z) => z.id === selectedZoneId) ?? null;
+  const selectedVolume = volumes.find((v) => v.id === selectedVolumeId) ?? null;
+  const selectedZoneMemberCount = selectedZoneId ? volumes.filter((v) => v.zoneId === selectedZoneId).length : 0;
+
+  // The main StatsPanel reflects the enabled-zones union when zones are active
+  // (`sampling_volumes.md` §7.4): overriding the SDK summary's coverage numbers
+  // with the union's, while keeping its elapsed time.
+  const displaySummary =
+    samplingActive && enabledUnionSummary && summary
+      ? {
+          ...summary,
+          overallRate: enabledUnionSummary.overallRate,
+          validVoxels: enabledUnionSummary.validVoxels,
+          perCamera: enabledUnionSummary.perCamera,
+        }
+      : summary;
+  // The "Marked voxels" readout — enabled-union size vs full valid volume (§6.3,
+  // §7.4). `full` is the workspace's full valid-voxel count from the engine's
+  // full-volume sampling (not the retained run, which when active covers only
+  // the boxes' neighborhood, §7.1).
+  const fullValidVoxels = engine.state.fullValidVoxels;
+  const markedReadout =
+    enabledUnionSummary && fullValidVoxels !== null && volumes.length > 0
+      ? { marked: enabledUnionSummary.validVoxels, full: fullValidVoxels }
+      : null;
   const probeSeenCounts = useMemo(() => {
     const map = new Map<string, number | null>();
     for (const p of probes) {
@@ -851,23 +1160,29 @@ export function App() {
             cameras={cameras}
             probes={probes}
             sections={sections}
+            zones={zones}
+            volumes={volumes}
             selection={selection}
             flaggedIds={engine.state.flaggedCameras}
             disabledIds={disabledIds}
             perCamera={summary?.perCamera ?? null}
             probeSeenCounts={probeSeenCounts}
             sectionCellGrids={sectionCellGrids}
+            zoneSummaries={zoneCoverage?.perZone ?? null}
             collapsedIds={collapsedIds}
             onSelect={setSelection}
             onToggleEnabled={handleToggleEnabled}
-            onToggleSectionVisible={handleToggleSectionVisible}
             onToggleCollapse={handleToggleCollapse}
             onAddCamera={handleAddCamera}
             onAddProbe={handleAddProbe}
             onAddSection={handleAddSection}
+            onAddZone={handleAddZone}
+            onAddVolume={handleAddVolume}
             onDeleteCamera={handleDeleteCamera}
             onDeleteProbe={handleDeleteProbe}
             onDeleteSection={handleDeleteSection}
+            onDeleteZone={handleDeleteZone}
+            onDeleteVolume={handleDeleteVolume}
           />
         </div>
         <div
@@ -884,7 +1199,18 @@ export function App() {
           ref={detailPanelRef}
           style={detailHeight != null ? { height: detailHeight, flex: '0 0 auto' } : undefined}
         >
-          {selectedSection ? (
+          {selectedVolume ? (
+            <VolumePanel volume={selectedVolume} zones={zones} voxelSize={voxelSize} onChange={handleVolumeChange} />
+          ) : selectedZone ? (
+            <ZonePanel
+              zone={selectedZone}
+              memberCount={selectedZoneMemberCount}
+              summary={zoneCoverage?.perZone.get(selectedZone.id) ?? null}
+              hasRunOnce={hasRunOnce}
+              stale={stale}
+              onRename={handleRenameZone}
+            />
+          ) : selectedSection ? (
             <SectionPanel
               section={selectedSection}
               worldMin={room.worldMin}
@@ -932,6 +1258,17 @@ export function App() {
               onClick={() => setTransformMode('rotate')}
             >
               <RotateIcon />
+            </button>
+            <button
+              type="button"
+              className={`btn secondary icon-btn${selection?.kind === 'volume' && transformMode === 'scale' ? ' active' : ''}`}
+              title="Scale"
+              aria-label="Scale"
+              aria-pressed={selection?.kind === 'volume' && transformMode === 'scale'}
+              disabled={selection?.kind !== 'volume'}
+              onClick={() => setTransformMode('scale')}
+            >
+              <ScaleIcon />
             </button>
             <button
               type="button"
@@ -992,8 +1329,18 @@ export function App() {
           estimatedVoxelCount={estimatedVoxelCount}
         />
         <SectionHeatmapControls />
+        <SamplingVolumeControls
+          useZones={useZones}
+          onUseZonesChange={handleToggleUseZones}
+          zoneLevel={zoneLevel}
+          boxLevel={boxLevel}
+          onZoneLevelChange={handleZoneLevelChange}
+          onBoxLevelChange={handleBoxLevelChange}
+          onGenerate={handleGenerate}
+          marked={markedReadout}
+        />
         <StatsPanel
-          summary={summary}
+          summary={displaySummary}
           computeBackend={engine.state.backend}
           renderBackend={renderBackend}
           voxelSize={debouncedVoxelSize}
@@ -1011,12 +1358,17 @@ export function App() {
   );
 }
 
-/** Attach TransformControls to the selected entity's target, or detach (spec §12.4, §13.8). */
+/**
+ * Attach TransformControls to the selected entity's target, or detach (spec
+ * §12.4, §13.8; `sampling_volumes.md` §5). A zone is a container with no viewport
+ * body, so selecting one detaches.
+ */
 function attachForSelection(
   viewport: Viewport,
   gizmos: CameraGizmoSet,
   probeGizmos: ProbeGizmoSet,
   sectionGizmos: SectionGizmoSet,
+  volumeGizmos: SamplingVolumeGizmoSet,
   selection: Selection,
 ): void {
   const target =
@@ -1026,7 +1378,9 @@ function attachForSelection(
         ? probeGizmos.getAttachTarget(selection.id)
         : selection?.kind === 'section'
           ? sectionGizmos.getAttachTarget(selection.id)
-          : undefined;
+          : selection?.kind === 'volume'
+            ? volumeGizmos.getAttachTarget(selection.id)
+            : undefined;
   if (target) viewport.transformControls.attach(target);
   else viewport.transformControls.detach();
 }

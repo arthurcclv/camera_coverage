@@ -11,6 +11,7 @@
 import { accessor, type ChunkResult, type Vec3, type VoxelAccessor, type WorkspaceGrid } from '@linkervision/camera-coverage-sdk';
 import { chunkLocalForGlobalIndex } from './probeVisibility.ts';
 import { coverageFraction, popcount32 } from './coverageOverlay.ts';
+import type { MarkedFilter } from './samplingVolumes.ts';
 
 export type SectionOrientation = 'horizontal' | 'vertical-x' | 'vertical-z';
 export type SectionAggregation = 'mean' | 'max' | 'min' | 'blind';
@@ -23,7 +24,9 @@ export interface Section {
   min: number;
   max: number;
   aggregation: SectionAggregation;
-  visible: boolean;
+  /** Whether this section's heatmap is drawn/aggregated (subject to the master
+   * layer toggle, spec §2.4). The per-entity analog of a camera's enabled state. */
+  enabled: boolean;
 }
 
 export const SECTION_ORIENTATIONS: SectionOrientation[] = ['horizontal', 'vertical-x', 'vertical-z'];
@@ -130,7 +133,7 @@ export function defaultRangeForOrientation(
 /** A new section: Horizontal, full (clamped) extent of the workspace AABB (spec §5.5). */
 export function defaultSection(id: string, worldMin: Vec3, worldMax: Vec3): Section {
   const { min, max } = defaultRangeForOrientation(worldMin, worldMax, 'horizontal');
-  return { id, orientation: 'horizontal', min, max, aggregation: 'mean', visible: true };
+  return { id, orientation: 'horizontal', min, max, aggregation: 'mean', enabled: true };
 }
 
 /**
@@ -182,6 +185,10 @@ export interface SectionCellGrid {
 /**
  * Aggregate every in-plane column of the slab into a `SectionCellGrid` (spec
  * §13.3). `accessors` must have one `VoxelAccessor` per retained chunk id.
+ *
+ * When a `marked` filter is supplied (`sampling_volumes.md` §7.3), a column is
+ * treated as invalid (black) if any voxel in range is invalid **or** outside the
+ * marked set (the enabled zones' union) — only columns fully inside it are colored.
  */
 export function computeSectionCells(
   grid: Pick<WorkspaceGrid, 'worldMin' | 'voxelSize' | 'gridDims'>,
@@ -189,6 +196,7 @@ export function computeSectionCells(
   cameraIds: string[],
   camWords: number,
   section: Pick<Section, 'orientation' | 'min' | 'max'>,
+  marked: MarkedFilter | null = null,
 ): SectionCellGrid {
   const { collapseAxis, axisA, axisB } = axisMapping(section.orientation);
   const dimsA = grid.gridDims[axisA];
@@ -216,6 +224,17 @@ export function computeSectionCells(
         const loc = chunkLocalForGlobalIndex(grid as WorkspaceGrid, g[0], g[1], g[2]);
         const acc = loc ? accessors.get(loc.chunkId) : undefined;
         if (!loc || !acc || !acc.isValid(loc.i, loc.j, loc.k)) {
+          allValid = false;
+          break;
+        }
+        if (
+          marked &&
+          !marked(
+            grid.worldMin[0] + (g[0] + 0.5) * grid.voxelSize,
+            grid.worldMin[1] + (g[1] + 0.5) * grid.voxelSize,
+            grid.worldMin[2] + (g[2] + 0.5) * grid.voxelSize,
+          )
+        ) {
           allValid = false;
           break;
         }
@@ -456,14 +475,22 @@ export class SectionHeatmapStore {
     return acc;
   }
 
-  /** Compute a section's current cell grid, or null before any run is retained. */
-  computeCells(section: Pick<Section, 'orientation' | 'min' | 'max'>): SectionCellGrid | null {
+  /**
+   * Compute a section's current cell grid, or null before any run is retained.
+   * An optional `marked` filter blacks out columns outside the marked set
+   * (`sampling_volumes.md` §7.3) — applied client-side, so enabling/disabling a
+   * zone re-filters without a recompute.
+   */
+  computeCells(
+    section: Pick<Section, 'orientation' | 'min' | 'max'>,
+    marked: MarkedFilter | null = null,
+  ): SectionCellGrid | null {
     if (!this.grid) return null;
     const accessors = new Map<number, VoxelAccessor>();
     for (const chunkId of this.chunks.keys()) {
       const acc = this.accessorFor(chunkId);
       if (acc) accessors.set(chunkId, acc);
     }
-    return computeSectionCells(this.grid, accessors, this.cameraIds, this.camWords, section);
+    return computeSectionCells(this.grid, accessors, this.cameraIds, this.camWords, section, marked);
   }
 }

@@ -2,7 +2,8 @@
 
 Product vision, goals, and design principles for the demo app. The authoritative
 behavioral definition is [`../specs/spec.md`](../specs/spec.md) (with volumetric
-rendering detailed in [`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md));
+rendering detailed in [`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md)
+and the region-of-interest tool in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md));
 this file is the plain-language orientation.
 
 ## Vision
@@ -24,9 +25,18 @@ result. It is a **readable reference for SDK consumers**, not a shipping product
   spots* (only voxels seen by no camera).
 - **Drop probes** — points whose exact per-camera visibility is read back from the
   most recent run and drawn as green sightlines to the cameras that see them.
+- Add **sections** — axis-aligned slabs aggregated into a 2D coverage heatmap.
+- Carve the workspace into **zones** — named regions of interest built from
+  editable oriented boxes ("sampling volumes"), seeded from the scene's BVH with
+  **Generate from geometry** or added/edited by hand. Each zone reports its **own**
+  coverage results, and restricting coverage to zones (the `useZones` toggle)
+  narrows the sampled set so irrelevant free space stops diluting the rate. Each
+  zone has an independent **enabled** checkbox (like cameras/sections): the
+  overlay/sections/stats show the **union of the enabled zones**, so you can isolate
+  one, combine several, or show all.
 - Read a **stats panel** (overall coverage, valid voxels, blind-spot count,
-  elapsed time, per-camera rates) and browse a **scene hierarchy tree** of cameras
-  and probes.
+  elapsed time, per-camera rates) and browse a **scene hierarchy tree** of cameras,
+  probes, sections, and zones/volumes.
 - Adjust **sampling resolution** (voxel size) and overlay appearance (mode, hue,
   intensity).
 

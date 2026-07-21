@@ -9,8 +9,12 @@ import { SECTION_AGGREGATIONS, SECTION_ORIENTATIONS, type Section } from './sect
 import type { Probe } from './probeVisibility.ts';
 import type { GeometryObject } from './geometryModel.ts';
 import type { Scene } from './sceneModel.ts';
+import { defaultZoneName, type SamplingVolume, type Zone } from './samplingVolumes.ts';
 
-export const SCENE_FILE_FORMAT_VERSION = 1;
+/** Version written by {@link serializeScene}; bumped to 2 for zones/volumes (§14.3). */
+export const SCENE_FILE_FORMAT_VERSION = 2;
+/** Versions {@link parseSceneFile} accepts; a v1 file reads with empty zones/volumes (§14.8). */
+export const SUPPORTED_FORMAT_VERSIONS = [1, 2] as const;
 
 export interface SceneFileJSON {
   formatVersion: number;
@@ -18,6 +22,12 @@ export interface SceneFileJSON {
   cameras: CameraConfig[];
   probes: Probe[];
   sections: Section[];
+  /** Region-of-interest zones (§14.3); each is `{ id, name }`. */
+  zones: Zone[];
+  /** Oriented sampling boxes (§14.3). */
+  volumes: SamplingVolume[];
+  /** Whether zones restrict coverage (§14.3); persisted analysis setting. */
+  useZones: boolean;
 }
 
 export type ParseResult = { ok: true; scene: Scene } | { ok: false; error: string };
@@ -147,6 +157,8 @@ function parseSections(raw: unknown): Section[] | string {
   const sections: Section[] = [];
   const seenIds = new Set<string>();
   for (const [i, item] of raw.entries()) {
+    // `enabled` (current) or legacy `visible` (§14.3 back-compat).
+    const enabledRaw = isRecord(item) ? (item.enabled ?? item.visible) : undefined;
     if (
       !isRecord(item) ||
       typeof item.id !== 'string' ||
@@ -154,9 +166,9 @@ function parseSections(raw: unknown): Section[] | string {
       !isFiniteNumber(item.min) ||
       !isFiniteNumber(item.max) ||
       !SECTION_AGGREGATIONS.includes(item.aggregation as never) ||
-      typeof item.visible !== 'boolean'
+      typeof enabledRaw !== 'boolean'
     ) {
-      return `sections[${i}]: requires id, orientation, min, max, aggregation, visible`;
+      return `sections[${i}]: requires id, orientation, min, max, aggregation, enabled`;
     }
     if (seenIds.has(item.id)) return `duplicate section id "${item.id}"`;
     seenIds.add(item.id);
@@ -166,23 +178,66 @@ function parseSections(raw: unknown): Section[] | string {
       min: item.min,
       max: item.max,
       aggregation: item.aggregation as Section['aggregation'],
-      visible: item.visible,
+      enabled: enabledRaw,
     });
   }
   return sections;
 }
 
+/** Parses `zones` (§14.3): each `{ id, name }`, ids unique, blank name → default. */
+function parseZones(raw: unknown): Zone[] | string {
+  if (raw === undefined) return []; // v1 file has none (§14.8)
+  if (!Array.isArray(raw)) return 'zones must be an array';
+  const zones: Zone[] = [];
+  const seenIds = new Set<string>();
+  for (const [i, item] of raw.entries()) {
+    if (!isRecord(item) || typeof item.id !== 'string') return `zones[${i}]: requires a string id`;
+    if (seenIds.has(item.id)) return `duplicate zone id "${item.id}"`;
+    seenIds.add(item.id);
+    if (item.enabled !== undefined && typeof item.enabled !== 'boolean') return `zones[${i}]: enabled must be a boolean`;
+    // A missing/blank name reads as the default `Zone N`, never an error (§6.2, §14.8).
+    const rawName = typeof item.name === 'string' ? item.name.trim() : '';
+    // `enabled` defaults to true when absent (§7.3).
+    zones.push({ id: item.id, name: rawName.length > 0 ? rawName : defaultZoneName(item.id), enabled: item.enabled !== false });
+  }
+  return zones;
+}
+
+/**
+ * Parses `volumes` (§14.3): each `{ id, zoneId, position, rotation, size }`, ids
+ * unique, `size` components > 0, and every `zoneId` referencing an existing zone
+ * (dangling reference rejected — referential integrity, §14.8).
+ */
+function parseVolumes(raw: unknown, zones: Zone[]): SamplingVolume[] | string {
+  if (raw === undefined) return []; // v1 file has none (§14.8)
+  if (!Array.isArray(raw)) return 'volumes must be an array';
+  const zoneIds = new Set(zones.map((z) => z.id));
+  const volumes: SamplingVolume[] = [];
+  const seenIds = new Set<string>();
+  for (const [i, item] of raw.entries()) {
+    if (!isRecord(item) || typeof item.id !== 'string' || typeof item.zoneId !== 'string' || !isVec3(item.position) || !isQuat(item.rotation) || !isVec3(item.size)) {
+      return `volumes[${i}]: requires id, zoneId, position, rotation, size`;
+    }
+    if (seenIds.has(item.id)) return `duplicate volume id "${item.id}"`;
+    seenIds.add(item.id);
+    if (!zoneIds.has(item.zoneId)) return `volumes[${i}]: zoneId "${item.zoneId}" references no zone`;
+    if (!(item.size[0] > 0 && item.size[1] > 0 && item.size[2] > 0)) return `volumes[${i}]: size components must be > 0`;
+    volumes.push({ id: item.id, zoneId: item.zoneId, position: item.position, rotation: item.rotation, size: item.size });
+  }
+  return volumes;
+}
+
 /**
  * Validates and parses a `scene.json` document (spec §14.4, §14.8) — schema,
- * `formatVersion`, geometry `kind`s + asset-path safety, and id uniqueness
- * within each of `cameras`/`probes`/`sections` (geometry objects carry no id,
- * per the format — only those three categories do). Never throws; the caller
- * (`sceneIO.ts`) decides how to surface `{ ok: false }`.
+ * `formatVersion` (accepts 1 and 2; a v1 file reads with empty zones/volumes and
+ * `useZones` false), geometry `kind`s + asset-path safety, id uniqueness within
+ * each id-bearing category, and `volume.zoneId` referential integrity. Never
+ * throws; the caller (`sceneIO.ts`) decides how to surface `{ ok: false }`.
  */
 export function parseSceneFile(json: unknown): ParseResult {
   if (!isRecord(json)) return fail('scene.json must be a JSON object');
-  if (json.formatVersion !== SCENE_FILE_FORMAT_VERSION) {
-    return fail(`unsupported scene.json formatVersion "${String(json.formatVersion)}" (expected ${SCENE_FILE_FORMAT_VERSION})`);
+  if (typeof json.formatVersion !== 'number' || !SUPPORTED_FORMAT_VERSIONS.includes(json.formatVersion as never)) {
+    return fail(`unsupported scene.json formatVersion "${String(json.formatVersion)}" (expected ${SUPPORTED_FORMAT_VERSIONS.join(' or ')})`);
   }
 
   const geometry = parseGeometry(json.geometry);
@@ -197,7 +252,17 @@ export function parseSceneFile(json: unknown): ParseResult {
   const sections = parseSections(json.sections);
   if (typeof sections === 'string') return fail(sections);
 
-  return { ok: true, scene: { geometry, cameras, probes, sections } };
+  const zones = parseZones(json.zones);
+  if (typeof zones === 'string') return fail(zones);
+
+  const volumes = parseVolumes(json.volumes, zones);
+  if (typeof volumes === 'string') return fail(volumes);
+
+  // Analysis setting; persisted, default false when absent (§14.3).
+  if (json.useZones !== undefined && typeof json.useZones !== 'boolean') return fail('useZones must be a boolean');
+  const useZones = json.useZones === true;
+
+  return { ok: true, scene: { geometry, cameras, probes, sections, zones, volumes, useZones } };
 }
 
 /** Serializes a `Scene` to the `scene.json` shape (spec §14.5) — a plain data copy. */
@@ -208,5 +273,8 @@ export function serializeScene(scene: Scene): SceneFileJSON {
     cameras: scene.cameras,
     probes: scene.probes,
     sections: scene.sections,
+    zones: scene.zones,
+    volumes: scene.volumes,
+    useZones: scene.useZones,
   };
 }

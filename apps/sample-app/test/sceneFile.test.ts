@@ -4,7 +4,7 @@ import { isSafeAssetPath, parseSceneFile, serializeScene, type SceneFileJSON } f
 
 function validDoc(): SceneFileJSON {
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     geometry: [
       {
         kind: 'room',
@@ -36,7 +36,12 @@ function validDoc(): SceneFileJSON {
       { id: 'cam-1', position: [-6, 5.4, -9.6], rotation: [0, 0, 0, 1], fov: 60, aspect: 1.7778, near: 0.1, far: 30 },
     ],
     probes: [{ id: 'probe-1', position: [0, 1, 0] }],
-    sections: [{ id: 'section-1', orientation: 'horizontal', min: 0, max: 2, aggregation: 'mean', visible: true }],
+    sections: [{ id: 'section-1', orientation: 'horizontal', min: 0, max: 2, aggregation: 'mean', enabled: true }],
+    zones: [{ id: 'zone-1', name: 'West wing', enabled: true }],
+    volumes: [
+      { id: 'volume-1', zoneId: 'zone-1', position: [3, 1.5, -2], rotation: [0, 0.259, 0, 0.966], size: [4, 3, 6] },
+    ],
+    useZones: true,
   };
 }
 
@@ -48,6 +53,9 @@ test('parseSceneFile accepts a well-formed document (spec §14.3 sketch)', () =>
   assert.equal(result.scene.cameras.length, 1);
   assert.equal(result.scene.probes.length, 1);
   assert.equal(result.scene.sections.length, 1);
+  assert.equal(result.scene.zones.length, 1);
+  assert.equal(result.scene.volumes.length, 1);
+  assert.equal(result.scene.useZones, true);
 });
 
 test('serializeScene . parseSceneFile round-trips', () => {
@@ -66,8 +74,82 @@ test('parseSceneFile rejects non-object JSON', () => {
 });
 
 test('parseSceneFile rejects an unknown/newer formatVersion (spec §14.8)', () => {
-  const result = parseSceneFile({ ...validDoc(), formatVersion: 2 });
+  const result = parseSceneFile({ ...validDoc(), formatVersion: 3 });
   assert.equal(result.ok, false);
+});
+
+test('parseSceneFile reads a v1 document with empty zones/volumes, useZones false (§14.8)', () => {
+  const doc = validDoc();
+  const v1: Record<string, unknown> = { ...doc, formatVersion: 1 };
+  delete v1.zones;
+  delete v1.volumes;
+  delete v1.useZones;
+  const result = parseSceneFile(v1);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.scene.zones, []);
+  assert.deepEqual(result.scene.volumes, []);
+  assert.equal(result.scene.useZones, false);
+});
+
+test('serializeScene always writes formatVersion 2 (§14.3)', () => {
+  const doc = validDoc();
+  const parsed = parseSceneFile({ ...doc, formatVersion: 1, zones: undefined, volumes: undefined, useZones: undefined });
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(serializeScene(parsed.scene).formatVersion, 2);
+});
+
+test('parseSceneFile rejects a volume whose zoneId references no zone (§14.8)', () => {
+  const doc = validDoc();
+  doc.volumes = [{ ...doc.volumes[0], zoneId: 'zone-999' }];
+  assert.equal(parseSceneFile(doc).ok, false);
+});
+
+test('parseSceneFile rejects a volume with a non-positive size component (§14.8)', () => {
+  const doc = validDoc();
+  doc.volumes = [{ ...doc.volumes[0], size: [4, 0, 6] }];
+  assert.equal(parseSceneFile(doc).ok, false);
+});
+
+test('parseSceneFile rejects duplicate zone / volume ids (§14.8)', () => {
+  const dupZone = validDoc();
+  dupZone.zones = [...dupZone.zones, { id: 'zone-1', name: 'East wing', enabled: true }];
+  assert.equal(parseSceneFile(dupZone).ok, false);
+
+  const dupVol = validDoc();
+  dupVol.volumes = [...dupVol.volumes, { ...dupVol.volumes[0] }];
+  assert.equal(parseSceneFile(dupVol).ok, false);
+});
+
+test('parseSceneFile falls back a blank/missing zone name to the default Zone N (§6.2)', () => {
+  const doc = validDoc();
+  doc.zones = [{ id: 'zone-1', name: '   ' } as never, { id: 'zone-2' } as never];
+  doc.volumes = [{ ...doc.volumes[0], zoneId: 'zone-1' }];
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.scene.zones[0].name, 'Zone 1');
+  assert.equal(result.scene.zones[1].name, 'Zone 2');
+});
+
+test('zone.enabled defaults to true when absent and round-trips when set (§7.3)', () => {
+  const doc = validDoc();
+  doc.zones = [{ id: 'zone-1', name: 'A' } as never, { id: 'zone-2', name: 'B', enabled: false }];
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.scene.zones[0].enabled, true); // absent -> default true
+  assert.equal(result.scene.zones[1].enabled, false);
+});
+
+test('parseSceneFile reads a legacy section "visible" key as enabled (§14.3 back-compat)', () => {
+  const doc = validDoc();
+  doc.sections = [{ id: 'section-1', orientation: 'horizontal', min: 0, max: 2, aggregation: 'mean', visible: false } as never];
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.scene.sections[0].enabled, false);
 });
 
 test('parseSceneFile rejects an unknown geometry kind (spec §14.8)', () => {

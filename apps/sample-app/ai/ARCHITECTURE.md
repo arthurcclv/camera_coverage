@@ -35,7 +35,10 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
   buffers, since they're transferred) and `setSampling({ regions: [{ type:
   'full' }] })`. It listens for the `warning` message to populate
   `flaggedCameras`. `EngineState = { status, backend, errorMessage,
-  flaggedCameras, sceneStats, samplingStats }`.
+  flaggedCameras, sceneStats, samplingStats, fullValidVoxels }` —
+  `fullValidVoxels` snapshots the full-volume valid count at init/re-init (the
+  "% of full" denominator, `sampling_volumes.md` §6.3/§7.4); the box-restricted
+  `setSampling` of an active run updates `samplingStats` but not it.
 - **`App.tsx` `handleRun`** re-inits when voxel size changed **or** `room` (the
   built geometry) was replaced since the last init — a scene-file import (spec
   §14.4) always forces a fresh `loadScene`/workspace even at the same voxel
@@ -97,8 +100,8 @@ default" — see DECISIONS.md).
   (`ROOM_HALF_X`/`ROOM_HALF_Z`/`ROOM_HEIGHT`/`WALL_THICKNESS`, still consumed
   directly by `cameras/defaults.ts` for camera placement).
 - `sceneModel.ts` — the unified `Scene` type (`geometry + cameras + probes +
-  sections`, spec §14.1) + `defaultScene()`, the single source of the boot
-  state.
+  sections + zones + volumes + useZones`, spec §14.1) + `defaultScene()`, the
+  single source of the boot state (zones/volumes empty, `useZones` false).
 - `sceneGeometryBuild.ts` — reduces a `GeometryObject[]` to one `GeometryBuild`
   (merged collision `SceneMesh` + renderable `THREE.Group` + workspace bounds,
   spec §14.6). `buildStaticGeometrySync` handles `room`/`box` only (the
@@ -107,10 +110,12 @@ default" — see DECISIONS.md).
   node world-matrix) into the same merged mesh. `disposeGeometryBuild` releases
   a superseded build's GPU resources.
 - `sceneFile.ts` — pure `scene.json` schema/validation/(de)serialization (spec
-  §14.3, §14.8): `parseSceneFile` (schema, `formatVersion`, geometry `kind`s,
-  asset-path safety, id uniqueness within cameras/probes/sections — geometry
-  objects carry no id) and `serializeScene`. No file I/O; this is the layer
-  with real decision logic, so it's the one that's unit-tested.
+  §14.3, §14.8): `parseSceneFile` (schema, `formatVersion` — writes `2`, reads
+  `1` and `2` with a v1 file getting empty zones/volumes, geometry `kind`s,
+  asset-path safety, id uniqueness within each id-bearing category, and
+  `volume.zoneId` referential integrity + `size > 0`) and `serializeScene`. No
+  file I/O; this is the layer with real decision logic, so it's the one that's
+  unit-tested.
 - `sceneIO.ts` — the only impure scene-file I/O: `importSceneFromDirectory`/
   `exportSceneToDirectory` against a `FileSystemDirectoryHandle` (spec §14.4,
   §14.5), thin wrappers around `sceneFile.ts` + `sceneGeometryBuild.ts`.
@@ -137,8 +142,21 @@ default" — see DECISIONS.md).
   outlines + axis-constrained TransformControls target; consumes
   `sectionHeatmap.ts`'s output (including its rotation/sign math), owns no
   aggregation logic.
-- `sceneTree.ts` — `SceneNode` union (camera/probe/section) + `buildSceneTree` /
-  `flattenVisible`.
+- `sceneTree.ts` — `SceneNode` union (camera/probe/section + zone/volume) +
+  `buildSceneTree` / `flattenVisible`. Zone nodes are both selectable and
+  expandable (their volume children); `flattenVisible` treats any node with a
+  non-empty `childIds` as expandable, not just groups.
+- `samplingVolumes.ts` — the region-of-interest core (`sampling_volumes.md`): the
+  `Zone`/`SamplingVolume` types, OBB math (`inVolume`/`inZone`/`obbWorldAabb`),
+  `buildSceneBvh` + `extractZonesAndVolumes` (BVH two-level seeding via the SDK's
+  public `cleanMesh`/`buildBvh`), `makeMarkedFilter` (the enabled-zones union filter the overlay
+  and sections apply), `regionsFromVolumes` (SDK `box` regions from OBB world
+  AABBs), and `ZoneCoverageStore`/`computeZoneCoverage` (a 4th retained-chunk
+  consumer that aggregates per-zone coverage client-side). Pure — no Three.js.
+- `samplingVolumeGizmos.ts` — per-volume wireframe box (edges + faint fill) whose
+  root object maps 1:1 to `{position, quaternion, scale}` so TransformControls
+  (translate/rotate/scale) writes them straight back; pickable, dims the volumes of
+  disabled zones.
 - `viewportSelection.ts` — pure click-vs-drag + unified selection decision.
 - `transformSpace.ts` — pure local/global ↔ Three.js space mapping + icon/tooltip.
 
@@ -156,9 +174,16 @@ default" — see DECISIONS.md).
 - `SectionPanel.tsx` — orientation / thickness / aggregation editor for the
   selected section (thickness keeps the section's center fixed; position only
   changes via the viewport drag).
+- `VolumePanel.tsx` — selected-volume position / Euler / size sliders + a zone
+  reassignment dropdown.
+- `ZonePanel.tsx` — selected-zone editable name + member count + per-zone coverage
+  stats (whether the zone is enabled is controlled by the zone row's checkbox, not here).
 - `OverlayControls.tsx` — resolution slider + overlay mode / color / intensity.
 - `SectionHeatmapControls.tsx` — the shared Turbo legend/colorbar.
-- `StatsPanel.tsx` — coverage summary + compute/render backend readout.
+- `SamplingVolumeControls.tsx` — the zone tool block (useZones toggle, Generate,
+  zone/box level sliders, marked-voxels readout), above StatsPanel.
+- `StatsPanel.tsx` — coverage summary + compute/render backend readout (reflects
+  the enabled-zones union when zones are active).
 - `SectionStatsPanel.tsx` — selected-section coverage stats (colored-cell mean /
   blind / min / max / per-camera).
 - `RunBar.tsx` — run button, auto-run, backend / stale / error indicators.
@@ -168,11 +193,15 @@ default" — see DECISIONS.md).
 
 ## Selection model
 
-A single unified selection: `Selection = { kind: 'camera' | 'probe' | 'section',
-id } | null` (`scene/viewportSelection.ts`). A viewport click picks the nearest
-hit across cameras and probes only — a section's heatmap plane is never a pick
-target (§13.8), so it's selected from its hierarchy row; drag-tail clicks (> 5 px
-travel) are ignored. Exactly one `TransformControls` gizmo is attached at a time;
-selecting a probe forces translate-only, selecting a section forces
-translate-only **and** constrains the visible handle to its collapse axis
-(`showX`/`showY`/`showZ` on `TransformControls`, reset to all-true otherwise).
+A single unified selection: `Selection = { kind: 'camera' | 'probe' | 'section' |
+'zone' | 'volume', id } | null` (`scene/viewportSelection.ts`). A viewport click
+picks the nearest hit across cameras, probes, and **volumes** — sections and zones
+have no pickable body, so they're selected from their hierarchy rows; drag-tail
+clicks (> 5 px travel) are ignored. Exactly one `TransformControls` gizmo is
+attached at a time; selecting a probe forces translate-only, selecting a section
+forces translate-only **and** constrains the visible handle to its collapse axis,
+selecting a **volume** enables the volume-only **scale** mode (translate/rotate/
+scale), and selecting a **zone** attaches no gizmo (it's a container). Which zones
+are **enabled** (contribute to the visualized marked set) is decoupled from
+selection — driven by a per-zone **enabled checkbox** in the hierarchy row
+(independent per zone, like cameras/sections), not by selecting a zone.

@@ -58,6 +58,8 @@ status chip.
 | Probe marker | `0xff9d3f` (amber diamond) | `scene/probeGizmos.ts` |
 | Probe selected | `0xffd23f` | |
 | Sightline (probe → visible camera) | `0x4de08a` (green), opacity 0.9 | spec §12.4 |
+| Sampling-volume box (edges + faint fill) | `0x8bd0c0` (teal) | `scene/samplingVolumeGizmos.ts` |
+| Volume selected / disabled-zone volume | edges `0xffd23f` (yellow) / dimmed to opacity 0.25 | |
 | Coverage overlay fog | user hue, default **red** (hue 0), `hsl(h,100%,50%)` | `scene/coverageOverlay.ts` |
 
 The overlay is intensity-modulated volumetric fog (a single instanced-cube TSL
@@ -99,19 +101,33 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
 
 - **Panel** (`.panel`): the base card — dark surface, subtle border, 8 px radius,
   an uppercase `.panel-title`, then rows. Scrolling panels keep the title fixed
-  and scroll only `.panel-body`.
+  and scroll only `.panel-body`. `.panel-title.subhead` is a subsection heading
+  inside a body (12 px top margin); `.panel-title .badge` trails the title text
+  (8 px left). A `.stat-line.spaced` sets a stat row off from the controls above
+  it (8 px top). No inline spacing styles — spacing lives in `index.css`.
 - **Row** (`.row`): label left, control right, space-between, 12 px label +
   right-aligned `.value-chip`. `Slider.tsx` is the one reusable control (plain
   range, plus a `.spectrum` rainbow variant with a white thumb for hue).
 - **Button** (`.btn`): blue primary; `.secondary` neutral; `.active` = blue
-  (toggle "on"); disabled goes flat grey. `.icon-btn` for the square viewport
-  toolbar buttons (inline SVG icons live in `App.tsx`). `.segmented` groups
-  buttons into an equal-width segmented control.
+  (toggle "on"); disabled goes flat grey. `.block` makes a full-width stacked
+  action button (8 px top margin, e.g. "Generate from geometry"). `.icon-btn` for
+  the square viewport toolbar buttons (inline SVG icons live in `App.tsx`).
+  `.segmented` groups buttons into an equal-width segmented control.
 - **Badge** (`.badge`): pill, 11 px/600 — variants `stale`, `backend-webgpu`,
-  `backend-cpu`, `flagged`.
+  `backend-cpu`, `flagged`, `zone` (neutral blue, the volume's zone reference).
 - **Tree row** (`.tree-row`): caret + colored `.dot` + ellipsized `.label` +
   right-aligned rate/count; `.selected` (blue bg + border), `.disabled` (opacity
-  0.45), `.group` (lighter, 500). Probe dots are rotated squares (`.probe-dot`).
+  0.45), `.group` (lighter, 500). Probe dots are rotated squares (`.probe-dot`),
+  section dots are green squares (`.section-dot`), and zone/volume dots are teal
+  (`.zone-dot` round, `.volume-dot` square). Zone rows carry a leading
+  `.tree-row-toggle` **enabled checkbox** (checked = the zone contributes to the
+  visualized marked set), reusing the camera enable-toggle control. Sections use the
+  same checkbox for their per-heatmap enabled state.
+- **Select / text input** (`.select`, `.text-input`): match the numeric-input
+  chrome (dark field, subtle border, 4 px radius) — the volume zone-reassign
+  dropdown and the editable zone name.
+- **Checkbox row** (`.checkbox-row`): inline checkbox + 12 px label, for the
+  "Restrict coverage to zones" toggle.
 - **Menu** (`.menu`): popover for the add-entity menu and right-click Delete
   context menu — dark surface, shadow `0 6px 20px rgba(0,0,0,.45)`, blue hover.
 - **Spinner** (`.spinner`): 12 px ring, blue top border, 0.7 s spin.

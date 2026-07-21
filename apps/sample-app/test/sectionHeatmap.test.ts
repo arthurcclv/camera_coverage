@@ -118,9 +118,9 @@ test('defaultRangeForOrientation clamps to MAX_SECTION_THICKNESS, centered on th
   assert.equal(max - min, MAX_SECTION_THICKNESS);
 });
 
-test('defaultSection is Horizontal, full (clamped) Y extent, mean aggregation, visible (spec §5.5)', () => {
+test('defaultSection is Horizontal, full (clamped) Y extent, mean aggregation, enabled (spec §5.5)', () => {
   const s = defaultSection('section-1', [0, -1, 0], [4, 3, 2]);
-  assert.deepEqual(s, { id: 'section-1', orientation: 'horizontal', min: -1, max: 3, aggregation: 'mean', visible: true });
+  assert.deepEqual(s, { id: 'section-1', orientation: 'horizontal', min: -1, max: 3, aggregation: 'mean', enabled: true });
 });
 
 test('sectionCenter is the midpoint of min/max (spec §13.2)', () => {
@@ -248,6 +248,43 @@ test('computeSectionCells clips the column to the section range', () => {
   const cell = cells.cells[0 + cells.dimsA * 0];
   assert.equal(cell.valid, true);
   assert.equal(cell.meanFraction, 1); // only x=0, coverage fraction 1/1
+});
+
+// --- computeSectionCells: marked-set filter (sampling_volumes.md §7.3) --------
+//
+// A column is black if any voxel in range is invalid OR outside the marked set.
+// Voxel centers along x are 0.5,1.5,2.5,3.5 (voxelSize 1, worldMin.x 0).
+
+test('computeSectionCells marks a column black if any voxel is outside the marked set (§7.3)', () => {
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
+  const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
+  // Every voxel is valid, but the marked set excludes x≥2 (centers 2.5, 3.5), so
+  // the column crossing x=0..3 contains an unmarked voxel and goes black.
+  const marked = (cx: number) => cx < 2;
+  const cells = computeSectionCells(
+    grid,
+    accessorsFor([chunk0, chunk1]),
+    ['cam-a'],
+    1,
+    { orientation: 'vertical-x', min: 0, max: 4 },
+    marked,
+  );
+  const cell = cells.cells[0 + cells.dimsA * 0];
+  assert.equal(cell.valid, false);
+});
+
+test('computeSectionCells: a column fully inside the marked set colors identically to no filter (§7.3)', () => {
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
+  const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b11]] });
+  const section = { orientation: 'vertical-x' as const, min: 0, max: 4 };
+  const accessors = accessorsFor([chunk0, chunk1]);
+  const unfiltered = computeSectionCells(grid, accessors, ['cam-a', 'cam-b'], 1, section);
+  // A filter marking the whole workspace must leave the aggregation unchanged.
+  const filtered = computeSectionCells(grid, accessors, ['cam-a', 'cam-b'], 1, section, () => true);
+  const at = (g: SectionCellGrid) => g.cells[0 + g.dimsA * 0];
+  assert.equal(at(filtered).valid, true);
+  assert.equal(at(filtered).meanFraction, at(unfiltered).meanFraction);
+  assert.equal(at(filtered).blindFraction, at(unfiltered).blindFraction);
 });
 
 // --- cellDisplayValue / turboColormap / texture data (spec §13.3, §13.5) ----
