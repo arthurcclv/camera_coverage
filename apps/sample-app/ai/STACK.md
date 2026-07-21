@@ -26,7 +26,17 @@ Technologies used by the demo app and the role each plays. See
 |---|---|
 | **`three/webgpu`** (`WebGPURenderer`) | Main-thread render backend; prefers WebGPU, auto-falls-back to **WebGL2** (`renderer.backend.isWebGPUBackend` distinguishes them). Independent of the SDK's compute backend. |
 | **TSL** (Three Shading Language, `three/tsl`) | Node-based shader authoring for the volumetric coverage overlay; one graph compiles to WGSL (WebGPU) or GLSL (WebGL2). |
-| **Vite alias** `three → three/webgpu` | Forces a single Three.js core build across the app and its addons (OrbitControls/TransformControls) — see DECISIONS.md. |
+| **Vite alias** `three → three/webgpu` | Forces a single Three.js core build across the app and its addons (OrbitControls/TransformControls/GLTFLoader) — see DECISIONS.md. |
+| **`GLTFLoader`** (`three/addons/loaders/GLTFLoader.js`) | Parses imported `gltf` geometry objects (spec §14.6) from bytes via `parseAsync` — no new npm dependency, same `three/addons` convention as `OrbitControls`/`TransformControls`. |
+
+## Scene file (spec §14)
+
+- **File System Access API** (`showDirectoryPicker`, `FileSystemDirectoryHandle`) —
+  folder-based scene import/export. Chromium-only; hidden in the UI where
+  absent. `Window.showDirectoryPicker` isn't in TypeScript's bundled DOM lib, so
+  a minimal ambient declaration lives in `src/types/file-system-access.d.ts`
+  (`FileSystemDirectoryHandle`/`FileSystemFileHandle` themselves — including
+  `getFileHandle`/`getDirectoryHandle`/`createWritable` — are already declared).
 
 The coverage overlay is a single `InstancedMesh` of unit cubes (one instance per
 voxel) with per-instance attributes and a TSL slab/chord fragment shader — one

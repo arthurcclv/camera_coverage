@@ -6,6 +6,61 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Removed the "Reset to default" button
+
+**Decision:** dropped the in-app Reset action from `SceneFileControls`/§14.7 —
+Import and Export are the only scene-file controls now. `defaultScene()`
+remains (it's still the boot-state source, spec §14.1), but nothing in the UI
+calls it anymore; the only way back to the default scene is reloading the
+page. **Why:** requested directly — Reset was the one action with no file-I/O
+counterpart (Import/Export both round-trip a real folder), and duplicated
+"just reload" for a scene that's already fully described by
+`defaultGeometry()`/`defaultCameras()`. `applyScene` (the shared
+replace-the-whole-Scene helper) is unaffected — Import still goes through it;
+it just lost its second caller.
+
+---
+
+## Scene file (§14): `room` became state, geometry has no id, cancel is soft
+
+Implementing import/export surfaced three scoping decisions (Reset also
+existed at the time; it's since been removed — see above):
+
+**`room` (the built geometry) is now `useState`, not a `useMemo` constant.**
+Before §14, geometry never changed at runtime, so `buildRoom()` was memoized
+with `[]` deps and several effects/callbacks listed `room` in their dependency
+arrays purely to satisfy referencing it (one had a stale eslint-disable
+comment). Making it real state meant the big Three.js setup effect — written as
+"created once" but literally depending on `[room]` — would tear down and
+recreate the entire `WebGPURenderer`/orbit camera/gizmo sets on every scene
+replacement if left alone. Fix: that effect no longer depends on `room` at all
+(reads it via `roomRef` for its one-time initial add); a new effect keyed on
+`[room, viewportReady]` owns adding/removing `room.group` from the scene, so a
+geometry swap only replaces geometry, never the viewport itself. Every other
+effect/callback that already listed `room` in its deps needed no change — they
+were already written correctly for a reactive `room`, just prematurely.
+
+**Geometry objects carry no `id`; cameras/probes/sections do.** The spec's own
+`scene.json` sketch (§14.3) omits `id` from every geometry entry. This matches
+§14.9 (geometry isn't selectable/editable, has no hierarchy row) — there's
+nothing to reference a geometry object *by*, so id uniqueness validation
+(`sceneFile.ts`) only checks within `cameras`/`probes`/`sections`, independently
+per category (the same id may repeat across categories).
+
+**"Cancel any in-flight compute" (§14.4) is soft-cancel, not true abort.** The
+SDK/worker (`engine/useEngine.ts`) exposes no cancellation primitive — the
+worker has no message to stop a running `compute()`, and adding one is an
+SDK-level change outside this feature's scope. Instead, `App.tsx` keeps a
+`runGenerationRef` bumped by every `applyScene` call (import); `handleRun`
+snapshots it and re-checks after every `await` and inside `onChunkDone`,
+discarding a superseded run's results and — critically — refusing to feed its
+streamed chunks into a newer run's (just-replaced) retained-data stores, which
+would otherwise silently mix two scenes' data under colliding
+chunk ids. The underlying worker computation still runs to completion; only its
+observable effects are suppressed.
+
+---
+
 ## Fixed bug: section heatmap mirrored along its in-plane Z axis
 
 **Bug:** `horizontal` and `vertical-x` sections rendered their heatmap mirrored

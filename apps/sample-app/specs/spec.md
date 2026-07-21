@@ -92,8 +92,10 @@ apps/sample-app/
 
 The app is a **three-column** flex layout (desktop only, §1):
 
-- **Left panel** — the scene inspector: the `SceneHierarchy` tree on top,
-  the selected entity's editor (`CameraPanel`/`ProbePanel`/`SectionPanel`) below it. The
+- **Left panel** — the scene inspector: a **"Scene"** panel with **Load**/**Save**
+  scene-file actions (`SceneFileControls`, §14.7) at the top, then the
+  `SceneHierarchy` tree, then the selected entity's editor
+  (`CameraPanel`/`ProbePanel`/`SectionPanel`) below it. The
   hierarchy grows to fill the column and scrolls internally; the detail panel
   sits below (and shows a placeholder when nothing is selected). A **draggable
   divider** between the two resizes the split: dragging sets the detail panel's
@@ -220,10 +222,17 @@ An enclosed rectangular room, **open top**, plus freestanding box obstacles:
 - **4–6 box obstacles** of varying size/position on the floor, tall enough to
   create occlusion shadows.
 
-A single indexed triangle mesh (`positions: Float32Array`, `indices: Uint32Array`,
-world space, meters) is produced by `buildRoom.ts` and used for **both**:
+Geometry is the `geometry` list of the unified `Scene` (§14.1) — an ordered set of
+objects (`room`/`box` primitives and `gltf` references). The **default** scene's
+geometry is produced in code by `buildRoom.ts` (the room shell + box obstacles above);
+imported scenes may add GLB-referenced meshes (§14).
 
-- rendering in Three.js (as the room + box meshes), and
+All geometry objects are reduced to a single indexed triangle mesh
+(`positions: Float32Array`, `indices: Uint32Array`, world space, meters — §14.6) used
+for **both**:
+
+- rendering in Three.js (primitives as room + box meshes, GLBs with their own
+  materials), and
 - `engine.loadScene({ positions, indices })`.
 
 ### 4.2 Workspace
@@ -329,7 +338,7 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   a camera, probe, or section node selects that entity (drives the §5.2 panel and
   gizmo). Clicking a group header only expands/collapses it and does not change the
   current selection.
-- **Adding entities.** The "Scene" panel header carries a **"+" icon button** at its
+- **Adding entities.** The "Hierarchy" panel header carries a **"+" icon button** at its
   top-right that opens a small menu of entity types to create — **Camera**, **Probe**,
   and **Section**. Creating an entity spawns it at the **workspace center** with the
   next free id (`cam-N` / `probe-N` / `section-N`) and **auto-selects** it (its gizmo
@@ -341,7 +350,7 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   the currently-selected entity clears the selection; deleting a camera marks the result
   stale (§8.1); deleting a probe or section does not. Group headers have no context menu.
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
-  (§14).
+  (§15).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
   `aria-expanded`/`aria-selected`; interaction is mouse-driven (no keyboard tree
   navigation yet).
@@ -406,7 +415,7 @@ color}` and draws it as additive volumetric fog. Its technical design (shader,
 chord-length math, compositing, tests) lives in
 [`volumetric_rendering.md`](./volumetric_rendering.md). **This section owns the
 visualization**: which voxels are fed to the renderer and how coverage data maps to
-each voxel's `intensity` and `color`. Domain terms are defined in §15. A separate,
+each voxel's `intensity` and `color`. Domain terms are defined in §16. A separate,
 flat per-slab coverage visualization — the **section heatmap** — is described in §13.
 
 Voxels are extracted from streamed `ChunkResult`s using
@@ -421,7 +430,7 @@ renderer's per-voxel inputs:
 
 - **Coverage** — the default. **Every valid voxel** is fed. `color` = the
   user-selected **overlay color** (§9.2); `intensity` = the voxel's **coverage
-  fraction** (`popcount(mask) / involvedCameraCount`, 0..1, §15). Well-covered
+  fraction** (`popcount(mask) / involvedCameraCount`, 0..1, §16). Well-covered
   regions glow bright/solid; weakly covered regions are faint; blind spots
   (fraction 0) contribute nothing and are invisible. This shows **where coverage
   is**.
@@ -466,7 +475,7 @@ From `CoverageSummary`:
 - `perCamera[]` — per-camera `coverageRate`, listed alongside each camera.
   Disabled cameras (§5.4) aren't sent to the engine, so they have no entry here.
 - `validVoxels`, `elapsedMs`.
-- **Blind-spot count** — number of valid voxels no enabled camera sees (§15),
+- **Blind-spot count** — number of valid voxels no enabled camera sees (§16),
   derived as `round(validVoxels × (1 − overallRate))`. Surfaced here numerically so
   the count is available regardless of the active visualization mode (§9.1).
 - Active **compute** backend (WebGPU / CPU, §3.2) and **render** backend
@@ -500,7 +509,8 @@ participate in `compute()`, and never change the coverage field.
   array in `App.tsx`, parallel to `cameras` (§5). A probe node in the hierarchy
   (§5.5) references its probe by id; the tree carries identity only, like camera
   nodes.
-- Probes are **not persisted** (§14).
+- Probes are **not auto-persisted** across reloads (§15), but they **are** included in
+  scene-file export/import (§14).
 
 ### 12.2 Visibility query (reuse of computed masks)
 
@@ -605,7 +615,8 @@ fog — a section is a flat, per-cell heatmap of a chosen slice, and several can
   - `horizontal` — collapse **Y**, heatmap spans **X×Z** (a floor plan).
   - `vertical-x` — collapse **X**, heatmap spans **Z×Y**.
   - `vertical-z` — collapse **Z**, heatmap spans **X×Y**.
-- Sections are **not persisted** (§14). The global colormap and its legend (§13.5) are
+- Sections are **not auto-persisted** across reloads (§15), but they **are** included in
+  scene-file export/import (§14). The global colormap and its legend (§13.5) are
   shared by all sections; everything else in the record above is per-section.
 
 ### 13.2 Orientation & range (the slab)
@@ -635,7 +646,7 @@ and reuses the workspace grid's in-plane dimensions.
   **black** — obstacle and out-of-range footprints read as solid black silhouettes.
   Only **fully-valid** columns ("colored cells") are aggregated.
 - **Cell value.** For a colored cell, each voxel contributes its **coverage fraction**
-  (`popcount(mask) / involvedCameraCount`, 0..1, §15); the cell value is the
+  (`popcount(mask) / involvedCameraCount`, 0..1, §16); the cell value is the
   per-section **aggregation** over the column's voxels:
   - `mean` — average coverage fraction (the section analog of the §9.1 Coverage mode).
   - `max` — best-covered voxel in the column.
@@ -729,12 +740,163 @@ section stats."*; retained run diverged from the live scene → the numbers plus
 
 ---
 
-## 14. Out of scope / future
+## 14. Scene file (import / export)
+
+The scene can be saved to and loaded from a **scene folder** on disk — a portable
+representation of the geometry, cameras, probes, and sections. This uses the
+**File System Access API** (`showDirectoryPicker`), so import/export is available
+only in Chromium-based browsers; where the API is absent the controls are hidden
+(§14.7). View/render preferences (backend, overlay hue, transform space, intensity
+scale, panel split) are **not** part of the scene file — they remain app-local.
+
+### 14.1 Unified `Scene` model
+
+- All scene entities live in a single in-memory `Scene`:
+  `{ geometry: GeometryObject[], cameras: CameraConfig[], probes: Probe[], sections: Section[] }`.
+- The startup scene is **constructed in code** as a `Scene` from today's defaults
+  (`buildRoom.ts` geometry + `cameras/defaults.ts`); no folder is opened at boot (the
+  File System Access API requires a user gesture). `defaultScene()` is the single
+  source of the boot state.
+- Import **fully replaces** the current `Scene` (§14.4); it never merges.
+
+### 14.2 Folder layout & asset resolution
+
+```
+<scene folder>/
+  scene.json          # the serialized Scene (§14.3)
+  assets/
+    shelf.glb         # GLB/GLTF files referenced by scene.json
+    ...
+```
+
+- A `gltf` geometry object's `src` is a path **relative to the folder root**
+  (e.g. `assets/shelf.glb`), resolved through the picked directory handle.
+- Referencing anything outside the folder (absolute paths, URLs, `..` segments) is
+  invalid and rejected on import (§14.8).
+
+### 14.3 `scene.json` format
+
+- **`formatVersion`** — integer, currently `1`. An unknown/newer version is rejected
+  (§14.8).
+- **Coordinates / units** — world space, meters, right-handed **Y-up**: the same frame
+  as the SDK and glTF. Rotations are **quaternions `[x, y, z, w]`** throughout (matching
+  `CameraConfig.rotation`, §5.1).
+- **`geometry`** — an ordered list of objects, each a discriminated union on `kind`,
+  all carrying a transform (`position [x,y,z]`, `rotation [x,y,z,w]`, `scale [x,y,z]`):
+  - `room` — parametric shell (`halfX`, `halfZ`, `height`, `thickness`): floor + 4 walls,
+    open top (§4.1).
+  - `box` — axis-aligned obstacle (`min`, `max`) in the object's local frame.
+  - `gltf` — a `src` reference (§14.2) to a GLB/GLTF asset.
+- **`cameras`** / **`probes`** / **`sections`** — the serialized `CameraConfig[]`,
+  `Probe[]`, and `Section[]` (§5, §12.1, §13.1).
+- **Ids** are unique within each category; duplicates are rejected (§14.8).
+
+Sketch:
+
+```json
+{
+  "formatVersion": 1,
+  "geometry": [
+    { "kind": "room", "halfX": 10, "halfZ": 10, "height": 6, "thickness": 0.3,
+      "position": [0,0,0], "rotation": [0,0,0,1], "scale": [1,1,1] },
+    { "kind": "box", "min": [-7,0,-7], "max": [-4,2.5,-4],
+      "position": [0,0,0], "rotation": [0,0,0,1], "scale": [1,1,1] },
+    { "kind": "gltf", "src": "assets/shelf.glb",
+      "position": [2,0,3], "rotation": [0,0.707,0,0.707], "scale": [1,1,1] }
+  ],
+  "cameras": [
+    { "id": "cam-1", "position": [-6,5.4,-9.6], "rotation": [0,0,0,1],
+      "fov": 60, "aspect": 1.7778, "near": 0.1, "far": 30 }
+  ],
+  "probes": [ { "id": "probe-1", "position": [0,1,0] } ],
+  "sections": [
+    { "id": "section-1", "orientation": "horizontal", "min": 0, "max": 2,
+      "aggregation": "mean", "visible": true }
+  ]
+}
+```
+
+### 14.4 Import
+
+1. User picks a folder (`showDirectoryPicker`).
+2. Read and parse `scene.json`, then **validate all-or-nothing** — schema,
+   `formatVersion`, id uniqueness, object `kind`s, and asset-path safety (§14.2).
+3. Load **every** referenced GLB/GLTF via `GLTFLoader` (from `three/examples`, no new
+   npm dependency). Any missing-file or parse failure aborts the import.
+4. Only if all of the above succeed: build the merged collision mesh (§14.6),
+   **cancel any in-flight compute**, replace the `Scene`, clear the coverage overlay
+   and the retained per-run probe/section data (they read "no-data", §12.3/§13.4, until
+   the next run), and **require an explicit Run** (§8) — import never auto-computes.
+5. On **any** failure the current scene is left **completely untouched** and a single
+   clear error is surfaced (§14.8). There is never a half-loaded scene — silently
+   dropping an occluder would understate coverage.
+
+### 14.5 Export
+
+- Serializes the current `Scene` to `scene.json` and writes it back into the chosen
+  folder **in place** through the directory handle (a true round-trip).
+- Export writes **only `scene.json`** — GLB/GLTF bytes are *referenced*, expected to
+  already exist under `assets/`. A `gltf` object whose `src` is absent from the folder
+  is a **dangling reference** until the file is placed there (and will fail a later
+  import, §14.8). Bundling/embedding assets is out of scope (§14.9).
+
+### 14.6 Geometry rendering & collision
+
+- **Rendering** — `room`/`box` primitives render as today (§4.1); `gltf` objects render
+  with their own materials from the loaded glTF scene graph, positioned by the object
+  transform.
+- **Collision** — **every** geometry object contributes to occlusion. Each object is
+  reduced to world-space triangles: primitives generated as before; GLB meshes traversed,
+  each mesh's geometry transformed by (node world-matrix × object transform) and
+  de-indexed into world-space positions/indices. Non-mesh glTF nodes (embedded lights /
+  cameras) are ignored. All triangles are merged into the single indexed `SceneMesh`
+  passed to `engine.loadScene` (§4.1).
+- **Workspace** — the AABB passed to `init` (§4.2) is derived from the merged geometry's
+  bounds (with the existing margin), so imported geometry extending beyond the default
+  room is still covered.
+
+### 14.7 UI controls
+
+- **Load** (import) and **Save** (export) actions in a **"Scene"** panel at the
+  top of the left panel (§2.2), above the scene hierarchy.
+- Where the File System Access API is unavailable, the panel shows an
+  explanatory hint instead of the actions — there is no scene-file control in
+  that case (no in-app "reset to default"; reloading the page restores the
+  boot state, §14.1).
+
+### 14.8 Error handling
+
+| Case | Handling |
+|---|---|
+| User cancels the folder picker | no-op, scene unchanged |
+| `scene.json` missing / not JSON / schema-invalid | abort, keep current scene, show error |
+| Unknown / newer `formatVersion` | abort, keep current scene, show error |
+| Duplicate id within a category | abort, keep current scene, show error |
+| Unknown geometry `kind` | abort, keep current scene, show error |
+| Unsafe `src` (absolute / URL / `..` / outside folder) | abort, keep current scene, show error |
+| Referenced GLB missing or fails to parse | abort, keep current scene, show error |
+| Export write denied / fails | keep in-memory scene, show error |
+
+### 14.9 Out of scope for this feature
+
+- In-app geometry **authoring** — no add / move / scale / delete of geometry via gizmos
+  or panels, and geometry is not selectable/editable like cameras/probes/sections. The
+  geometry list is authored by editing `scene.json` or via export (§14.5).
+- Embedding or bundling assets (data-URI, zip) — assets stay file references (§14.5).
+- Non-Chromium browsers (no File System Access API).
+- Additional primitive kinds (cylinder, sphere, …) — use GLB for arbitrary shapes.
+
+---
+
+## 15. Out of scope / future
 
 - Mode 2 (coverage-count thresholding), per-camera coverage isolation view.
 - Height-band / box sampling regions as a live control.
-- Scene editing (adding/removing boxes), mesh import.
-- Persisting camera / probe / section layouts.
+- In-app scene *editing* — adding/removing/transforming geometry through the UI. The
+  scene file (§14) can carry imported geometry (including GLB meshes), but authoring it
+  in-app is out of scope.
+- Auto-persisting layouts across reloads (localStorage / autosave); explicit
+  scene-file import/export is §14.
 - Scene-hierarchy: further entity types (lights, meshes), user-created groups,
   reordering/reparenting, keyboard navigation.
 - Probes: richer per-camera detail (distance / angle), sub-voxel visibility (a true
@@ -747,7 +909,7 @@ section stats."*; retained run diverged from the live scene → the numbers plus
 
 ---
 
-## 15. Terminology
+## 16. Terminology
 
 Canonical domain language for the app. The rendering primitive that draws the
 visualization is described in

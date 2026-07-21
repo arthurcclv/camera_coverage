@@ -420,3 +420,14 @@ test('SectionHeatmapStore.reset clears chunks from the prior run', () => {
   const cell = cells!.cells[0 + cells!.dimsA * 0];
   assert.equal(cell.valid, false);
 });
+
+test('SectionHeatmapStore.clear() discards the retained run (spec §14.4)', () => {
+  const store = new SectionHeatmapStore();
+  store.reset(grid, ['cam-a']);
+  store.addChunk(denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] }));
+  assert.equal(store.hasRun(), true);
+
+  store.clear();
+  assert.equal(store.hasRun(), false);
+  assert.equal(store.computeCells({ orientation: 'vertical-x', min: 0, max: 4 }), null);
+});

@@ -36,24 +36,45 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
   'full' }] })`. It listens for the `warning` message to populate
   `flaggedCameras`. `EngineState = { status, backend, errorMessage,
   flaggedCameras, sceneStats, samplingStats }`.
-- **`App.tsx` `handleRun`** re-inits only when voxel size changed, filters out
-  disabled cameras, builds a `WorkspaceGrid`, resets probe-visibility, the
-  section-heatmap store, and overlay, then `compute({ mode: 1, onChunkDone })`
-  feeds each streamed chunk into **three** retained-data consumers: the coverage
-  overlay, the probe-visibility store, and the section-heatmap store.
+- **`App.tsx` `handleRun`** re-inits when voxel size changed **or** `room` (the
+  built geometry) was replaced since the last init — a scene-file import (spec
+  §14.4) always forces a fresh `loadScene`/workspace even at the same voxel
+  size, tracked via `initializedRoomRef`. It filters out disabled cameras,
+  builds a `WorkspaceGrid`, resets probe-visibility, the section-heatmap store,
+  and overlay, then `compute({ mode: 1, onChunkDone })` feeds each streamed
+  chunk into **three** retained-data consumers: the coverage overlay, the
+  probe-visibility store, and the section-heatmap store. Every stage after the
+  initial `runGenerationRef` snapshot re-checks it before touching state or
+  feeding a stream consumer, so a run superseded mid-flight by `applyScene`
+  (import) can't land its results or contaminate the new scene's retained
+  chunks — see DECISIONS.md.
 
 ## State management
 
-All state lives in `App.tsx` `useState` — cameras, probes, sections, selection,
-`disabledIds`, `collapsedIds`, overlay options, `voxelSize` (debounced 250 ms),
-summary, stale flag, `autoRun`, transform mode/space, gizmo visibility,
-`sectionsVisible` (the viewport master toggle), probe queries, `masksVersion`,
+All state lives in `App.tsx` `useState` — cameras, probes, sections,
+`geometryObjects` (the scene-file source of truth, spec §14.1) + `room` (its
+built `GeometryBuild`: collision mesh + renderable group + workspace bounds),
+selection, `disabledIds`, `collapsedIds`, overlay options, `voxelSize`
+(debounced 250 ms), summary, stale flag, `autoRun`, transform mode/space, gizmo
+visibility, `sectionsVisible` (the viewport master toggle), probe queries,
+`masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`,
 inspector split height. Per-section `SectionCellGrid`s are derived state
 (`useMemo` over `sections` + `masksVersion`), not stored directly. Live values
 are mirrored into `useRef`s so the imperative Three.js callbacks read current
 state without re-subscribing. **Auto-run** is a 10 Hz `setInterval` that fires
 `handleRun` when inputs are stale and the engine is idle and error-free (spec
 §8.1 throttle).
+
+`room` used to be a `useMemo(() => buildRoom(), [])` constant; it's now real
+state so scene-file import (spec §14) can replace it. The Three.js setup
+effect (viewport, gizmos, listeners) still runs exactly once — it no longer
+depends on `room` — and a separate effect (deps `[room, viewportReady]`) owns
+adding/removing `room.group` from the scene, so a geometry swap never tears
+down or recreates the WebGPU renderer/orbit camera. `applyScene` (in
+`App.tsx`) is the single place that replaces geometry + cameras + probes +
+sections + all derived/retained-run state together; `handleImportScene` is a
+thin wrapper around it and `scene/sceneIO.ts` (there is no in-app "reset to
+default" — see DECISIONS.md).
 
 ## Module responsibilities
 
@@ -66,8 +87,33 @@ state without re-subscribing. **Auto-run** is a 10 Hz `setInterval` that fires
   wrappers with CPU fallback.
 
 **Scene (`scene/`, imperative Three.js + pure math)**
-- `buildRoom.ts` — room + box obstacles → one merged triangle mesh (for the SDK)
-  plus Three.js meshes; workspace-AABB constants.
+- `geometryModel.ts` — the `GeometryObject` union (`room`/`box`/`gltf`, spec
+  §14.1, §14.3) + pure triangle-mesh math shared by the default room and
+  imported geometry: `boxTris`/`roomTris`/`mergeTris`, `transformTriMesh`
+  (bakes a `position`/`rotation`/`scale` into world-space vertices),
+  `computeAabb`/`computeWorkspaceBounds`.
+- `buildRoom.ts` — `defaultGeometry()`: the default scene's `GeometryObject[]`
+  (a room + 5 box obstacles, identity transforms) from the room constants
+  (`ROOM_HALF_X`/`ROOM_HALF_Z`/`ROOM_HEIGHT`/`WALL_THICKNESS`, still consumed
+  directly by `cameras/defaults.ts` for camera placement).
+- `sceneModel.ts` — the unified `Scene` type (`geometry + cameras + probes +
+  sections`, spec §14.1) + `defaultScene()`, the single source of the boot
+  state.
+- `sceneGeometryBuild.ts` — reduces a `GeometryObject[]` to one `GeometryBuild`
+  (merged collision `SceneMesh` + renderable `THREE.Group` + workspace bounds,
+  spec §14.6). `buildStaticGeometrySync` handles `room`/`box` only (the
+  synchronous fast path used for the default scene); `buildSceneGeometry` adds
+  `gltf` objects via `GLTFLoader`, transforming each mesh by (object transform ×
+  node world-matrix) into the same merged mesh. `disposeGeometryBuild` releases
+  a superseded build's GPU resources.
+- `sceneFile.ts` — pure `scene.json` schema/validation/(de)serialization (spec
+  §14.3, §14.8): `parseSceneFile` (schema, `formatVersion`, geometry `kind`s,
+  asset-path safety, id uniqueness within cameras/probes/sections — geometry
+  objects carry no id) and `serializeScene`. No file I/O; this is the layer
+  with real decision logic, so it's the one that's unit-tested.
+- `sceneIO.ts` — the only impure scene-file I/O: `importSceneFromDirectory`/
+  `exportSceneToDirectory` against a `FileSystemDirectoryHandle` (spec §14.4,
+  §14.5), thin wrappers around `sceneFile.ts` + `sceneGeometryBuild.ts`.
 - `viewport.ts` — async `WebGPURenderer` init, orbit + transform controls, lights,
   grid, render loop.
 - `cameraGizmos.ts` — per-camera frustum wireframe + pickable "body" sphere;
@@ -101,6 +147,9 @@ state without re-subscribing. **Auto-run** is a 10 Hz `setInterval` that fires
 - `math.ts` — Euler (YXZ, degrees) ↔ quaternion helpers.
 
 **UI (`ui/`, presentational React)**
+- `SceneFileControls.tsx` — the "Scene" panel (Load/Save, spec §14.7) atop the
+  left panel, above the hierarchy; hidden entirely where the File System Access
+  API is unavailable.
 - `SceneHierarchy.tsx` — tree view, add menu, delete context menu, per-kind rows.
 - `CameraPanel.tsx` — selected-camera position / Euler / FOV / range (far) sliders.
 - `ProbePanel.tsx` — probe position sliders + visibility readout + stale hint.

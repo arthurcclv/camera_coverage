@@ -120,7 +120,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
   return (
     <div className="scene-hierarchy">
       <div className="panel-title scene-header">
-        <span>Scene</span>
+        <span>Hierarchy</span>
         <div className="add-menu-anchor">
           <button
             type="button"

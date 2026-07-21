@@ -105,6 +105,12 @@ export class ProbeVisibility {
     this.chunks.set(result.chunkId, result);
   }
 
+  /** Discard the retained run so `query()` reads "no-data" until the next run (spec §14.4). */
+  clear(): void {
+    this.grid = null;
+    this.chunks.clear();
+  }
+
   /** Decode the retained mask at the probe's world position (spec §12.2). */
   query(p: Vec3): ProbeVisibilityResult {
     if (!this.grid) return { status: 'no-data' };

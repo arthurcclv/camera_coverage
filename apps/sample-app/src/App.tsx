@@ -7,7 +7,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import * as THREE from 'three';
 import { WorkspaceGrid, type CameraConfig, type CoverageSummary, type Vec3 } from '@linkervision/camera-coverage-sdk';
 
-import { buildRoom } from './scene/buildRoom.ts';
 import { createViewport, type RenderBackend, type Viewport } from './scene/viewport.ts';
 import { CameraGizmoSet } from './scene/cameraGizmos.ts';
 import { ProbeGizmoSet } from './scene/probeGizmos.ts';
@@ -31,7 +30,11 @@ import {
 } from './scene/transformSpace.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { selectionAfterClick, type PointerPos, type Selection } from './scene/viewportSelection.ts';
-import { defaultCameras } from './cameras/defaults.ts';
+import { defaultGeometry } from './scene/buildRoom.ts';
+import { defaultScene, type Scene } from './scene/sceneModel.ts';
+import type { GeometryObject } from './scene/geometryModel.ts';
+import { buildStaticGeometrySync, disposeGeometryBuild, type GeometryBuild } from './scene/sceneGeometryBuild.ts';
+import { exportSceneToDirectory, importSceneFromDirectory } from './scene/sceneIO.ts';
 import { useEngine } from './engine/useEngine.ts';
 
 import {
@@ -50,6 +53,7 @@ import { SectionHeatmapControls } from './ui/SectionHeatmapControls.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
 import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
 import { RunBar } from './ui/RunBar.tsx';
+import { SceneFileControls } from './ui/SceneFileControls.tsx';
 
 const CHUNK_SIZE_XZ = 10;
 const DEFAULT_VOXEL_SIZE = 0.5;
@@ -59,6 +63,12 @@ const AUTO_RUN_MAX_HZ = 10;
 // Defaults for a camera spawned from the "+" menu (spec §5.5), matching the
 // default rig's optics (cameras/defaults.ts).
 const NEW_CAMERA = { fov: 60, aspect: 16 / 9, near: 0.1, far: 30 };
+
+/** Human-readable message for a scene-file import/export failure (spec §14.8). */
+function describeSceneError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
 
 /** Next free `prefix-N` id given the existing ids (spec §5.5). */
 function nextFreeId(prefix: string, ids: string[]): string {
@@ -169,7 +179,12 @@ const DEFAULT_OVERLAY_OPTIONS: OverlayOptions = {
 };
 
 export function App() {
-  const room = useMemo(() => buildRoom(), []);
+  // The default scene (spec §14.1) is computed once; `geometryObjects`/`room`
+  // (its built render+collision artifact) can later be replaced wholesale by
+  // Import/Reset (spec §14.4, §14.7) — see `applyScene` below.
+  const initialScene = useMemo(() => defaultScene(), []);
+  const [geometryObjects, setGeometryObjects] = useState<GeometryObject[]>(initialScene.geometry);
+  const [room, setRoom] = useState<GeometryBuild>(() => buildStaticGeometrySync(initialScene.geometry));
   const engine = useEngine();
   const probeVisibility = useMemo(() => new ProbeVisibility(), []);
   const sectionHeatmapStore = useMemo(() => new SectionHeatmapStore(), []);
@@ -183,9 +198,9 @@ export function App() {
     [room],
   );
 
-  const [cameras, setCameras] = useState<CameraConfig[]>(() => defaultCameras());
-  const [probes, setProbes] = useState<Probe[]>([]);
-  const [sections, setSections] = useState<Section[]>([]);
+  const [cameras, setCameras] = useState<CameraConfig[]>(initialScene.cameras);
+  const [probes, setProbes] = useState<Probe[]>(initialScene.probes);
+  const [sections, setSections] = useState<Section[]>(initialScene.sections);
   // Master show/hide-all for the section heatmap layer (viewport toolbar, spec §2.4).
   const [sectionsVisible, setSectionsVisible] = useState(true);
   const [selection, setSelection] = useState<Selection>(() =>
@@ -213,6 +228,15 @@ export function App() {
   const [probeQueries, setProbeQueries] = useState<Map<string, ProbeVisibilityResult>>(new Map());
   // Bumped whenever a completed run replaces the retained masks (spec §12.2).
   const [masksVersion, setMasksVersion] = useState(0);
+  // Flips true once the async Three.js viewport setup completes (spec §2.3); a
+  // geometry swap (import/reset) needs this in its dependency array so the
+  // group-sync effect below can add the initial geometry once the viewport
+  // actually exists (see the mount effect further down).
+  const [viewportReady, setViewportReady] = useState(false);
+  // Scene-file import/export state (spec §14.7, §14.8).
+  const [sceneError, setSceneError] = useState<string | null>(null);
+  const [sceneIOBusy, setSceneIOBusy] = useState(false);
+  const fileSystemAccessAvailable = useMemo(() => typeof window !== 'undefined' && 'showDirectoryPicker' in window, []);
 
   const selectedCameraId = selection?.kind === 'camera' ? selection.id : null;
   const selectedProbeId = selection?.kind === 'probe' ? selection.id : null;
@@ -267,6 +291,20 @@ export function App() {
   const probeGizmosRef = useRef<ProbeGizmoSet | null>(null);
   const sectionGizmosRef = useRef<SectionGizmoSet | null>(null);
   const overlayRef = useRef<CoverageOverlay | null>(null);
+  // Mirrors `room` for the mount effect's async IIFE (spec §2.3), which reads
+  // whatever geometry is current by the time the viewport finishes setting up,
+  // and for `applyScene`, which disposes the outgoing build.
+  const roomRef = useRef(room);
+  roomRef.current = room;
+  // The `room` the engine was last `initAndLoad`-ed against; `handleRun` forces
+  // a re-init when this no longer matches, so a geometry swap (import/reset)
+  // isn't masked by voxel size staying the same (spec §14.4).
+  const initializedRoomRef = useRef<GeometryBuild | null>(null);
+  // Bumped by `applyScene`; `handleRun` discards a run's results if this no
+  // longer matches the generation it started with — the in-scope interpretation
+  // of "cancel any in-flight compute" (spec §14.4), since the engine/worker
+  // exposes no true cancellation primitive today.
+  const runGenerationRef = useRef(0);
   const camerasRef = useRef(cameras);
   camerasRef.current = cameras;
   const probesRef = useRef(probes);
@@ -327,7 +365,9 @@ export function App() {
       const probeGizmos = new ProbeGizmoSet();
       const sectionGizmos = new SectionGizmoSet();
       const overlay = new CoverageOverlay();
-      viewport.scene.add(room.group);
+      // The geometry group itself is added by the dedicated sync effect below
+      // (keyed on `[room, viewportReady]`) once this flips true, so the initial
+      // add and every later import/reset swap go through one code path.
       viewport.scene.add(gizmos.group);
       viewport.scene.add(probeGizmos.group);
       viewport.scene.add(sectionGizmos.group);
@@ -339,6 +379,7 @@ export function App() {
       sectionGizmosRef.current = sectionGizmos;
       overlayRef.current = overlay;
       setRenderBackend(viewport.renderBackend);
+      setViewportReady(true);
 
       // Apply any option/camera/probe/section state that changed before setup completed.
       overlay.setOptions(overlayOptionsRef.current);
@@ -346,7 +387,14 @@ export function App() {
       gizmos.update(camerasRef.current, sel?.kind === 'camera' ? sel.id : null, engineFlaggedRef.current, disabledIdsRef.current);
       gizmos.group.visible = gizmosVisibleRef.current;
       probeGizmos.update(probesRef.current, sel?.kind === 'probe' ? sel.id : null);
-      sectionGizmos.update(sectionsRef.current, new Map(), sectionsVisibleRef.current, false, room.worldMin, room.worldMax);
+      sectionGizmos.update(
+        sectionsRef.current,
+        new Map(),
+        sectionsVisibleRef.current,
+        false,
+        roomRef.current.worldMin,
+        roomRef.current.worldMax,
+      );
       viewport.transformControls.setSpace(threeSpace(transformSpaceRef.current));
       const initialSection = sel?.kind === 'section' ? sectionsRef.current.find((s) => s.id === sel.id) : undefined;
       const initialCollapseAxis = initialSection ? axisMapping(initialSection.orientation).collapseAxis : null;
@@ -428,6 +476,7 @@ export function App() {
         probeGizmosRef.current = null;
         sectionGizmosRef.current = null;
         overlayRef.current = null;
+        setViewportReady(false);
       };
     })();
 
@@ -435,8 +484,22 @@ export function App() {
       cancelled = true;
       teardown?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room]);
+    // Created once (spec §2.3); geometry/camera/probe/section state changes are
+    // pushed into the running viewport by the effects below instead of re-running
+    // this setup.
+  }, []);
+
+  // --- keep the geometry group in sync with `room` (import/reset, spec §14.4):
+  // owns adding/removing it from the scene so a geometry swap never tears down
+  // the viewport itself, only the geometry within it. ------------------------
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.scene.add(room.group);
+    return () => {
+      viewport.scene.remove(room.group);
+    };
+  }, [room, viewportReady]);
 
   // --- push camera/probe state into gizmos ---------------------------------
   useEffect(() => {
@@ -613,15 +676,95 @@ export function App() {
     setSelection((prev) => (prev?.kind === 'section' && prev.id === id ? null : prev));
   }, []);
 
+  // --- scene file: import / export / reset (spec §14) ------------------------
+  // Replaces the whole Scene at once: geometry, cameras, probes, sections, plus
+  // every derived/retained-run bit of state, so nothing from the outgoing scene
+  // lingers (spec §14.4).
+  const applyScene = useCallback(
+    (next: { geometry: GeometryObject[]; build: GeometryBuild; cameras: CameraConfig[]; probes: Probe[]; sections: Section[] }) => {
+      runGenerationRef.current += 1;
+      disposeGeometryBuild(roomRef.current);
+      setRoom(next.build);
+      setGeometryObjects(next.geometry);
+      setCameras(next.cameras);
+      setProbes(next.probes);
+      setSections(next.sections);
+      setDisabledIds(new Set());
+      setSelection(next.cameras[0] ? { kind: 'camera', id: next.cameras[0].id } : null);
+      setSummary(null);
+      setHasRunOnce(false);
+      setStale(false);
+      setInitializedVoxelSize(null);
+      initializedRoomRef.current = null;
+      overlayRef.current?.reset();
+      probeVisibility.clear();
+      sectionHeatmapStore.clear();
+      setMasksVersion((v) => v + 1);
+      setSceneError(null);
+    },
+    [probeVisibility, sectionHeatmapStore],
+  );
+
+  const handleImportScene = useCallback(async () => {
+    let dir: FileSystemDirectoryHandle;
+    try {
+      dir = await window.showDirectoryPicker({ mode: 'read' });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return; // user cancelled (§14.8)
+      setSceneError(describeSceneError(err));
+      return;
+    }
+    setSceneIOBusy(true);
+    try {
+      const { scene: imported, build } = await importSceneFromDirectory(dir);
+      applyScene({ geometry: imported.geometry, build, cameras: imported.cameras, probes: imported.probes, sections: imported.sections });
+    } catch (err) {
+      // Nothing above this point touched app state, so the current scene is
+      // left completely untouched on failure (spec §14.4, §14.8).
+      setSceneError(describeSceneError(err));
+    } finally {
+      setSceneIOBusy(false);
+    }
+  }, [applyScene]);
+
+  const handleExportScene = useCallback(async () => {
+    let dir: FileSystemDirectoryHandle;
+    try {
+      dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      setSceneError(describeSceneError(err));
+      return;
+    }
+    setSceneIOBusy(true);
+    try {
+      const current: Scene = { geometry: geometryObjects, cameras, probes, sections };
+      await exportSceneToDirectory(dir, current);
+      setSceneError(null);
+    } catch (err) {
+      setSceneError(describeSceneError(err));
+    } finally {
+      setSceneIOBusy(false);
+    }
+  }, [geometryObjects, cameras, probes, sections]);
+
   const handleRun = useCallback(async () => {
-    const needsReinit = initializedVoxelSize === null || initializedVoxelSize !== debouncedVoxelSize;
+    // Snapshot the scene "generation": if `applyScene` (import/reset) bumps
+    // this while we're mid-run, every check below discards this run's results
+    // instead of applying them — the in-scope stand-in for "cancel any
+    // in-flight compute" (spec §14.4; see `runGenerationRef`'s declaration).
+    const gen = runGenerationRef.current;
+    const needsReinit =
+      initializedVoxelSize === null || initializedVoxelSize !== debouncedVoxelSize || initializedRoomRef.current !== room;
     if (needsReinit) {
       const initResult = await engine.initAndLoad(room.sceneMesh, room.worldMin, room.worldMax, debouncedVoxelSize, CHUNK_SIZE_XZ);
+      if (gen !== runGenerationRef.current) return;
       if (!initResult) {
         setInitializedVoxelSize(null);
         return;
       }
       setInitializedVoxelSize(debouncedVoxelSize);
+      initializedRoomRef.current = room;
     }
 
     const enabledCameras = camerasRef.current.filter((c) => !disabledIdsRef.current.has(c.id));
@@ -642,11 +785,15 @@ export function App() {
     const result = await engine.compute({
       mode: 1,
       onChunkDone: (_chunkId, chunkResult) => {
+        // A newer scene may have replaced (and cleared) these stores mid-stream;
+        // don't let a stale chunk repopulate them (spec §14.4).
+        if (gen !== runGenerationRef.current) return;
         overlayRef.current?.addChunk(chunkResult);
         probeVisibility.addChunk(chunkResult);
         sectionHeatmapStore.addChunk(chunkResult);
       },
     });
+    if (gen !== runGenerationRef.current) return;
     if (result) {
       setSummary(result);
       setHasRunOnce(true);
@@ -692,6 +839,13 @@ export function App() {
   return (
     <div className="app">
       <div className="left-panel" ref={leftPanelRef}>
+        <SceneFileControls
+          fileSystemAccessAvailable={fileSystemAccessAvailable}
+          busy={sceneIOBusy}
+          error={sceneError}
+          onImport={handleImportScene}
+          onExport={handleExportScene}
+        />
         <div className="panel hierarchy-panel">
           <SceneHierarchy
             cameras={cameras}

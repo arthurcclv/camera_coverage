@@ -91,3 +91,13 @@ test('reset clears retained chunks and the camera snapshot', () => {
   pv.reset(grid, ['cam-x']); // new run: no chunks yet
   assert.deepEqual(pv.query([1.5, 0.5, 0.5]), { status: 'no-data' });
 });
+
+test('clear() discards the retained run so query() reads no-data (spec §14.4)', () => {
+  const pv = new ProbeVisibility();
+  pv.reset(grid, ['cam-a', 'cam-b', 'cam-c']);
+  pv.addChunk(buildChunk());
+  assert.ok(pv.query([1.5, 0.5, 0.5]).status === 'ok');
+
+  pv.clear();
+  assert.deepEqual(pv.query([1.5, 0.5, 0.5]), { status: 'no-data' });
+});

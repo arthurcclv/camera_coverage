@@ -438,6 +438,13 @@ export class SectionHeatmapStore {
     return this.grid !== null;
   }
 
+  /** Discard the retained run so `computeCells()` reads `null` until the next run (spec §14.4). */
+  clear(): void {
+    this.grid = null;
+    this.chunks.clear();
+    this.accessorCache.clear();
+  }
+
   private accessorFor(chunkId: number): VoxelAccessor | undefined {
     let acc = this.accessorCache.get(chunkId);
     if (!acc) {
