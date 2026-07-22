@@ -312,6 +312,75 @@ export function turboCssGradient(): string {
   return `linear-gradient(to right, ${stops.join(', ')})`;
 }
 
+// --- Legend scale (spec §13.6): the colorbar's Turbo gradient is fixed, but its
+// tick labels + caption read in the units the selected section's aggregation
+// encodes — a camera count for mean/max/min, a percentage for blind, or the
+// plain coverage fraction as a fallback. Value→color is always the same linear
+// 0..1 Turbo mapping; only the labels change. Pure (no React) so the tick math
+// is unit-testable (see test/sectionHeatmap.test.ts). --------------------------
+
+/** One legend tick: its label and its fractional position (0..1) along the bar. */
+export interface LegendTick {
+  label: string;
+  /** Position along the colorbar, 0 (left) .. 1 (right). */
+  pos: number;
+}
+
+export interface LegendScale {
+  caption: string;
+  ticks: LegendTick[];
+}
+
+/** "Nice" step (1,2,5,10,…) for `count` camera-count ticks yielding ~5–9 labels. */
+function niceCameraStep(count: number): number {
+  const rawStep = count / 8; // aim for at most ~8 intervals
+  const nice = [1, 2, 5, 10, 20, 25, 50, 100];
+  for (const s of nice) if (s >= rawStep) return s;
+  return nice[nice.length - 1];
+}
+
+const FRACTION_TICKS = [0, 0.25, 0.5, 0.75, 1];
+
+/**
+ * Legend caption + tick labels for the section colorbar (spec §13.6). Camera-count
+ * and blind scales require a section selected (`aggregation != null`) *and* a
+ * completed run (`cameraCount != null && > 0`); otherwise the scale falls back to
+ * the plain coverage fraction `0..1`.
+ */
+export function sectionLegendScale(
+  aggregation: SectionAggregation | null,
+  cameraCount: number | null,
+): LegendScale {
+  if (aggregation != null && cameraCount != null && cameraCount > 0) {
+    if (aggregation === 'blind') {
+      return {
+        caption: 'Blind-voxel share',
+        ticks: [0, 0.5, 1].map((f) => ({ label: `${Math.round(f * 100)}%`, pos: f })),
+      };
+    }
+    // mean / max / min — camera count 0..N at an adaptive integer step. Coverage
+    // fraction maps linearly to color, so count k sits at position k / N.
+    const n = cameraCount;
+    const step = niceCameraStep(n);
+    const counts: number[] = [];
+    for (let k = 0; k <= n; k += step) counts.push(k);
+    const last = counts[counts.length - 1];
+    if (last !== n) {
+      // Ensure N is the final label; drop the penultimate tick if it would crowd it.
+      if (n - last < step) counts.pop();
+      counts.push(n);
+    }
+    return {
+      caption: 'Cameras seeing voxel',
+      ticks: counts.map((k) => ({ label: String(k), pos: k / n })),
+    };
+  }
+  return {
+    caption: 'Coverage fraction',
+    ticks: FRACTION_TICKS.map((f) => ({ label: String(f), pos: f })),
+  };
+}
+
 /** Turbo-style colormap: value 0..1 -> RGB components 0..1 (spec §13.5). */
 export function turboColormap(t: number): [number, number, number] {
   const x = clamp01(t) * (TURBO_STOPS.length - 1);

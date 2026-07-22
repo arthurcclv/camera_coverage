@@ -98,6 +98,20 @@ body {
   z-index: 1;
 }
 
+/* Floating section-heatmap legend (spec §2.2, §13.6): the SectionHeatmapControls
+   .panel card pinned to the viewport bottom-right, lifted off the 3D scene with a
+   drop shadow. Shown only when the section layer is visible and a section exists. */
+.viewport-legend {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 180px;
+  z-index: 1;
+}
+.viewport-legend > .panel {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
 .btn.active {
   background: #2c66c9;
   color: white;
@@ -631,7 +645,9 @@ button.tree-caret:focus-visible {
 }
 
 /* Section heatmap legend (spec §13.6): a horizontal Turbo gradient colorbar
-   with 0/1 endpoint labels. */
+   whose tick labels adapt to the selected section's aggregation (camera count /
+   percent / fraction). Ticks are absolutely positioned at their fractional
+   spot along the bar, so an adaptive integer step can land them unevenly. */
 .legend-bar {
   height: 12px;
   border-radius: 4px;
@@ -639,10 +655,15 @@ button.tree-caret:focus-visible {
   margin: 6px 0 2px;
 }
 .legend-labels {
-  display: flex;
-  justify-content: space-between;
+  position: relative;
+  height: 14px;
   font-size: 11px;
   color: #7c8592;
+}
+.legend-tick {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
 }
 
 .status-line {

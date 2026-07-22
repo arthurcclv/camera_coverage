@@ -111,11 +111,14 @@ The app is a **three-column** flex layout (desktop only, §1):
   never shows a nested second scrollbar. Both sides keep a minimum height. Until
   first dragged the detail panel uses its natural height; once dragged, the
   chosen split is remembered across reloads (localStorage).
-- **Center** — the 3D viewport with its overlaid toolbars (§2.4).
+- **Center** — the 3D viewport with its overlaid toolbars (§2.4) and, at the
+  **bottom-right**, the floating **section-heatmap legend** (`SectionHeatmapControls`),
+  shown only when the section layer is visible and at least one section exists (§13.6).
 - **Right sidebar** — the run/results controls: `RunBar`, `OverlayControls`,
-  `SectionHeatmapControls`, `SamplingVolumeControls` (the zone tool, above the
-  stats since it governs the coverage denominator), `StatsPanel`, and (when a
-  section is selected) `SectionStatsPanel` (§13.7).
+  `SamplingVolumeControls` (the zone tool, above the stats since it governs the
+  coverage denominator), `StatsPanel`, and (when a section is selected)
+  `SectionStatsPanel` (§13.7). The section-heatmap legend is **not** here — it floats
+  over the viewport (see Center, §13.6).
 
 Both side columns share the same fixed width and are not collapsible; only the
 left column's internal hierarchy/detail split is adjustable (via the divider above).
@@ -140,7 +143,8 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
 
 ### 2.4 Viewport toolbar
 
-Two toolbars overlay the 3D viewport itself (independent of the side panels):
+Two toolbars overlay the 3D viewport itself (independent of the side panels; the
+viewport also carries the floating section-heatmap legend at its bottom-right, §13.6):
 
 - **Top-left** — transform controls for the selected entity (§5.2):
   - Transform **mode** toggle: **Move** / **Rotate** / **Scale** icon buttons,
@@ -744,6 +748,11 @@ and reuses the workspace grid's in-plane dimensions.
   column reads as value 0. Invalid cells are **pure black**. The `blind` aggregation is
   drawn through the same colormap (0 → no blind voxels, 1 → all blind); its meaning is
   labeled in the controls and Section stats so the shared legend stays unambiguous.
+- **Legend scale.** The colorbar gradient is fixed, but its numeric labels are read in
+  the units the selected section's aggregation encodes — a **camera count** (`0`..`N`)
+  for `mean`/`max`/`min`, a **percentage** for `blind`, or the plain coverage
+  **fraction** as a fallback — per §13.6. Value → color is still the same linear
+  Turbo mapping over `0..1`; only the *labels* change.
 
 ### 13.6 Controls & enablement
 
@@ -751,9 +760,37 @@ and reuses the workspace grid's in-plane dimensions.
   shows a **`SectionPanel`** in place of the camera/probe panel: header
   `Section — <id>`, the orientation selector, the thickness slider (§13.2), and the
   aggregation selector.
-- **Global controls** — a **"Section heatmap"** block in the right sidebar
-  (`SectionHeatmapControls`) holds the shared **colormap** (Turbo) and its **0..1
-  legend / colorbar**.
+- **Global controls** — the section-heatmap **legend / colorbar**
+  (`SectionHeatmapControls`) holds the shared **colormap** (a fixed Turbo gradient).
+  It is a **floating overlay pinned to the bottom-right of the viewport** (§2.2) — a
+  third viewport overlay alongside the two top toolbars (§2.4), an **opaque card with
+  a drop shadow** so it reads over the 3D scene. To stay compact over the scene it
+  shows **only** the adaptive caption, the colorbar, and its numeric ticks — **no
+  block title and no "Colormap: Turbo" label** (the colormap is fixed, so it needs no
+  on-screen name). It is shown **only when the section layer is visible *and* at least
+  one section exists** (the master **Section** toggle, §2.4, is on **and** `sections`
+  is non-empty); otherwise it is hidden, so it never floats over an empty scene. Its
+  visibility is purely presentational and never affects `compute()` or the heatmaps
+  themselves. The colorbar's **numeric scale and caption adapt to the
+  currently-selected section's aggregation** so the numbers read in the units the
+  heatmap actually encodes (§13.5):
+  - `mean` / `max` / `min` — the scale is a **camera count**, `0` to `N`, where `N`
+    is the enabled-camera count of the **retained run** the selected section's
+    heatmap reflects (the coverage-fraction denominator, §13.3; the same count the
+    per-camera stats decode against). Because coverage fraction maps **linearly** to
+    color, a count `k` sits at colorbar position `k / N`. Labels are **whole camera
+    counts** at an **adaptive step** (a "nice" step — 1, 2, 5, 10, 20, 25, 50, … —
+    chosen to yield ~5–9 roughly evenly-spaced ticks), always including `0` and `N`.
+    Caption: **"Cameras seeing voxel"**.
+  - `blind` — the scale is the **blind-voxel share** as a **percentage**, `0%` to
+    `100%` (ticks `0/50/100` only); camera counts are meaningless here (§13.5).
+    Caption: **"Blind-voxel share"**.
+  - **No section selected, or no `compute()` completed yet** (so `N` is unknown) —
+    the scale falls back to the plain **coverage fraction** `0`..`1`
+    (ticks `0/0.25/0.5/0.75/1`). Caption: **"Coverage fraction"**.
+  The colorbar itself (the Turbo gradient) never changes — only its tick labels and
+  caption do; the recompute/enable rules of §13.4 are unaffected (relabeling is
+  instant and never triggers `compute()`).
 - **Enabled.** Each section's hierarchy row has an **enabled checkbox**
   ("Enable/Disable section") toggling that one heatmap on/off (the section analog of
   the camera enable checkbox, §5.4, and the unified `onToggleEnabled` handler, but

@@ -133,7 +133,8 @@ default" — see DECISIONS.md).
 - `coverageOverlay.ts` — maps `ChunkResult` leaves → volumetric voxels per mode;
   hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`).
 - `sectionHeatmap.ts` — `Section` model, retained-chunk store, cross-chunk column
-  aggregation, Turbo-style colormap, texture-data + stats generation (§13), plus
+  aggregation, Turbo-style colormap, texture-data + stats generation, aggregation-aware
+  legend scale (`sectionLegendScale`, §13.6), plus
   `sectionPlaneRotation`/`collapseAxisNormalSign` (the plane-orientation math
   `sectionGizmos.ts` renders with — kept here, not there, so it's unit-tested;
   see DECISIONS.md's "mirrored along its in-plane Z axis" entry for why that
@@ -179,7 +180,11 @@ default" — see DECISIONS.md).
 - `ZonePanel.tsx` — selected-zone editable name + member count + per-zone coverage
   stats (whether the zone is enabled is controlled by the zone row's checkbox, not here).
 - `OverlayControls.tsx` — resolution slider + overlay mode / color / intensity.
-- `SectionHeatmapControls.tsx` — the shared Turbo legend/colorbar.
+- `SectionHeatmapControls.tsx` — the shared Turbo legend/colorbar; its caption +
+  tick labels adapt to the selected section's aggregation (camera count / percent /
+  fraction) via `sectionLegendScale` (§13.6). Rendered as a **floating `.viewport-legend`
+  overlay at the viewport bottom-right** (not in the sidebar), gated on
+  `sectionsVisible && sections.length > 0` (§2.2).
 - `SamplingVolumeControls.tsx` — the zone tool block (useZones toggle, Generate,
   zone/box level sliders, marked-voxels readout), above StatsPanel.
 - `StatsPanel.tsx` — coverage summary + compute/render backend readout (reflects

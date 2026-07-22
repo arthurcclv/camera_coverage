@@ -1309,6 +1309,14 @@ export function App() {
               <CameraIcon />
             </button>
           </div>
+          {sectionsVisible && sections.length > 0 && (
+            <div className="viewport-legend">
+              <SectionHeatmapControls
+                aggregation={selectedSection?.aggregation ?? null}
+                cameraCount={selectedSection ? (sectionCellGrids.get(selectedSection.id)?.cameraIds.length ?? null) : null}
+              />
+            </div>
+          )}
         </div>
       </div>
       <div className="sidebar">
@@ -1328,7 +1336,6 @@ export function App() {
           onVoxelSizeChange={setVoxelSize}
           estimatedVoxelCount={estimatedVoxelCount}
         />
-        <SectionHeatmapControls />
         <SamplingVolumeControls
           useZones={useZones}
           onUseZonesChange={handleToggleUseZones}

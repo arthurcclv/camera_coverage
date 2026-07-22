@@ -6,6 +6,39 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Section legend floats over the viewport, gated on layer + section presence
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.2/§13.6. `SectionHeatmapControls`
+renders as a floating `.viewport-legend` overlay at the viewport bottom-right (a third
+overlay beside the two top toolbars, §2.4) rather than as a right-sidebar panel, and is
+shown only when `sectionsVisible && sections.length > 0`. **Why:** the legend describes
+the on-scene heatmaps, so it reads better docked to the viewport than buried in the
+sidebar's scroll; gating on the master toggle keeps the legend and the heatmap layer
+appearing/disappearing together, and the extra `sections.length > 0` guard stops a
+meaningless `0..1` fallback legend from floating over the **default empty scene**
+(which starts with `sectionsVisible = true` but no sections). It stays an opaque
+`.panel` card (plus a drop shadow to lift it off the 3D scene) rather than a translucent
+HUD, for consistency with every other panel and guaranteed readability over bright cells.
+
+## Section legend labels track the selected section's aggregation
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.5/§13.6. The section colorbar
+is a fixed Turbo gradient (value→color is always the linear `0..1` mapping), but its
+tick labels and caption are derived at render time from the *selected* section:
+`sectionLegendScale(aggregation, cameraCount)` in `sectionHeatmap.ts` returns
+`{caption, ticks:[{label, pos}]}` — a **camera count** `0..N` for `mean`/`max`/`min`
+(N = the retained run's enabled-camera count, i.e. the coverage-fraction denominator;
+count `k` sits at position `k/N` because the mapping is linear), a **percentage** for
+`blind`, or the plain coverage **fraction** as a fallback when no section is selected
+or no run has completed. Camera-count ticks use an adaptive "nice" step (1/2/5/10/…)
+targeting ~5–9 labels, always including 0 and N. **Why:** users read the heatmap as
+"how many cameras see this," not an abstract 0..1 — but only the coverage aggregations
+map to a count, so the scale is aggregation-aware rather than a single global relabel.
+The tick math is a pure function (no React) so it is unit-tested directly
+(`test/sectionHeatmap.test.ts`); the component only positions the returned ticks.
+Labels are positioned absolutely along the bar (not flex `space-between`) since an
+adaptive step can leave the final gap uneven.
+
 ## "% of full" denominator comes from full-volume sampling, not the run
 
 Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §6.3/§7.4.
