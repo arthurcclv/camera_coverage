@@ -6,6 +6,34 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Duplicate: a pure copy module, deep-copying children, with app-level state left in App
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.5. The hierarchy row context menu gained a
+**Duplicate** action (above Delete) for all five kinds. The copy logic lives in a pure
+`scene/entityDuplication.ts` module (`duplicateCamera`/`Probe`/`Section`/`Volume`/`Zone` +
+`nextFreeId`, moved out of `App.tsx`), so it is unit-testable under `node --test` without rendering
+`App` — matching the repo's pure-module test convention. The `App.tsx` handlers are thin wrappers
+that apply the returned entity via the existing setters.
+
+**Copy is verbatim + coincident.** The copy carries every property as-is (including `name` — a
+blank name stays blank and auto-derives its label from the new id) and the full
+position/rotation/size, so it lands exactly on the original. Honors "exactly the same property"
+literally; the user then drags it via the gizmo. No positional offset convention was introduced.
+
+**State that lives outside the entity record is decided per case.** A section's clip status
+(`clipSectionId`, single-valued scene-level) does **not** transfer — the copy is never the clip. A
+camera's disabled status (`disabledIds`) **does** transfer, so a disabled camera duplicates to a
+disabled one; that inheritance is applied in the `App.tsx` handler, not the pure module. A zone
+**deep-copies its child volumes** (fresh ids, pointing at the new zone) so the copy is truly
+identical; a duplicated volume stays in the **same zone**.
+
+**Stale-marking is not explicit.** Duplicating flows through the same `setCameras`/`setVolumes`
+setters as add/delete, so the existing cameras/volumes `useEffect`s mark the result stale — a
+camera, a volume, or a non-empty zone marks stale; a probe, section, or empty zone does not, with no
+new stale plumbing.
+
+---
+
 ## Viewport-layer visibility consolidated into an eye-button dropdown
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4. The three separate top-right icon

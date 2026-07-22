@@ -8,7 +8,7 @@
  * component, not touching the shell.
  *
  * The panel header carries the "+" add-entity menu; right-clicking a camera,
- * probe, section, zone, or volume row opens a Delete context menu.
+ * probe, section, zone, or volume row opens a Duplicate/Delete context menu.
  */
 import { useEffect, useMemo, useState } from 'react';
 
@@ -63,6 +63,11 @@ export interface SceneHierarchyProps {
   onDeleteSection(id: string): void;
   onDeleteZone(id: string): void;
   onDeleteVolume(id: string): void;
+  onDuplicateCamera(id: string): void;
+  onDuplicateProbe(id: string): void;
+  onDuplicateSection(id: string): void;
+  onDuplicateZone(id: string): void;
+  onDuplicateVolume(id: string): void;
 }
 
 type DeletableKind = 'camera' | 'probe' | 'section' | 'zone' | 'volume';
@@ -211,6 +216,20 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
+          <li
+            role="menuitem"
+            onClick={() => {
+              const { kind, id } = contextMenu;
+              setContextMenu(null);
+              if (kind === 'camera') props.onDuplicateCamera(id);
+              else if (kind === 'probe') props.onDuplicateProbe(id);
+              else if (kind === 'section') props.onDuplicateSection(id);
+              else if (kind === 'zone') props.onDuplicateZone(id);
+              else props.onDuplicateVolume(id);
+            }}
+          >
+            Duplicate
+          </li>
           <li
             role="menuitem"
             onClick={() => {

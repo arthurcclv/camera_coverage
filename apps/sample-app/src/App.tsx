@@ -45,6 +45,14 @@ import {
   type TransformSpace,
 } from './scene/transformSpace.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
+import {
+  duplicateCamera,
+  duplicateProbe,
+  duplicateSection,
+  duplicateVolume,
+  duplicateZone,
+  nextFreeId,
+} from './scene/entityDuplication.ts';
 import { selectionAfterClick, type PointerPos, type Selection } from './scene/viewportSelection.ts';
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
@@ -95,17 +103,6 @@ const NEW_CAMERA = { fov: 60, aspect: 16 / 9, near: 0.1, far: 30 };
 function describeSceneError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
-}
-
-/** Next free `prefix-N` id given the existing ids (spec §5.5). */
-function nextFreeId(prefix: string, ids: string[]): string {
-  const re = new RegExp(`^${prefix}-(\\d+)$`);
-  let max = 0;
-  for (const id of ids) {
-    const m = re.exec(id);
-    if (m) max = Math.max(max, Number(m[1]));
-  }
-  return `${prefix}-${max + 1}`;
 }
 
 // Transform-mode toggle icons (spec §2.4): four-way arrows for Move (translate),
@@ -848,6 +845,39 @@ export function App() {
     setSelection((prev) => (prev?.kind === 'section' && prev.id === id ? null : prev));
   }, []);
 
+  // --- duplicate entities (spec §5.5) ----------------------------------------
+  // A deep verbatim copy with the next free id, coincident with the original and
+  // auto-selected. Stale-marking is handled by the cameras/volumes effects above.
+  const handleDuplicateCamera = useCallback((id: string) => {
+    const copy = duplicateCamera(camerasRef.current, id);
+    if (!copy) return;
+    setCameras((prev) => [...prev, copy]);
+    // The copy inherits the original's enabled/disabled state (spec §5.5).
+    setDisabledIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(copy.id);
+      return next;
+    });
+    setSelection({ kind: 'camera', id: copy.id });
+  }, []);
+
+  const handleDuplicateProbe = useCallback((id: string) => {
+    const copy = duplicateProbe(probesRef.current, id);
+    if (!copy) return;
+    setProbes((prev) => [...prev, copy]);
+    setSelection({ kind: 'probe', id: copy.id });
+  }, []);
+
+  // The copy is created not clipping — clipping is a scene-level selection, not a
+  // section property, so it never transfers (spec §5.5, §13.9).
+  const handleDuplicateSection = useCallback((id: string) => {
+    const copy = duplicateSection(sectionsRef.current, id);
+    if (!copy) return;
+    setSections((prev) => [...prev, copy]);
+    setSelection({ kind: 'section', id: copy.id });
+  }, []);
+
   // --- zones & volumes (`sampling_volumes.md` §3, §4, §6, §7.3) --------------
   // Creating an empty zone does not mark stale (an empty zone marks no voxels, §4).
   // New zones are enabled by default (§7.3).
@@ -940,6 +970,25 @@ export function App() {
     setVolumes((prev) => prev.filter((v) => v.zoneId !== id));
     setZones((prev) => prev.filter((z) => z.id !== id));
     setSelection((prev) => (prev?.kind === 'zone' && prev.id === id ? null : prev));
+  }, []);
+
+  // Duplicating a volume adds a verbatim copy into the *same* zone (spec §5.5).
+  const handleDuplicateVolume = useCallback((id: string) => {
+    const copy = duplicateVolume(volumesRef.current, id);
+    if (!copy) return;
+    setVolumes((prev) => [...prev, copy]);
+    setSelection({ kind: 'volume', id: copy.id });
+  }, []);
+
+  // Duplicating a zone deep-copies the zone *and* fresh copies of all its volumes
+  // (each with a new id, referencing the new zone) (spec §5.5). Marks stale via the
+  // volumes effect when the zone had any.
+  const handleDuplicateZone = useCallback((id: string) => {
+    const copy = duplicateZone(zonesRef.current, volumesRef.current, id);
+    if (!copy) return;
+    setZones((prev) => [...prev, copy.zone]);
+    if (copy.volumes.length > 0) setVolumes((prev) => [...prev, ...copy.volumes]);
+    setSelection({ kind: 'zone', id: copy.zone.id });
   }, []);
 
   // --- scene file: import / export / reset (spec §14) ------------------------
@@ -1217,6 +1266,11 @@ export function App() {
             onDeleteSection={handleDeleteSection}
             onDeleteZone={handleDeleteZone}
             onDeleteVolume={handleDeleteVolume}
+            onDuplicateCamera={handleDuplicateCamera}
+            onDuplicateProbe={handleDuplicateProbe}
+            onDuplicateSection={handleDuplicateSection}
+            onDuplicateZone={handleDuplicateZone}
+            onDuplicateVolume={handleDuplicateVolume}
           />
         </div>
         <div

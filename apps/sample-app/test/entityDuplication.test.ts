@@ -1,0 +1,109 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import type { SceneCamera } from '../src/cameras/camera.ts';
+import type { Probe } from '../src/scene/probeVisibility.ts';
+import type { Section } from '../src/scene/sectionHeatmap.ts';
+import type { SamplingVolume, Zone } from '../src/scene/samplingVolumes.ts';
+import {
+  duplicateCamera,
+  duplicateProbe,
+  duplicateSection,
+  duplicateVolume,
+  duplicateZone,
+  nextFreeId,
+} from '../src/scene/entityDuplication.ts';
+
+// Distinctive property values so "verbatim copy" is actually asserted, not just id.
+function cam(id: string, name = 'Front door'): SceneCamera {
+  return { id, name, position: [1, 2, 3], rotation: [0, 0.5, 0, 0.866], fov: 42 };
+}
+function probe(id: string, name = 'P'): Probe {
+  return { id, position: [4, 5, 6], name };
+}
+function section(id: string): Section {
+  return { id, orientation: 'vertical-x', min: 0.25, max: 0.75, aggregation: 'max', enabled: false, clipRange: 3, name: 'Sec' };
+}
+function zone(id: string, name = id, enabled = true): Zone {
+  return { id, name, enabled };
+}
+function volume(id: string, zoneId: string): SamplingVolume {
+  return { id, zoneId, position: [7, 8, 9], rotation: [0, 0, 0, 1], size: [2, 3, 4] };
+}
+
+test('nextFreeId returns prefix-(max+1), ignoring foreign prefixes and gaps', () => {
+  assert.equal(nextFreeId('cam', []), 'cam-1');
+  assert.equal(nextFreeId('cam', ['cam-1', 'cam-3']), 'cam-4');
+  assert.equal(nextFreeId('cam', ['probe-9', 'cam-2']), 'cam-3');
+});
+
+test('duplicateCamera copies every property verbatim with the next free id', () => {
+  const cams = [cam('cam-1'), cam('cam-2')];
+  const copy = duplicateCamera(cams, 'cam-1');
+  assert.ok(copy);
+  assert.equal(copy!.id, 'cam-3');
+  // Same properties (name/position/rotation/fov), only the id differs.
+  assert.deepEqual({ ...copy, id: undefined }, { ...cam('cam-1'), id: undefined });
+});
+
+test('duplicateCamera returns null for an unknown id', () => {
+  assert.equal(duplicateCamera([cam('cam-1')], 'cam-9'), null);
+});
+
+test('duplicateProbe copies verbatim with the next free probe id', () => {
+  const copy = duplicateProbe([probe('probe-1')], 'probe-1');
+  assert.ok(copy);
+  assert.equal(copy!.id, 'probe-2');
+  assert.deepEqual(copy!.position, [4, 5, 6]);
+  assert.equal(copy!.name, 'P');
+});
+
+test('duplicateSection copies the record verbatim (clip is app-level, not on the record)', () => {
+  const copy = duplicateSection([section('section-1')], 'section-1');
+  assert.ok(copy);
+  assert.equal(copy!.id, 'section-2');
+  // The record carries no clip flag, so nothing clip-related can transfer here.
+  assert.deepEqual({ ...copy, id: undefined }, { ...section('section-1'), id: undefined });
+});
+
+test('duplicateVolume copies into the SAME zone with the next free volume id', () => {
+  const vols = [volume('volume-1', 'zone-1'), volume('volume-2', 'zone-2')];
+  const copy = duplicateVolume(vols, 'volume-1');
+  assert.ok(copy);
+  assert.equal(copy!.id, 'volume-3');
+  assert.equal(copy!.zoneId, 'zone-1'); // same zone, not reassigned
+  assert.deepEqual(copy!.size, [2, 3, 4]);
+});
+
+test('duplicateZone deep-copies the zone and all its volumes with fresh ids', () => {
+  const zones = [zone('zone-1', 'Kitchen', false)];
+  const vols = [
+    volume('volume-1', 'zone-1'),
+    volume('volume-2', 'zone-1'),
+    volume('volume-3', 'other'), // belongs to a different zone — must NOT be copied
+  ];
+  const result = duplicateZone(zones, vols, 'zone-1');
+  assert.ok(result);
+  // New zone: fresh id, name + enabled preserved.
+  assert.equal(result!.zone.id, 'zone-2');
+  assert.equal(result!.zone.name, 'Kitchen');
+  assert.equal(result!.zone.enabled, false);
+  // Two child volumes copied, each with a fresh, non-colliding id pointing at the new zone.
+  assert.equal(result!.volumes.length, 2);
+  assert.deepEqual(
+    result!.volumes.map((v) => v.id),
+    ['volume-4', 'volume-5'],
+  );
+  assert.ok(result!.volumes.every((v) => v.zoneId === 'zone-2'));
+  assert.deepEqual(result!.volumes[0].size, [2, 3, 4]); // geometry preserved
+});
+
+test('duplicateZone on an empty zone yields no volumes', () => {
+  const result = duplicateZone([zone('zone-1')], [volume('volume-1', 'other')], 'zone-1');
+  assert.ok(result);
+  assert.equal(result!.volumes.length, 0);
+});
+
+test('duplicateZone returns null for an unknown id', () => {
+  assert.equal(duplicateZone([zone('zone-1')], [], 'zone-9'), null);
+});

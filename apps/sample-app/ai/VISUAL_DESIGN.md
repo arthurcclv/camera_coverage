@@ -134,8 +134,9 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   dropdown and the editable zone name.
 - **Checkbox row** (`.checkbox-row`): inline checkbox + 12 px label, for the
   "Restrict coverage to zones" toggle.
-- **Menu** (`.menu`): popover for the add-entity menu and right-click Delete
-  context menu — dark surface, shadow `0 6px 20px rgba(0,0,0,.45)`, blue hover.
+- **Menu** (`.menu`): popover for the add-entity menu and the right-click
+  Duplicate/Delete context menu — dark surface, shadow `0 6px 20px rgba(0,0,0,.45)`,
+  blue hover.
 - **Spinner** (`.spinner`): 12 px ring, blue top border, 0.7 s spin.
 - **Error banner** (`.error-banner`): dark-red surface + border, for engine
   errors.

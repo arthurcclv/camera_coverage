@@ -147,6 +147,12 @@ default" — see DECISIONS.md).
   `buildSceneTree` / `flattenVisible`. Zone nodes are both selectable and
   expandable (their volume children); `flattenVisible` treats any node with a
   non-empty `childIds` as expandable, not just groups.
+- `entityDuplication.ts` — pure "Duplicate" context-menu logic (spec §5.5):
+  `nextFreeId` (shared with `App.tsx`'s add handlers) plus `duplicateCamera`/
+  `Probe`/`Section`/`Volume`/`Zone`, each returning a deep verbatim copy with a
+  fresh id. Zone duplication also clones the zone's child volumes; app-level side
+  effects (selection, camera disabled-state inheritance, stale-marking) stay in
+  `App.tsx`.
 - `samplingVolumes.ts` — the region-of-interest core (`sampling_volumes.md`): the
   `Zone`/`SamplingVolume` types, OBB math (`inVolume`/`inZone`/`obbWorldAabb`),
   `buildSceneBvh` + `extractZonesAndVolumes` (BVH two-level seeding via the SDK's
@@ -173,7 +179,7 @@ default" — see DECISIONS.md).
 - `SceneFileControls.tsx` — the "Scene" panel (Load/Save, spec §14.7) atop the
   left panel, above the hierarchy; hidden entirely where the File System Access
   API is unavailable.
-- `SceneHierarchy.tsx` — tree view, add menu, delete context menu, per-kind rows.
+- `SceneHierarchy.tsx` — tree view, add menu, duplicate/delete context menu, per-kind rows.
 - `CameraPanel.tsx` — selected-camera position / Euler / FOV / range (far) sliders.
 - `ProbePanel.tsx` — probe position sliders + visibility readout + stale hint.
 - `SectionPanel.tsx` — orientation / thickness / aggregation editor for the

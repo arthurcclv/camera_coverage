@@ -86,7 +86,7 @@ apps/sample-app/
       SectionPanel.tsx     selected-section orientation + range + aggregation editor (§13.6)
       VolumePanel.tsx      selected-volume position/rotation/size + zone reassign (sampling_volumes.md §6.1)
       ZonePanel.tsx        selected-zone name + member count + per-zone stats (sampling_volumes.md §6.2)
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones umbrella, enable/visibility toggle, add "+" menu, delete context menu) (§5.5)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones umbrella, enable/visibility toggle, add "+" menu, duplicate/delete context menu) (§5.5)
       OverlayControls.tsx  overlay mode + intensity scale + resolution slider
       ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones visibility checkboxes (§2.4)
       SectionHeatmapControls.tsx  global section colormap + legend (§13.6)
@@ -395,12 +395,33 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   (creating "Zone 1" first if none exist) (`sampling_volumes.md` §4.1). Creating a camera
   or a volume marks the result stale (§8.1); creating a probe, section, or empty zone
   does not.
-- **Deleting entities.** **Right-clicking** a camera, probe, section, zone, or volume row
-  opens a context menu whose action is **Delete**. Deleting a **zone** removes it **and
-  all its volumes**. Deleting the selected
+- **Row context menu.** **Right-clicking** a camera, probe, section, zone, or volume row
+  opens a context menu with two actions, **Duplicate** (top) and **Delete** (bottom).
+  Group headers have no context menu.
+- **Deleting entities.** The context-menu **Delete** action removes the row's entity.
+  Deleting a **zone** removes it **and all its volumes**. Deleting the selected
   entity clears the selection; deleting a camera, a volume, or a non-empty zone marks the
-  result stale (§8.1); deleting a probe, section, or empty zone does not. Group headers
-  have no context menu.
+  result stale (§8.1); deleting a probe, section, or empty zone does not.
+- **Duplicating entities.** The context-menu **Duplicate** action creates a **deep copy**
+  of the row's entity with the **next free id** (same id prefix) and **auto-selects** the
+  copy. The copy carries **every property verbatim** — including `name` (copied exactly;
+  a blank name stays blank and its label auto-derives from the new id, §5.6) and the full
+  **position/rotation/size**, so the copy initially **coincides with the original** (it is
+  then repositioned via its gizmo). Per-kind rules:
+  - **Camera** — the copy **inherits the original's enabled/disabled state** (§5.4): a
+    disabled camera duplicates to a disabled one.
+  - **Section** — the copy is created **not clipping**, even when the original is the
+    active clip section; clipping is a single-valued scene-level selection (§13.9), not a
+    section property, so it never transfers.
+  - **Zone** — duplicates the zone **and fresh copies of all its volumes** (each with a
+    new volume id, referencing the new zone); the copied zone keeps the original's
+    `enabled` flag.
+  - **Volume** — the copy is added to the **same zone** as the original (not the selected
+    zone).
+
+  Duplicating a camera, a volume, or a **non-empty** zone marks the result stale (§8.1);
+  duplicating a probe, a section, or an **empty** zone does not (mirrors the add/delete
+  stale rules above).
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
   (§15).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
