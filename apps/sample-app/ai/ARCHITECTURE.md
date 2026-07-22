@@ -57,7 +57,7 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
 All state lives in `App.tsx` `useState` — cameras, probes, sections,
 `geometryObjects` (the scene-file source of truth, spec §14.1) + `room` (its
 built `GeometryBuild`: collision mesh + renderable group + workspace bounds),
-selection, `disabledIds`, `collapsedIds`, overlay options, `voxelSize`
+selection, `collapsedIds`, overlay options, `voxelSize`
 (debounced 250 ms), summary, stale flag, `autoRun`, transform mode/space, gizmo
 visibility, `sectionsVisible` (the viewport master toggle), probe queries,
 `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`,

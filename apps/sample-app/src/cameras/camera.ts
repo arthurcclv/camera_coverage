@@ -13,6 +13,12 @@ import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
 export interface SceneCamera extends CameraConfig {
   /** User-editable display label (§5.6); may be blank → falls back to `Camera N`. */
   name: string;
+  /**
+   * Whether the camera participates in `compute()` (spec §5.4). A disabled camera
+   * stays in the scene (editable, dimmed gizmo) but is filtered out before
+   * `setCameras()`. Stored on the entity so it round-trips in the scene file (§14.3).
+   */
+  enabled: boolean;
 }
 
 /** The default `Camera N` label derived from a `cam-N` id (§5.6). */
@@ -30,8 +36,8 @@ export function cameraLabel(camera: SceneCamera): string {
   return trimmed.length > 0 ? trimmed : defaultCameraName(camera.id);
 }
 
-/** Strip the app-only `name`, yielding the plain SDK `CameraConfig` (spec §8). */
+/** Strip the app-only `name`/`enabled`, yielding the plain SDK `CameraConfig` (spec §8). */
 export function toCameraConfig(camera: SceneCamera): CameraConfig {
-  const { name: _name, ...config } = camera;
+  const { name: _name, enabled: _enabled, ...config } = camera;
   return config;
 }

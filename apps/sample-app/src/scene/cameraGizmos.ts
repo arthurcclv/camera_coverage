@@ -4,7 +4,7 @@
  * the TransformControls attach target.
  */
 import * as THREE from 'three';
-import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
+import type { SceneCamera } from '../cameras/camera.ts';
 
 interface GizmoEntry {
   camObj: THREE.PerspectiveCamera; // attach target: position/quaternion == CameraConfig
@@ -24,10 +24,9 @@ export class CameraGizmoSet {
   private entries = new Map<string, GizmoEntry>();
 
   update(
-    cameras: CameraConfig[],
+    cameras: SceneCamera[],
     selectedId: string | null,
     flaggedIds: ReadonlySet<string> = new Set(),
-    disabledIds: ReadonlySet<string> = new Set(),
   ): void {
     const seen = new Set<string>();
     for (const cam of cameras) {
@@ -50,7 +49,7 @@ export class CameraGizmoSet {
 
       const flagged = flaggedIds.has(cam.id);
       const selected = cam.id === selectedId;
-      const disabled = disabledIds.has(cam.id);
+      const disabled = !cam.enabled;
       const bodyColor = flagged ? FLAGGED_BODY_COLOR : selected ? SELECTED_BODY_COLOR : DEFAULT_BODY_COLOR;
       const helperColor = flagged ? FLAGGED_HELPER_COLOR : selected ? SELECTED_HELPER_COLOR : DEFAULT_HELPER_COLOR;
       (body.material as THREE.MeshBasicMaterial).color.setHex(bodyColor);

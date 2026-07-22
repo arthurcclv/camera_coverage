@@ -15,8 +15,8 @@ import {
 } from '../src/scene/entityDuplication.ts';
 
 // Distinctive property values so "verbatim copy" is actually asserted, not just id.
-function cam(id: string, name = 'Front door'): SceneCamera {
-  return { id, name, position: [1, 2, 3], rotation: [0, 0.5, 0, 0.866], fov: 42 };
+function cam(id: string, name = 'Front door', enabled = true): SceneCamera {
+  return { id, name, enabled, position: [1, 2, 3], rotation: [0, 0.5, 0, 0.866], fov: 42 };
 }
 function probe(id: string, name = 'P'): Probe {
   return { id, position: [4, 5, 6], name };
@@ -48,6 +48,12 @@ test('duplicateCamera copies every property verbatim with the next free id', () 
 
 test('duplicateCamera returns null for an unknown id', () => {
   assert.equal(duplicateCamera([cam('cam-1')], 'cam-9'), null);
+});
+
+test('duplicateCamera inherits the source camera enabled state (spec §5.4, §5.5)', () => {
+  const copy = duplicateCamera([cam('cam-1', 'Off', false)], 'cam-1');
+  assert.ok(copy);
+  assert.equal(copy!.enabled, false); // a disabled camera duplicates to a disabled one
 });
 
 test('duplicateProbe copies verbatim with the next free probe id', () => {

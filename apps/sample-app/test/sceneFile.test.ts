@@ -171,6 +171,40 @@ test('zone.enabled defaults to true when absent and round-trips when set (§7.3)
   assert.equal(result.scene.zones[1].enabled, false);
 });
 
+test('camera.enabled defaults to true when absent and round-trips when set (§5.4, §14.3)', () => {
+  const doc = validDoc();
+  doc.cameras = [
+    { id: 'cam-1', position: [0, 1, 0], rotation: [0, 0, 0, 1], fov: 60 }, // no enabled key
+    { id: 'cam-2', position: [1, 1, 0], rotation: [0, 0, 0, 1], fov: 60, enabled: false } as never,
+  ];
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.scene.cameras[0].enabled, true); // absent → default true
+  assert.equal(result.scene.cameras[1].enabled, false);
+});
+
+test('serializeScene omits camera.enabled when true and writes it only when false (§14.3 omit-on-write)', () => {
+  const parsed = parseSceneFile({
+    ...validDoc(),
+    cameras: [
+      { id: 'cam-1', position: [0, 1, 0], rotation: [0, 0, 0, 1], fov: 60 },
+      { id: 'cam-2', position: [1, 1, 0], rotation: [0, 0, 0, 1], fov: 60, enabled: false },
+    ],
+  });
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const out = serializeScene(parsed.scene);
+  assert.equal('enabled' in out.cameras[0], false); // enabled (default) → omitted
+  assert.equal(out.cameras[1].enabled, false); // disabled → written
+});
+
+test('parseSceneFile rejects a non-boolean camera enabled (§14.8)', () => {
+  const doc = validDoc();
+  doc.cameras = [{ id: 'cam-1', position: [0, 1, 0], rotation: [0, 0, 0, 1], fov: 60, enabled: 'yes' } as never];
+  assert.equal(parseSceneFile(doc).ok, false);
+});
+
 test('parseSceneFile reads a legacy section "visible" key as enabled (§14.3 back-compat)', () => {
   const doc = validDoc();
   doc.sections = [{ id: 'section-1', orientation: 'horizontal', min: 0, max: 2, aggregation: 'mean', visible: false } as never];

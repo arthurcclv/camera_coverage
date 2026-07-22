@@ -38,7 +38,6 @@ export interface SceneHierarchyProps {
   /** Unified selection (spec §5.5); drives the highlighted node. */
   selection: Selection;
   flaggedIds: Set<string>;
-  disabledIds: Set<string>;
   perCamera: { id: string; coverageRate: number }[] | null;
   /** Per-probe enabled-cameras-that-see count, or null when no usable mask (§5.5). */
   probeSeenCounts: Map<string, number | null>;
@@ -194,10 +193,10 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             selected={row.node.id === selectedNodeId}
             rateById={rateById}
             flaggedIds={props.flaggedIds}
-            disabledIds={props.disabledIds}
             probeSeenCounts={props.probeSeenCounts}
             sectionCellGrids={props.sectionCellGrids}
             zoneSummaries={props.zoneSummaries}
+            cameras={cameras}
             sections={sections}
             zones={zones}
             volumeById={volumeById}
@@ -255,10 +254,10 @@ interface TreeRowProps {
   selected: boolean;
   rateById: Map<string, number>;
   flaggedIds: Set<string>;
-  disabledIds: Set<string>;
   probeSeenCounts: Map<string, number | null>;
   sectionCellGrids: Map<string, SectionCellGrid | null>;
   zoneSummaries: Map<string, ZoneSummary> | null;
+  cameras: SceneCamera[];
   sections: Section[];
   zones: Zone[];
   volumeById: Map<string, SamplingVolume>;
@@ -273,11 +272,11 @@ function TreeRow(props: TreeRowProps) {
   const { row, selected } = props;
   const { node, depth, hasChildren, collapsed } = row;
   const isGroup = node.kind === 'group';
-  // Enabled/disabled dims the row (spec §5.4, §7.3): cameras via `disabledIds`,
-  // sections/zones via their own `enabled` flag.
+  // Enabled/disabled dims the row (spec §5.4, §7.3): cameras/sections/zones each
+  // via their own entity `enabled` flag.
   const enabled =
     node.kind === 'camera'
-      ? !props.disabledIds.has(node.cameraId)
+      ? props.cameras.find((c) => c.id === node.cameraId)?.enabled ?? true
       : node.kind === 'section'
         ? props.sections.find((s) => s.id === node.sectionId)?.enabled ?? true
         : node.kind === 'zone'

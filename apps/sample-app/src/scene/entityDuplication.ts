@@ -1,10 +1,11 @@
 /**
  * Pure entity-duplication logic for the hierarchy "Duplicate" context menu
  * (spec §5.5). Each helper produces a deep verbatim copy of the source entity
- * with the next free id (same id prefix), coincident with the original. App-level
- * side effects — selecting the copy, inheriting a camera's disabled state, and the
- * stale-marking that flows from the state setters — stay in `App.tsx`; this module
- * is the pure, testable core.
+ * with the next free id (same id prefix), coincident with the original. A camera's
+ * `enabled` state (spec §5.4) rides on the entity, so the verbatim copy inherits it
+ * for free. App-level side effects — selecting the copy and the stale-marking that
+ * flows from the state setters — stay in `App.tsx`; this module is the pure, testable
+ * core.
  */
 import type { SceneCamera } from '../cameras/camera.ts';
 import type { Probe } from './probeVisibility.ts';

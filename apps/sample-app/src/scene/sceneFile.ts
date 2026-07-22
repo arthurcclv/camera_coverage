@@ -26,11 +26,17 @@ export const SUPPORTED_FORMAT_VERSIONS = [1, 2] as const;
 /** On-disk shape of a name-bearing entity: `name` is optional (§14.3 omit-on-write). */
 type Serialized<T extends { name: string }> = Omit<T, 'name'> & { name?: string };
 
+/**
+ * On-disk camera shape (§14.3): `name` omitted when blank, and `enabled` omitted
+ * when `true` (a camera is enabled by default, so only `enabled: false` is written).
+ */
+type SerializedCamera = Omit<SceneCamera, 'name' | 'enabled'> & { name?: string; enabled?: boolean };
+
 export interface SceneFileJSON {
   formatVersion: number;
   geometry: GeometryObject[];
-  /** App camera shape — `CameraConfig` fields plus an optional `name` (§14.3). */
-  cameras: Serialized<SceneCamera>[];
+  /** App camera shape — `CameraConfig` fields plus optional `name`/`enabled` (§14.3). */
+  cameras: SerializedCamera[];
   probes: Serialized<Probe>[];
   sections: Serialized<Section>[];
   /** Which section clips the scene (§13.9), or null. */
@@ -143,8 +149,10 @@ function parseCameras(raw: unknown): SceneCamera[] | string {
     }
     if (seenIds.has(item.id)) return `duplicate camera id "${item.id}"`;
     seenIds.add(item.id);
+    if (item.enabled !== undefined && typeof item.enabled !== 'boolean') return `cameras[${i}]: enabled must be a boolean`;
     // `name` (§5.6) is optional on read; blank/missing reads as the default `Camera N`.
-    const camera: SceneCamera = { id: item.id, name: readName(item.name), position: item.position, rotation: item.rotation, fov: item.fov };
+    // `enabled` (§5.4) is optional on read, defaulting to true when absent.
+    const camera: SceneCamera = { id: item.id, name: readName(item.name), enabled: item.enabled !== false, position: item.position, rotation: item.rotation, fov: item.fov };
     if (item.aspect !== undefined) {
       if (!isFiniteNumber(item.aspect)) return `cameras[${i}]: aspect must be a number`;
       camera.aspect = item.aspect;
@@ -317,14 +325,28 @@ function stripBlankName<T extends { name: string }>(entity: T): Serialized<T> {
   return trimmed.length > 0 ? { ...rest, name: trimmed } : rest;
 }
 
+/**
+ * Serializes a camera (§14.3): drops a blank `name` (like other entities) and
+ * additionally omits `enabled` when `true`, so an enabled camera has no `enabled`
+ * key and only `enabled: false` is written.
+ */
+function serializeCamera(camera: SceneCamera): SerializedCamera {
+  const stripped = stripBlankName(camera);
+  if (camera.enabled) {
+    const { enabled: _enabled, ...rest } = stripped;
+    return rest;
+  }
+  return stripped;
+}
+
 /** Serializes a `Scene` to the `scene.json` shape (spec §14.5) — a plain data copy. */
 export function serializeScene(scene: Scene): SceneFileJSON {
   return {
     formatVersion: SCENE_FILE_FORMAT_VERSION,
     geometry: scene.geometry,
     // Camera/probe/section display names ride on the entity; blank names are
-    // omitted on write (§5.6, §14.3).
-    cameras: scene.cameras.map(stripBlankName),
+    // omitted on write (§5.6, §14.3). A camera's `enabled` is omitted when true.
+    cameras: scene.cameras.map(serializeCamera),
     probes: scene.probes.map(stripBlankName),
     sections: scene.sections.map(stripBlankName),
     clipSectionId: scene.clipSectionId,

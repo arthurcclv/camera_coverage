@@ -6,6 +6,35 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Camera enabled state moved onto the entity (from a side `disabledIds` set) so it persists
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.4, §14.1, §14.3. Camera
+enable/disable previously lived in an app-level `disabledIds: Set<string>` in
+`App.tsx` — separate from the camera entity — while sections and zones carried an
+`enabled` flag on their own records. That split meant camera disabled state was
+**not written to `scene.json`** and was lost on every save/load, unlike sections/zones.
+
+**Resolution:** `SceneCamera` gains an `enabled: boolean` field (like `Section.enabled`
+/ `Zone.enabled`); the `disabledIds` state, its ref, and all its plumbing are deleted.
+Toggling, deleting, and duplicating a camera are now plain entity edits — duplication
+inherits `enabled` for free via the verbatim copy, and the compute path filters
+`cameras.filter(c => c.enabled)` before `setCameras()`. `toCameraConfig` strips
+`enabled` alongside `name` at the SDK boundary. In `scene.json` the flag is **optional
+on read (default `true`)** and **omitted on write when `true`** — only `enabled: false`
+is written — matching the `name`/`clipRange`/`zone.enabled` omit-on-write precedent, so
+**no format-version bump** (still `2`) and old files load with all cameras enabled.
+
+**Why on-entity, not a persisted side array.** A single source of truth (the entity)
+keeps cameras consistent with the other toggleable entities, lets the existing
+serialize/parse and duplication paths carry the flag with no special-casing, and removes
+the class of bug where the side set drifts from the camera list (stale ids on delete,
+missed inheritance on duplicate). Scope was deliberately held to cameras: geometry
+per-object disable was considered but deferred (it needs geometry identity + a hierarchy
+surface + workspace-bounds handling); probes/volumes gained no flag (disabling neither
+affects compute).
+
+---
+
 ## Transparent-layer draw order pinned centrally; depth-writer first, depth test resolves the rest
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §9, §13.5;
@@ -74,10 +103,10 @@ literally; the user then drags it via the gizmo. No positional offset convention
 
 **State that lives outside the entity record is decided per case.** A section's clip status
 (`clipSectionId`, single-valued scene-level) does **not** transfer — the copy is never the clip. A
-camera's disabled status (`disabledIds`) **does** transfer, so a disabled camera duplicates to a
-disabled one; that inheritance is applied in the `App.tsx` handler, not the pure module. A zone
-**deep-copies its child volumes** (fresh ids, pointing at the new zone) so the copy is truly
-identical; a duplicated volume stays in the **same zone**.
+camera's `enabled` flag rides **on the entity** (see the enabled-state decision above), so a
+disabled camera duplicates to a disabled one automatically via the verbatim copy — no App-side
+special-casing. A zone **deep-copies its child volumes** (fresh ids, pointing at the new zone) so
+the copy is truly identical; a duplicated volume stays in the **same zone**.
 
 **Stale-marking is not explicit.** Duplicating flows through the same `setCameras`/`setVolumes`
 setters as add/delete, so the existing cameras/volumes `useEffect`s mark the result stale — a

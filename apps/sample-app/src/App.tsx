@@ -236,7 +236,6 @@ export function App() {
   const [selection, setSelection] = useState<Selection>(() =>
     cameras[0] ? { kind: 'camera', id: cameras[0].id } : null,
   );
-  const [disabledIds, setDisabledIds] = useState<Set<string>>(() => new Set());
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const [overlayOptions, setOverlayOptions] = useState<OverlayOptions>({
     ...DEFAULT_OVERLAY_OPTIONS,
@@ -366,8 +365,6 @@ export function App() {
   // Cached app-side BVH (§3.1), keyed on the `room` it was built from; rebuilt
   // lazily on the next Generate after a geometry swap (§11).
   const bvhRef = useRef<{ room: GeometryBuild; bvh: Bvh } | null>(null);
-  const disabledIdsRef = useRef(disabledIds);
-  disabledIdsRef.current = disabledIds;
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
   const overlayOptionsRef = useRef(overlayOptions);
@@ -458,7 +455,7 @@ export function App() {
       overlay.setOptions(overlayOptionsRef.current);
       overlay.setMarkedFilter(markedFilterRef.current);
       const sel = selectionRef.current;
-      gizmos.update(camerasRef.current, sel?.kind === 'camera' ? sel.id : null, engineFlaggedRef.current, disabledIdsRef.current);
+      gizmos.update(camerasRef.current, sel?.kind === 'camera' ? sel.id : null, engineFlaggedRef.current);
       gizmos.group.visible = gizmosVisibleRef.current;
       probeGizmos.update(probesRef.current, sel?.kind === 'probe' ? sel.id : null);
       volumeGizmos.update(
@@ -614,8 +611,8 @@ export function App() {
 
   // --- push camera/probe state into gizmos ---------------------------------
   useEffect(() => {
-    gizmosRef.current?.update(cameras, selectedCameraId, engine.state.flaggedCameras, disabledIds);
-  }, [cameras, selectedCameraId, engine.state.flaggedCameras, disabledIds]);
+    gizmosRef.current?.update(cameras, selectedCameraId, engine.state.flaggedCameras);
+  }, [cameras, selectedCameraId, engine.state.flaggedCameras]);
 
   useEffect(() => {
     probeGizmosRef.current?.update(probes, selectedProbeId);
@@ -689,7 +686,7 @@ export function App() {
     if (volumeGizmosRef.current) volumeGizmosRef.current.group.visible = zonesVisible;
   }, [zonesVisible]);
 
-  const enabledCameraCount = cameras.length - disabledIds.size;
+  const enabledCameraCount = cameras.filter((c) => c.enabled).length;
 
   useEffect(() => {
     setOverlayOptions((o) => ({ ...o, involvedCameraCount: enabledCameraCount }));
@@ -700,7 +697,7 @@ export function App() {
   useEffect(() => {
     if (hasRunOnce) setStale(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameras, debouncedVoxelSize, disabledIds]);
+  }, [cameras, debouncedVoxelSize]);
 
   // --- volumes/useZones are coverage input (`sampling_volumes.md` §4.2, §8):
   // any change marks the result stale *and* the sampled region set dirty, so the
@@ -749,12 +746,9 @@ export function App() {
   // re-filter only — neither marks the coverage result stale.
   const handleToggleEnabled = useCallback((kind: 'camera' | 'section' | 'zone', id: string) => {
     if (kind === 'camera') {
-      setDisabledIds((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        return next;
-      });
+      // `enabled` rides on the camera entity (spec §5.4), so the toggle is a plain
+      // entity edit — the cameras stale effect marks the result stale.
+      setCameras((prev) => prev.map((c) => (c.id === id ? { ...c, enabled: !c.enabled } : c)));
     } else if (kind === 'section') {
       setSections((prev) => prev.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)));
     } else {
@@ -796,7 +790,7 @@ export function App() {
   // --- add / delete entities (spec §5.5, §12.5) ------------------------------
   const handleAddCamera = useCallback(() => {
     const id = nextFreeId('cam', camerasRef.current.map((c) => c.id));
-    setCameras((prev) => [...prev, { id, name: '', position: [...workspaceCenter] as Vec3, rotation: [0, 0, 0, 1], ...NEW_CAMERA }]);
+    setCameras((prev) => [...prev, { id, name: '', enabled: true, position: [...workspaceCenter] as Vec3, rotation: [0, 0, 0, 1], ...NEW_CAMERA }]);
     setSelection({ kind: 'camera', id });
   }, [workspaceCenter]);
 
@@ -824,12 +818,6 @@ export function App() {
 
   const handleDeleteCamera = useCallback((id: string) => {
     setCameras((prev) => prev.filter((c) => c.id !== id));
-    setDisabledIds((prev) => {
-      if (!prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
     setSelection((prev) => (prev?.kind === 'camera' && prev.id === id ? null : prev));
   }, []);
 
@@ -851,14 +839,8 @@ export function App() {
   const handleDuplicateCamera = useCallback((id: string) => {
     const copy = duplicateCamera(camerasRef.current, id);
     if (!copy) return;
+    // The verbatim copy inherits the original's `enabled` state on the entity (spec §5.5).
     setCameras((prev) => [...prev, copy]);
-    // The copy inherits the original's enabled/disabled state (spec §5.5).
-    setDisabledIds((prev) => {
-      if (!prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.add(copy.id);
-      return next;
-    });
     setSelection({ kind: 'camera', id: copy.id });
   }, []);
 
@@ -1023,7 +1005,6 @@ export function App() {
       setUseZones(next.useZones);
       bvhRef.current = null;
       samplingDirtyRef.current = true;
-      setDisabledIds(new Set());
       setSelection(next.cameras[0] ? { kind: 'camera', id: next.cameras[0].id } : null);
       setSummary(null);
       setHasRunOnce(false);
@@ -1124,7 +1105,7 @@ export function App() {
 
     // Convert app cameras to plain `CameraConfig` (drop the display `name`) at the
     // SDK boundary — the one place the engine type is required (spec §5.6, §14.1).
-    const enabledCameras = camerasRef.current.filter((c) => !disabledIdsRef.current.has(c.id));
+    const enabledCameras = camerasRef.current.filter((c) => c.enabled);
     const ok = engine.setCameras(enabledCameras.map(toCameraConfig));
     if (!ok) return;
 
@@ -1247,7 +1228,6 @@ export function App() {
             volumes={volumes}
             selection={selection}
             flaggedIds={engine.state.flaggedCameras}
-            disabledIds={disabledIds}
             perCamera={summary?.perCamera ?? null}
             probeSeenCounts={probeSeenCounts}
             sectionCellGrids={sectionCellGrids}

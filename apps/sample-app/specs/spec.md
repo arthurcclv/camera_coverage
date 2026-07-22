@@ -335,6 +335,10 @@ viewport-level toggle can hide/show all gizmos at once (§2.4).
 - Toggling a camera marks the result stale, same as any other camera edit (§8.1).
 - The overlay's coverage-fraction denominator (`involvedCameraCount`, §9.1) tracks
   the **enabled** camera count, not the total.
+- The enabled/disabled state is an **`enabled: boolean`** flag stored **on the
+  camera entity** (like a section's, §13.1, or a zone's, `sampling_volumes.md` §6.2) —
+  not a side set — so it **round-trips in the scene file** (§14.3). `defaultScene()`
+  cameras are all enabled.
 
 ### 5.5 Scene hierarchy view
 
@@ -1026,8 +1030,9 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   `{ geometry: GeometryObject[], cameras: Camera[], probes: Probe[],
   sections: Section[], clipSectionId: string | null, zones: Zone[],
   volumes: SamplingVolume[], useZones: boolean }`. A **`Camera`** is the app camera
-  entity — `CameraConfig` extended with a `name` (§5.6); the app **converts each to a
-  plain `CameraConfig`** (dropping `name`) at the `setCameras()` boundary (§8), the
+  entity — `CameraConfig` extended with a `name` (§5.6) and an **`enabled`** flag
+  (§5.4); the app **filters to enabled cameras and converts each to a plain
+  `CameraConfig`** (dropping `name`/`enabled`) at the `setCameras()` boundary (§8), the
   only place the SDK type is required — so probe/section/zone **and camera** names all
   live on their own entities (no side map). `clipSectionId` is the section currently
   clipping the scene (§13.9), or `null`.
@@ -1071,9 +1076,12 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   - `gltf` — a `src` reference (§14.2) to a GLB/GLTF asset.
 - **`cameras`** / **`probes`** / **`sections`** — the serialized cameras, `Probe[]`,
   and `Section[]` (§5, §12.1, §13.1). A **camera** object is the app `Camera` shape —
-  the `CameraConfig` fields **plus** an optional `name` — **not** the bare SDK type;
-  the reader builds the app `Camera`, and the app converts to `CameraConfig` only at
-  `setCameras()` (§14.1). A section's per-entity flag is **`enabled`** (renamed from
+  the `CameraConfig` fields **plus** an optional `name` **and an optional `enabled`** —
+  **not** the bare SDK type; the reader builds the app `Camera`, and the app converts
+  to `CameraConfig` only at `setCameras()` (§14.1). A camera's **`enabled`** flag
+  (§5.4) is **optional on read**, defaulting to `true` when absent, and — since
+  cameras are enabled by default — **omitted on write when `true`** (only
+  `enabled: false` is written). A section's per-entity flag is **`enabled`** (renamed from
   the legacy `visible`, which the reader still accepts for back-compat, §14.8). A
   section's **`clipRange`** (§13.9) is **optional on read**, defaulting to `2`
   (clamped to the collapse-axis extent) when absent.
@@ -1082,7 +1090,8 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   reads as the default `Camera N` / `Probe N` / `Section N`, never an error — and, to
   keep files tidy, is **omitted on write when blank** (an unnamed entity has no `name`
   key and reads back as its default). Adding `name` is back-compatible, so there is
-  **no format-version bump** (still `2`), exactly like `clipRange`/`clipSectionId`.
+  **no format-version bump** (still `2`), exactly like `clipRange`/`clipSectionId`/the
+  camera `enabled` flag.
 - **`clipSectionId`** — which section clips (§13.9), a scene-level `string | null`.
   **Optional on read**, defaulting to `null`; an id that names no loaded section is
   coerced to `null`. Older files (and files with no clip) load unclipped — **no
@@ -1111,7 +1120,9 @@ Sketch:
   ],
   "cameras": [
     { "id": "cam-1", "position": [-6,5.4,-9.6], "rotation": [0,0,0,1],
-      "fov": 60, "aspect": 1.7778, "near": 0.1, "far": 30, "name": "Front door" }
+      "fov": 60, "aspect": 1.7778, "near": 0.1, "far": 30, "name": "Front door" },
+    { "id": "cam-2", "position": [6,5.4,-9.6], "rotation": [0,0,0,1],
+      "fov": 60, "enabled": false, "name": "Loading bay (off)" }
   ],
   "probes": [ { "id": "probe-1", "position": [0,1,0], "name": "Aisle 3" } ],
   "sections": [

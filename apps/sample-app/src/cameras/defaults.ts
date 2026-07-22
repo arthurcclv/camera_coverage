@@ -19,6 +19,8 @@ function cam(id: string, position: [number, number, number], yaw: number): Scene
     id,
     // Default cameras carry a blank name (spec §14.1) — they display as `Camera N`.
     name: '',
+    // Default cameras are all enabled (spec §5.4).
+    enabled: true,
     position,
     rotation: eulerToQuat({ yaw, pitch: PITCH_DOWN, roll: 0 }),
     fov: FOV,

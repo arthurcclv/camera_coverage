@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { cameraLabel, defaultCameraName, toCameraConfig, type SceneCamera } from '../src/cameras/camera.ts';
 
 function cam(id: string, name: string): SceneCamera {
-  return { id, name, position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 };
+  return { id, name, enabled: true, position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 };
 }
 
 test('defaultCameraName derives "Camera N" from a cam-N id, else passes the id through (spec §5.6)', () => {
@@ -19,8 +19,9 @@ test('cameraLabel trims the name and falls back to the default when blank (spec 
   assert.equal(cameraLabel(cam('cam-3', '   ')), 'Camera 3');
 });
 
-test('toCameraConfig drops the app-only name at the SDK boundary (spec §8, §14.1)', () => {
+test('toCameraConfig drops the app-only name/enabled at the SDK boundary (spec §8, §14.1)', () => {
   const cfg = toCameraConfig(cam('cam-1', 'Front door'));
   assert.equal('name' in cfg, false);
+  assert.equal('enabled' in cfg, false);
   assert.deepEqual(cfg, { id: 'cam-1', position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 });
 });
