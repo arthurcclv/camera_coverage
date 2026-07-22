@@ -294,9 +294,42 @@ test('computeSectionCells aggregates a fully-valid column across two chunks', ()
   assert.equal(cell.seenWords[0], 0b1 | 0b11);
 });
 
-test('computeSectionCells marks a column black if any voxel is invalid, even mid-chunk', () => {
-  const chunk0 = denseChunk(0, [0, 0, 0], {});
-  const chunk1 = denseChunk(1, [2, 0, 0], { invalidAt: [[1, 0, 0]] }); // global x=3 invalid
+test('computeSectionCells colors a column with valid voxels even when it also crosses an obstacle (valid data wins, §13.3)', () => {
+  // x=0,1,2 valid, x=3 obstacle. Valid data wins → colored; the obstacle is ignored.
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] }); // x=0 seen, x=1 blind
+  const chunk1 = denseChunk(1, [2, 0, 0], { invalidAt: [[1, 0, 0]] }); // x=2 valid/blind, x=3 obstacle
+  const cells = computeSectionCells(
+    grid,
+    accessorsFor([chunk0, chunk1]),
+    ['cam-a'],
+    1,
+    { orientation: 'vertical-x', min: 0, max: 4 },
+  );
+  const cell = cells.cells[0 + cells.dimsA * 0];
+  assert.equal(cell.valid, true);
+  assert.equal(cell.black, false);
+  // Aggregated over the 3 valid voxels (x=0 seen, x=1,2 blind); the obstacle x=3 is excluded.
+  assert.equal(cell.meanFraction, (1 + 0 + 0) / 3);
+  assert.equal(cell.blindFraction, 2 / 3);
+});
+
+test('computeSectionCells is transparent (not black) for an all-no-data column (§13.3)', () => {
+  const chunk0 = denseChunk(0, [0, 0, 0], {}); // covers x=0,1 only
+  // Section range x∈[2,4] → column walks x=2,3, both in the never-retained chunk1.
+  const cells = computeSectionCells(grid, accessorsFor([chunk0]), ['cam-a'], 1, {
+    orientation: 'vertical-x',
+    min: 2,
+    max: 4,
+  });
+  const cell = cells.cells[0 + cells.dimsA * 0];
+  assert.equal(cell.valid, false);
+  assert.equal(cell.black, false); // no coverage data anywhere → transparent
+});
+
+test('computeSectionCells is black for a column entirely inside geometry (no valid, no no-data) (§13.3)', () => {
+  // Every in-range voxel is an obstacle and all chunks are retained → fully-solid → black.
+  const chunk0 = denseChunk(0, [0, 0, 0], { invalidAt: [[0, 0, 0], [1, 0, 0]] }); // x=0,1 obstacle
+  const chunk1 = denseChunk(1, [2, 0, 0], { invalidAt: [[0, 0, 0], [1, 0, 0]] }); // x=2,3 obstacle
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
@@ -306,11 +339,12 @@ test('computeSectionCells marks a column black if any voxel is invalid, even mid
   );
   const cell = cells.cells[0 + cells.dimsA * 0];
   assert.equal(cell.valid, false);
+  assert.equal(cell.black, true);
 });
 
-test('computeSectionCells reports black for a column with no retained chunk', () => {
-  const chunk0 = denseChunk(0, [0, 0, 0], {});
-  // chunk1 never retained.
+test('computeSectionCells: no-data wins over obstacle in a valueless column → transparent (§13.3)', () => {
+  // x=0,1 obstacle (retained), x=2,3 no-data (chunk1 never retained). No valid voxel.
+  const chunk0 = denseChunk(0, [0, 0, 0], { invalidAt: [[0, 0, 0], [1, 0, 0]] });
   const cells = computeSectionCells(grid, accessorsFor([chunk0]), ['cam-a'], 1, {
     orientation: 'vertical-x',
     min: 0,
@@ -318,6 +352,7 @@ test('computeSectionCells reports black for a column with no retained chunk', ()
   });
   const cell = cells.cells[0 + cells.dimsA * 0];
   assert.equal(cell.valid, false);
+  assert.equal(cell.black, false); // no-data present → transparent, not black
 });
 
 test('computeSectionCells clips the column to the section range', () => {
@@ -335,9 +370,10 @@ test('computeSectionCells clips the column to the section range', () => {
 
 // --- computeSectionCells: marked-set filter (sampling_volumes.md §7.3) --------
 //
-// Out-of-zone voxels are SKIPPED (not blacked, spec §13.3): the cell aggregates
-// only its in-zone valid voxels, and is black only when it has none. An invalid
-// (obstacle) voxel still blacks the whole column regardless of the zone rule.
+// Out-of-zone voxels are SKIPPED (not classified, spec §13.3): the cell aggregates
+// only its in-zone valid voxels. Valid data wins, so a column keeps its color as long
+// as any in-zone voxel is valid; only a valueless column is transparent (no-data/empty)
+// or black (entirely obstacle).
 // Voxel centers along x are 0.5,1.5,2.5,3.5 (voxelSize 1, worldMin.x 0).
 
 test('computeSectionCells skips out-of-zone voxels and aggregates only the in-zone ones (§7.3)', () => {
@@ -359,7 +395,7 @@ test('computeSectionCells skips out-of-zone voxels and aggregates only the in-zo
   assert.equal(cell.blindFraction, 1 / 2); // x=1 is blind
 });
 
-test('computeSectionCells marks a column black when no voxel is in the marked set (§7.3)', () => {
+test('computeSectionCells makes a column transparent when no voxel is in the marked set (§7.3)', () => {
   const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
   const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
   const cells = computeSectionCells(
@@ -368,10 +404,11 @@ test('computeSectionCells marks a column black when no voxel is in the marked se
     ['cam-a'],
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
-    () => false, // nothing in the marked set → every voxel skipped → black
+    () => false, // nothing in the marked set → every voxel skipped → empty column → transparent
   );
   const cell = cells.cells[0 + cells.dimsA * 0];
   assert.equal(cell.valid, false);
+  assert.equal(cell.black, false); // empty (no in-zone voxel) → transparent, not black
 });
 
 test('computeSectionCells skips an out-of-zone voxel that is invalid (unsampled outside the volume) (§7.3, §13.3)', () => {
@@ -393,8 +430,8 @@ test('computeSectionCells skips an out-of-zone voxel that is invalid (unsampled 
   assert.equal(cell.meanFraction, (1 + 0) / 2); // only x=0 (seen) and x=1 (blind)
 });
 
-test('computeSectionCells blacks a column whose IN-zone voxel is an obstacle (§7.3, §13.3)', () => {
-  // Obstacle at x=1, which is inside the marked set (cx < 2) — an ROI silhouette.
+test('computeSectionCells still colors an in-zone column that mixes a valid voxel and an obstacle (valid wins, §7.3, §13.3)', () => {
+  // In-zone x=0 valid (seen), x=1 obstacle. Valid data wins → colored, obstacle ignored.
   const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]], invalidAt: [[1, 0, 0]] });
   const chunk1 = denseChunk(1, [2, 0, 0], {});
   const cells = computeSectionCells(
@@ -406,7 +443,26 @@ test('computeSectionCells blacks a column whose IN-zone voxel is an obstacle (§
     (cx: number) => cx < 2,
   );
   const cell = cells.cells[0 + cells.dimsA * 0];
+  assert.equal(cell.valid, true);
+  assert.equal(cell.black, false);
+  assert.equal(cell.meanFraction, 1); // only x=0 (seen) aggregated
+});
+
+test('computeSectionCells blacks an in-zone column that is entirely obstacle (§7.3, §13.3)', () => {
+  // Only x=0 is in-zone (cx < 1) and it is an obstacle → no valid, no no-data → black.
+  const chunk0 = denseChunk(0, [0, 0, 0], { invalidAt: [[0, 0, 0]] });
+  const chunk1 = denseChunk(1, [2, 0, 0], {});
+  const cells = computeSectionCells(
+    grid,
+    accessorsFor([chunk0, chunk1]),
+    ['cam-a'],
+    1,
+    { orientation: 'vertical-x', min: 0, max: 4 },
+    (cx: number) => cx < 1,
+  );
+  const cell = cells.cells[0 + cells.dimsA * 0];
   assert.equal(cell.valid, false);
+  assert.equal(cell.black, true);
 });
 
 test('computeSectionCells: a column fully inside the marked set colors identically to no filter (§7.3)', () => {
@@ -426,7 +482,7 @@ test('computeSectionCells: a column fully inside the marked set colors identical
 // --- cellDisplayValue / turboColormap / texture data (spec §13.3, §13.5) ----
 
 test('cellDisplayValue picks the field matching the aggregation', () => {
-  const cell = { valid: true, meanFraction: 0.4, maxFraction: 0.9, minFraction: 0.1, blindFraction: 0.2, seenWords: new Uint32Array(1) };
+  const cell = { valid: true, black: false, meanFraction: 0.4, maxFraction: 0.9, minFraction: 0.1, blindFraction: 0.2, seenWords: new Uint32Array(1) };
   assert.equal(cellDisplayValue(cell, 'mean'), 0.4);
   assert.equal(cellDisplayValue(cell, 'max'), 0.9);
   assert.equal(cellDisplayValue(cell, 'min'), 0.1);
@@ -516,21 +572,23 @@ test('sectionLegendScale: N=100 uses a nice step of 20', () => {
   assert.deepEqual(scale.ticks.map((t) => t.label), ['0', '20', '40', '60', '80', '100']);
 });
 
-test('sectionHeatmapTextureData: invalid cells are pure black, colored cells map through Turbo', () => {
+test('sectionHeatmapTextureData: obstacle cells are opaque black, transparent cells are alpha 0, colored cells map through Turbo', () => {
   const cellGrid: SectionCellGrid = {
-    dimsA: 2,
+    dimsA: 3,
     dimsB: 1,
     cells: [
-      { valid: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) },
-      { valid: true, meanFraction: 0.5, maxFraction: 0.5, minFraction: 0.5, blindFraction: 0, seenWords: new Uint32Array(1) },
+      { valid: false, black: true, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }, // obstacle
+      { valid: false, black: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }, // transparent (no-data)
+      { valid: true, black: false, meanFraction: 0.5, maxFraction: 0.5, minFraction: 0.5, blindFraction: 0, seenWords: new Uint32Array(1) },
     ],
     camWords: 1,
     cameraIds: ['cam-a'],
   };
   const data = sectionHeatmapTextureData(cellGrid, 'mean');
-  assert.deepEqual([data[0], data[1], data[2], data[3]], [0, 0, 0, 255]);
+  assert.deepEqual([data[0], data[1], data[2], data[3]], [0, 0, 0, 255]); // obstacle → opaque black
+  assert.deepEqual([data[4], data[5], data[6], data[7]], [0, 0, 0, 0]); // no-data → fully transparent
   const [r, g, b] = turboColormap(0.5);
-  assert.deepEqual([data[4], data[5], data[6], data[7]], [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255), 255]);
+  assert.deepEqual([data[8], data[9], data[10], data[11]], [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255), 255]);
 });
 
 test('averageDisplayValue averages the aggregation-selected value over colored cells only', () => {
@@ -538,8 +596,8 @@ test('averageDisplayValue averages the aggregation-selected value over colored c
     dimsA: 2,
     dimsB: 1,
     cells: [
-      { valid: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) },
-      { valid: true, meanFraction: 0.4, maxFraction: 0.9, minFraction: 0.1, blindFraction: 0.3, seenWords: new Uint32Array(1) },
+      { valid: false, black: true, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) },
+      { valid: true, black: false, meanFraction: 0.4, maxFraction: 0.9, minFraction: 0.1, blindFraction: 0.3, seenWords: new Uint32Array(1) },
     ],
     camWords: 1,
     cameraIds: [],
@@ -553,7 +611,7 @@ test('averageDisplayValue is 0 with no colored cells', () => {
   const cellGrid: SectionCellGrid = {
     dimsA: 1,
     dimsB: 1,
-    cells: [{ valid: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }],
+    cells: [{ valid: false, black: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }],
     camWords: 1,
     cameraIds: [],
   };
@@ -562,21 +620,22 @@ test('averageDisplayValue is 0 with no colored cells', () => {
 
 // --- computeSectionStats (spec §13.7) ----------------------------------------
 
-test('computeSectionStats aggregates only colored cells', () => {
+test('computeSectionStats counts colored + obstacle in the total and excludes transparent cells', () => {
   const cellGrid: SectionCellGrid = {
-    dimsA: 2,
+    dimsA: 3,
     dimsB: 1,
     cells: [
-      { valid: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) },
-      { valid: true, meanFraction: 0.5, maxFraction: 0.8, minFraction: 0.2, blindFraction: 0, seenWords: new Uint32Array([0b1]) },
+      { valid: false, black: true, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }, // obstacle
+      { valid: false, black: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }, // transparent — excluded from total
+      { valid: true, black: false, meanFraction: 0.5, maxFraction: 0.8, minFraction: 0.2, blindFraction: 0, seenWords: new Uint32Array([0b1]) },
     ],
     camWords: 1,
     cameraIds: ['cam-a', 'cam-b'],
   };
   const stats = computeSectionStats(cellGrid);
-  assert.equal(stats.totalCells, 2);
+  assert.equal(stats.totalCells, 2); // colored + obstacle; transparent excluded
   assert.equal(stats.validCells, 1);
-  assert.equal(stats.invalidCells, 1);
+  assert.equal(stats.obstacleCells, 1);
   assert.equal(stats.sectionCoverage, 0.5);
   assert.equal(stats.blindCells, 0);
   assert.equal(stats.minCoverage, 0.5);
@@ -591,7 +650,7 @@ test('computeSectionStats counts a fully-blind column as a blind cell', () => {
   const cellGrid: SectionCellGrid = {
     dimsA: 1,
     dimsB: 1,
-    cells: [{ valid: true, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 1, seenWords: new Uint32Array(1) }],
+    cells: [{ valid: true, black: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 1, seenWords: new Uint32Array(1) }],
     camWords: 1,
     cameraIds: [],
   };
@@ -604,7 +663,7 @@ test('computeSectionStats: no colored cells yields zeroed numbers, not NaN', () 
   const cellGrid: SectionCellGrid = {
     dimsA: 1,
     dimsB: 1,
-    cells: [{ valid: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }],
+    cells: [{ valid: false, black: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }],
     camWords: 1,
     cameraIds: ['cam-a'],
   };

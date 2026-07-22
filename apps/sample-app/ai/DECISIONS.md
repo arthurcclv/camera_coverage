@@ -6,6 +6,29 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Section cells are three-way (colored / obstacle-black / no-data-transparent), valid data wins
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.3, §13.5, §13.7. A section cell
+is no longer binary valid/black. `computeSectionCells` scans a column's in-zone voxels
+and classifies it: **colored** if it holds ≥ 1 valid voxel (aggregating those, ignoring
+any obstacle/no-data voxels sharing it — *valid data wins*), else **transparent** if any
+voxel is no-data (no retained chunk) or the column is empty (all out-of-zone), else
+**black** (entirely obstacle — a fully-solid column). No-data wins over obstacle in a
+valueless column. The cell carries a `black` flag (only meaningful when `!valid`);
+`sectionHeatmapTextureData` writes opaque black for obstacle, **alpha 0** for transparent.
+
+**Why valid-wins over the old "any invalid → black".** The previous rule blacked a whole
+column if *any* voxel was invalid, which framed heatmaps in black wherever a slab poked
+past a shorter sampling volume or grazed geometry. Making coverage dominate shows data
+wherever it exists; only genuinely dataless columns disappear (transparent) and only
+wholly-solid columns read black. **Rendering:** the heatmap material gains
+`alphaTest: 0.01` (`sectionGizmos.ts`) so alpha-0 texels write neither color nor depth
+(true see-through, no occlusion of the overlay/other sections), while stale-dimmed colored
+cells (opacity 0.35) survive the test. Needs manual **WebGPU** verification — the CPU
+tests can't exercise the three.js WebGPU render path. **Stats:** the region-of-interest
+total is colored + obstacle; transparent cells are excluded (like out-of-zone skips), so
+`SectionStats` replaces `invalidCells` with `obstacleCells`.
+
 ## Duplicate: a pure copy module, deep-copying children, with app-level state left in App
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.5. The hierarchy row context menu gained a
@@ -114,9 +137,10 @@ are low-value to name; volume rows keep their raw `volume-N` id.
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.3 and
 [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §7.3. In
 `computeSectionCells` the zone filter runs **before** `isValid`: an out-of-zone voxel is
-skipped (not aggregated, not blacking); the cell aggregates only its in-zone valid voxels
-and is black only when it has none or an in-zone voxel is invalid (an ROI obstacle
-silhouette). **Why the order:** with zones active the SDK samples only the enabled
+skipped (not aggregated, not classified); the cell aggregates only its in-zone valid
+voxels. (Which non-colored outcome a valueless column gets — transparent vs black — is
+the three-way rule in the newer entry above; this entry is only about the zone-vs-validity
+*order*.) **Why the order:** with zones active the SDK samples only the enabled
 volumes' neighborhood, so out-of-zone voxels are *unsampled* → `isValid === false`,
 indistinguishable from obstacles. Checking validity first (the first attempt) blacked
 every out-of-volume voxel — the all-black bug. Zone-membership must decide first.

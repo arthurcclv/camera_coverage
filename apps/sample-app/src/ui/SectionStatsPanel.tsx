@@ -57,12 +57,12 @@ function SectionStatsBody({ section, cellGrid, stale, cameraNameById }: { sectio
         <b>{stats.totalCells.toLocaleString()}</b>
       </div>
       <div className="stat-line">
-        <span>Valid cells</span>
+        <span>Colored cells</span>
         <b>{stats.validCells.toLocaleString()}</b>
       </div>
       <div className="stat-line">
-        <span>Invalid cells</span>
-        <b>{stats.invalidCells.toLocaleString()}</b>
+        <span>Obstacle cells</span>
+        <b>{stats.obstacleCells.toLocaleString()}</b>
       </div>
       <div className="stat-line">
         <span>Section coverage</span>

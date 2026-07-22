@@ -791,20 +791,37 @@ the collapse axis at a fixed in-plane grid position `(a, b)`, clipped to `[min, 
 The heatmap texture holds one texel per cell, so its resolution tracks `voxelSize` (§6)
 and reuses the workspace grid's in-plane dimensions.
 
-- **Invalid / black rule.** The zone filter is applied **first**. When zones are active,
-  a voxel **outside the enabled-zones union** (`sampling_volumes.md` §7.3) is **skipped** —
-  not aggregated and it does **not** black the cell. (It cannot: with zones active the SDK
-  samples only the enabled volumes' neighborhood, so an out-of-zone voxel is *unsampled*,
-  hence indistinguishable from an obstacle via validity alone — treating it as invalid is
-  exactly the all-black bug this rule avoids.) Of the **in-zone** voxels (all of them, when
-  zones are off), if **any** is invalid — wall, box, outside the sampled region, or no
-  retained chunk — the whole cell is **black**, so obstacle and out-of-range footprints read
-  as solid black silhouettes *within the region of interest*. A cell aggregates only its
-  in-zone valid voxels and is black when the column has **none** (its `(a, b)` lies entirely
-  outside the enabled zones, or an in-zone voxel is invalid). This matters for **horizontal**
-  sections especially, whose full-height columns would otherwise poke out the top/bottom of a
-  shorter sampling volume and black out every cell. Enabling/disabling a zone re-filters
-  client-side, no recompute.
+- **Cell classification (black / transparent / colored).** The zone filter is applied
+  **first**. When zones are active, a voxel **outside the enabled-zones union**
+  (`sampling_volumes.md` §7.3) is **skipped** — not aggregated and it does **not** classify
+  the cell. (It cannot: with zones active the SDK samples only the enabled volumes'
+  neighborhood, so an out-of-zone voxel is *unsampled*, hence indistinguishable from an
+  obstacle via validity alone.) Each cell is then classified by scanning its **in-zone**
+  voxels (all of them, when zones are off), distinguishing two kinds of invalidity that the
+  app can tell apart: a voxel is **valid** when it is a sampled free-space voxel with data
+  (a retained chunk, `isValid` true); **no-data** when its column position maps to no
+  retained chunk (outside the sampled region / no data); and an **obstacle** when it is a
+  grid voxel the SDK marked invalid (wall, box, enclosed interior — `isValid` false). The
+  rules, in precedence order — **valid data wins**:
+  - **Colored.** If the column holds **≥ 1** in-zone **valid** voxel, the cell is colored —
+    it aggregates those valid voxels and **ignores** any obstacle or no-data voxels sharing
+    the column. As long as there is real coverage data anywhere in the column, it is shown.
+  - **Transparent (no data).** Otherwise (no valid voxel), if **any** in-zone voxel is
+    no-data, **or** the column has **no in-zone voxel at all** (its `(a, b)` lies entirely
+    outside the enabled zones), the cell is **transparent** — it renders nothing and reveals
+    the scene behind the plane. Transparent cells are **not part of the section's region of
+    interest** and are **excluded from the cell total** (§13.7), exactly like out-of-zone
+    skips.
+  - **Black (obstacle).** Otherwise the column has no valid and no no-data voxel: it is
+    **entirely obstacle** (fully solid), and the cell is **black** — a solid silhouette of
+    the geometry that fully fills the slab at that `(a, b)`.
+
+  Because valid data wins, obstacle silhouettes shrink to only the **fully-solid** columns,
+  and a column that mixes valid voxels with no-data (e.g. a **horizontal** slab taller than a
+  shorter sampling volume, poking out the top/bottom) stays **colored** on the strength of its
+  valid voxels rather than blacking or vanishing. Only columns with *no* coverage data at all
+  disappear (transparent) or, if wholly inside geometry, read black. Enabling/disabling a zone
+  re-filters client-side, no recompute.
 - **Cell value.** For a colored cell, each **aggregated** voxel (valid, and in-zone when
   zones are active) contributes its **coverage fraction**
   (`popcount(mask) / involvedCameraCount`, 0..1, §16); the cell value is the
@@ -841,10 +858,16 @@ and reuses the workspace grid's in-plane dimensions.
   rather than a smoothed gradient.
 - **Colormap.** Colored cells map their value through a single **global perceptual
   colormap — Turbo** (0 → dark blue, 1 → red). Turbo's blue low end stays visually
-  distinct from the **black** invalid cells, which matters because a valid-but-blind
-  column reads as value 0. Invalid cells are **pure black**. The `blind` aggregation is
-  drawn through the same colormap (0 → no blind voxels, 1 → all blind); its meaning is
-  labeled in the controls and Section stats so the shared legend stays unambiguous.
+  distinct from the **black** obstacle cells, which matters because a valid-but-blind
+  column reads as value 0. **Obstacle** cells (§13.3) are **pure black**; **no-data /
+  empty** cells (§13.3) are **fully transparent** (alpha 0), revealing the scene behind
+  the plane. The heatmap material discards fully-transparent texels via a small
+  `alphaTest` (~0.01) so they write no color and no depth — they never occlude the
+  coverage overlay (§9) or another section behind them — while stale-dimmed colored cells
+  (whose alpha is the reduced overall opacity, §13.4) survive the test. The `blind`
+  aggregation is drawn through the same colormap (0 → no blind voxels, 1 → all blind); its
+  meaning is labeled in the controls and Section stats so the shared legend stays
+  unambiguous.
 - **Legend scale.** The colorbar gradient is fixed, but its numeric labels are read in
   the units the selected section's aggregation encodes — a **camera count** (`0`..`N`)
   for `mean`/`max`/`min`, a **percentage** for `blind`, or the plain coverage
@@ -905,12 +928,15 @@ and reuses the workspace grid's in-plane dimensions.
 
 A **"Section stats"** block (`SectionStatsPanel`) in the right sidebar reports coverage
 numbers for the **currently-selected section** — the section analog of the coverage
-Stats panel (§10). Numbers are computed over the **colored cells** (invalid/black
-columns excluded) so they match what the heatmap shows, on the underlying **coverage
-fraction** independent of the active display aggregation (§13.3):
+Stats panel (§10). Numbers are computed over the **colored cells** (obstacle and
+transparent columns excluded) so they match what the heatmap shows, on the underlying
+**coverage fraction** independent of the active display aggregation (§13.3):
 
 - **Context** — orientation and range (`min`–`max` m).
-- **Cells** — total / valid (colored) / invalid (black).
+- **Cells** — total / colored / obstacle (black). **Total is the region of interest** —
+  colored plus obstacle cells; **transparent no-data/empty cells (§13.3) are excluded**,
+  mirroring how out-of-zone voxels are skipped. A section whose slab lies entirely in
+  no-data space therefore reports plain zeros (total 0), not a "no run" placeholder.
 - **Section coverage** — mean coverage fraction over the colored cells (analog of
   `overallRate`, §10).
 - **Blind cells** — count and % of colored cells whose whole column is blind (analog of

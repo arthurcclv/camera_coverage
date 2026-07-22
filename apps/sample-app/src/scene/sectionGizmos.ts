@@ -130,6 +130,11 @@ export class SectionGizmoSet {
       map: texture,
       side: THREE.DoubleSide,
       transparent: true,
+      // Discard fully-transparent no-data/empty texels (spec §13.3/§13.5) so they
+      // write neither color nor depth and reveal the scene behind the plane. The
+      // epsilon is well below the stale-dimming opacity (0.35) so dimmed colored
+      // cells still render.
+      alphaTest: 0.01,
     });
     const heatmapMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), heatmapMaterial);
     heatmapMesh.raycast = noRaycast;

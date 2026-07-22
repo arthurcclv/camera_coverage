@@ -233,8 +233,14 @@ export function axisIndexRange(
 
 /** One heatmap cell: the aggregate of one voxel column (spec §13.3). */
 export interface SectionCellStats {
-  /** False ("black") if any voxel in the column was invalid. */
+  /** True ("colored") if the column holds ≥ 1 in-zone valid voxel with data. */
   valid: boolean;
+  /**
+   * Only meaningful when `!valid`: `true` = **obstacle** (black — the column is
+   * entirely geometry), `false` = **transparent** (no coverage data anywhere in
+   * the column: no-data / out-of-region / empty). Spec §13.3.
+   */
+  black: boolean;
   meanFraction: number;
   maxFraction: number;
   minFraction: number;
@@ -259,11 +265,14 @@ export interface SectionCellGrid {
  * Aggregate every in-plane column of the slab into a `SectionCellGrid` (spec
  * §13.3). `accessors` must have one `VoxelAccessor` per retained chunk id.
  *
- * An invalid voxel (obstacle / out-of-range / no-data) blacks the whole cell.
+ * Valid data wins: a column with ≥ 1 in-zone valid voxel is **colored** (aggregating
+ * those voxels, ignoring any obstacle/no-data voxels sharing it). Otherwise a column
+ * with any no-data voxel — or no in-zone voxel at all — is **transparent**, and a column
+ * that is entirely obstacle (no valid, no no-data) is **black** (spec §13.3).
  * When a `marked` filter is supplied (`sampling_volumes.md` §7.3), voxels outside
- * the marked set (the enabled zones' union) are **skipped** — they neither black
+ * the marked set (the enabled zones' union) are **skipped** — they neither classify
  * the cell nor count toward its aggregation; the cell aggregates only its in-zone
- * valid voxels, and is black only when the column has none (spec §13.3).
+ * valid voxels, and a column with no in-zone voxel at all is **transparent** (spec §13.3).
  */
 export function computeSectionCells(
   grid: Pick<WorkspaceGrid, 'worldMin' | 'voxelSize' | 'gridDims'>,
@@ -286,12 +295,13 @@ export function computeSectionCells(
     for (let a = 0; a < dimsA; a++) {
       g[axisA] = a;
 
-      let allValid = true;
       let sum = 0;
       let max = -Infinity;
       let min = Infinity;
       let blindCount = 0;
-      let count = 0;
+      let count = 0; // in-zone valid voxels aggregated
+      let sawObstacle = false; // in-zone voxel marked invalid by the SDK (wall/box/interior)
+      let sawNoData = false; // in-zone voxel with no retained chunk (out of sampled region)
       const seenWords = new Uint32Array(camWords);
 
       for (let c = start; c <= end; c++) {
@@ -300,9 +310,8 @@ export function computeSectionCells(
         // zones are active the SDK samples only the enabled volumes' neighborhood,
         // so a voxel outside the marked set is unsampled and reads *invalid* —
         // indistinguishable from an obstacle via `isValid` alone. Skipping it here
-        // (not blacking) is what keeps a section from going all-black wherever its
-        // column pokes outside a shorter volume (spec §13.3). A column with no
-        // in-zone voxel ends with count === 0 and is black.
+        // (not classifying) is what keeps a section from blacking/vanishing wherever
+        // its column pokes outside a shorter volume (spec §13.3).
         if (
           marked &&
           !marked(
@@ -315,11 +324,17 @@ export function computeSectionCells(
         }
         const loc = chunkLocalForGlobalIndex(grid as WorkspaceGrid, g[0], g[1], g[2]);
         const acc = loc ? accessors.get(loc.chunkId) : undefined;
-        if (!loc || !acc || !acc.isValid(loc.i, loc.j, loc.k)) {
-          // An **in-zone** obstacle / out-of-range / no-data voxel is a solid
-          // silhouette: it blacks the whole cell (spec §13.3).
-          allValid = false;
-          break;
+        if (!loc || !acc) {
+          // No retained chunk at this position — no coverage data (spec §13.3).
+          // No-data makes a valueless column transparent, winning over obstacle.
+          sawNoData = true;
+          continue;
+        }
+        if (!acc.isValid(loc.i, loc.j, loc.k)) {
+          // An in-zone obstacle voxel (wall/box/interior). Ignored here — it only
+          // blacks the cell if the whole column turns out to be obstacle (spec §13.3).
+          sawObstacle = true;
+          continue;
         }
         let camCount = 0;
         for (let w = 0; w < camWords; w++) {
@@ -335,17 +350,20 @@ export function computeSectionCells(
         count++;
       }
 
+      // Valid data wins → colored; else no-data/empty → transparent; else the
+      // column is entirely obstacle → black (spec §13.3, precedence order).
       const idx = a + dimsA * b;
-      cells[idx] = allValid && count > 0
+      cells[idx] = count > 0
         ? {
             valid: true,
+            black: false,
             meanFraction: sum / count,
             maxFraction: max,
             minFraction: min,
             blindFraction: blindCount / count,
             seenWords,
           }
-        : { valid: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(camWords) };
+        : { valid: false, black: sawObstacle && !sawNoData, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(camWords) };
     }
   }
 
@@ -476,10 +494,12 @@ export function turboColormap(t: number): [number, number, number] {
 }
 
 /**
- * RGBA8 texture data for a cell grid (spec §13.5): invalid cells are pure
- * black, colored cells map their display value through Turbo. Row-major,
- * matching `SectionCellGrid`'s cell order (bottom-to-top in texture-space,
- * left as the caller's `THREE.DataTexture` flip convention to handle).
+ * RGBA8 texture data for a cell grid (spec §13.5): colored cells map their
+ * display value through Turbo (opaque), obstacle cells are pure opaque black,
+ * and transparent (no-data / empty) cells are fully transparent (alpha 0) so
+ * the scene shows through. Row-major, matching `SectionCellGrid`'s cell order
+ * (bottom-to-top in texture-space, left as the caller's `THREE.DataTexture`
+ * flip convention to handle).
  */
 export function sectionHeatmapTextureData(grid: SectionCellGrid, aggregation: SectionAggregation): Uint8Array {
   const data = new Uint8Array(grid.cells.length * 4);
@@ -487,10 +507,11 @@ export function sectionHeatmapTextureData(grid: SectionCellGrid, aggregation: Se
     const cell = grid.cells[i];
     const o = i * 4;
     if (!cell.valid) {
+      // Obstacle → opaque black; transparent (no-data/empty) → alpha 0 (spec §13.3/§13.5).
       data[o] = 0;
       data[o + 1] = 0;
       data[o + 2] = 0;
-      data[o + 3] = 255;
+      data[o + 3] = cell.black ? 255 : 0;
       continue;
     }
     const [r, g, b] = turboColormap(cellDisplayValue(cell, aggregation));
@@ -521,9 +542,12 @@ export function averageDisplayValue(grid: SectionCellGrid, aggregation: SectionA
 // --- Section stats (spec §13.7) ----------------------------------------------
 
 export interface SectionStats {
+  /** Region of interest: colored + obstacle cells (transparent cells excluded, spec §13.7). */
   totalCells: number;
+  /** Colored cells (the base for all coverage numbers below). */
   validCells: number;
-  invalidCells: number;
+  /** Obstacle (black) cells — fully-solid columns within the region (spec §13.3). */
+  obstacleCells: number;
   /** Mean of colored cells' meanFraction (analog of overallRate). 0 if none. */
   sectionCoverage: number;
   /** Colored cells whose whole column is blind. */
@@ -540,6 +564,7 @@ export interface SectionStats {
 export function computeSectionStats(grid: SectionCellGrid): SectionStats {
   const { cells, cameraIds, camWords } = grid;
   let validCells = 0;
+  let obstacleCells = 0;
   let sum = 0;
   let blindCells = 0;
   let min = Infinity;
@@ -547,7 +572,10 @@ export function computeSectionStats(grid: SectionCellGrid): SectionStats {
   const seenCounts = new Array(cameraIds.length).fill(0) as number[];
 
   for (const cell of cells) {
-    if (!cell.valid) continue;
+    if (!cell.valid) {
+      if (cell.black) obstacleCells++;
+      continue;
+    }
     validCells++;
     sum += cell.meanFraction;
     if (cell.blindFraction === 1) blindCells++;
@@ -560,11 +588,10 @@ export function computeSectionStats(grid: SectionCellGrid): SectionStats {
     }
   }
 
-  const totalCells = cells.length;
   return {
-    totalCells,
+    totalCells: validCells + obstacleCells,
     validCells,
-    invalidCells: totalCells - validCells,
+    obstacleCells,
     sectionCoverage: validCells > 0 ? sum / validCells : 0,
     blindCells,
     blindCellsPct: validCells > 0 ? blindCells / validCells : 0,
@@ -629,7 +656,7 @@ export class SectionHeatmapStore {
 
   /**
    * Compute a section's current cell grid, or null before any run is retained.
-   * An optional `marked` filter blacks out columns outside the marked set
+   * An optional `marked` filter skips voxels outside the marked set
    * (`sampling_volumes.md` §7.3) — applied client-side, so enabling/disabling a
    * zone re-filters without a recompute.
    */
