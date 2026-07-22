@@ -111,8 +111,14 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
 - **Button** (`.btn`): blue primary; `.secondary` neutral; `.active` = blue
   (toggle "on"); disabled goes flat grey. `.block` makes a full-width stacked
   action button (8 px top margin, e.g. "Generate from geometry"). `.icon-btn` for
-  the square viewport toolbar buttons (inline SVG icons live in `App.tsx`).
+  the square viewport toolbar buttons (inline SVG icons live in `App.tsx`; the
+  layer-menu glyphs live in `ViewportLayerMenu.tsx`).
   `.segmented` groups buttons into an equal-width segmented control.
+- **Layer menu** (`.layer-menu`, a `.menu` popover): the top-right eye button
+  (`.icon-btn`) opens a checklist of layer-visibility rows (`.layer-menu-row`:
+  checkbox + glyph + label). Toggling keeps the menu open; it closes on
+  outside-click / Escape / re-click. Reuses the `.menu` popover chrome shared with
+  the hierarchy add/context menus.
 - **Badge** (`.badge`): pill, 11 px/600 — variants `stale`, `backend-webgpu`,
   `backend-cpu`, `flagged`, `zone` (neutral blue, the volume's zone reference).
 - **Tree row** (`.tree-row`): caret + colored `.dot` + ellipsized `.label` +

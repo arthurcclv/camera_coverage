@@ -71,6 +71,7 @@ import { CameraPanel } from './ui/CameraPanel.tsx';
 import { ProbePanel } from './ui/ProbePanel.tsx';
 import { SectionPanel } from './ui/SectionPanel.tsx';
 import { OverlayControls } from './ui/OverlayControls.tsx';
+import { ViewportLayerMenu } from './ui/ViewportLayerMenu.tsx';
 import { SectionHeatmapControls } from './ui/SectionHeatmapControls.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
 import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
@@ -105,40 +106,6 @@ function nextFreeId(prefix: string, ids: string[]): string {
     if (m) max = Math.max(max, Number(m[1]));
   }
   return `${prefix}-${max + 1}`;
-}
-
-// Viewport top-right toolbar icons (spec §2.4): stacked-planes for the coverage
-// overlay, a camera body for the frustum gizmos.
-function LayersIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
-      <polygon points="12 2 2 7 12 12 22 7 12 2" />
-      <polyline points="2 17 12 22 22 17" />
-      <polyline points="2 12 12 17 22 12" />
-    </svg>
-  );
-}
-
-// Section master visibility toggle icon (spec §2.4): a 2×2 grid, echoing the
-// heatmap's per-cell layout.
-function GridIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="8" height="8" rx="1" />
-      <rect x="13" y="3" width="8" height="8" rx="1" />
-      <rect x="3" y="13" width="8" height="8" rx="1" />
-      <rect x="13" y="13" width="8" height="8" rx="1" />
-    </svg>
-  );
-}
-
-function CameraIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="23 7 16 12 23 17 23 7" />
-      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-    </svg>
-  );
 }
 
 // Transform-mode toggle icons (spec §2.4): four-way arrows for Move (translate),
@@ -289,6 +256,9 @@ export function App() {
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [transformSpace, setTransformSpace] = useState<TransformSpace>(DEFAULT_TRANSFORM_SPACE);
   const [gizmosVisible, setGizmosVisible] = useState(true);
+  // Master show/hide-all for the sampling-volume gizmos (viewport toolbar, spec
+  // §2.4). Purely visual — independent of `useZones` and per-zone enabled state.
+  const [zonesVisible, setZonesVisible] = useState(true);
   // Per-probe visibility queries against the retained run (spec §12.2), keyed by
   // probe id. Recomputed when probes move or a new run's masks arrive.
   const [probeQueries, setProbeQueries] = useState<Map<string, ProbeVisibilityResult>>(new Map());
@@ -407,6 +377,8 @@ export function App() {
   overlayOptionsRef.current = overlayOptions;
   const gizmosVisibleRef = useRef(gizmosVisible);
   gizmosVisibleRef.current = gizmosVisible;
+  const zonesVisibleRef = useRef(zonesVisible);
+  zonesVisibleRef.current = zonesVisible;
   const sectionsVisibleRef = useRef(sectionsVisible);
   sectionsVisibleRef.current = sectionsVisible;
   const transformSpaceRef = useRef(transformSpace);
@@ -497,6 +469,7 @@ export function App() {
         sel?.kind === 'volume' ? sel.id : null,
         enabledZoneIdsRef.current,
       );
+      volumeGizmos.group.visible = zonesVisibleRef.current;
       sectionGizmos.update(
         sectionsRef.current,
         new Map(),
@@ -713,6 +686,11 @@ export function App() {
   useEffect(() => {
     if (gizmosRef.current) gizmosRef.current.group.visible = gizmosVisible;
   }, [gizmosVisible]);
+
+  // --- zones (sampling-volume gizmos) visibility toggle (spec §2.4) ----------
+  useEffect(() => {
+    if (volumeGizmosRef.current) volumeGizmosRef.current.group.visible = zonesVisible;
+  }, [zonesVisible]);
 
   const enabledCameraCount = cameras.length - disabledIds.size;
 
@@ -1344,33 +1322,16 @@ export function App() {
             </button>
           </div>
           <div className="viewport-toolbar-right">
-            <button
-              type="button"
-              className={`btn secondary icon-btn${overlayOptions.visible ? ' active' : ''}`}
-              title={overlayOptions.visible ? 'Hide coverage overlay' : 'Show coverage overlay'}
-              aria-pressed={overlayOptions.visible}
-              onClick={() => setOverlayOptions((o) => ({ ...o, visible: !o.visible }))}
-            >
-              <LayersIcon />
-            </button>
-            <button
-              type="button"
-              className={`btn secondary icon-btn${sectionsVisible ? ' active' : ''}`}
-              title={sectionsVisible ? 'Hide section heatmaps' : 'Show section heatmaps'}
-              aria-pressed={sectionsVisible}
-              onClick={() => setSectionsVisible((v) => !v)}
-            >
-              <GridIcon />
-            </button>
-            <button
-              type="button"
-              className={`btn secondary icon-btn${gizmosVisible ? ' active' : ''}`}
-              title={gizmosVisible ? 'Hide camera gizmos' : 'Show camera gizmos'}
-              aria-pressed={gizmosVisible}
-              onClick={() => setGizmosVisible((v) => !v)}
-            >
-              <CameraIcon />
-            </button>
+            <ViewportLayerMenu
+              coverageVisible={overlayOptions.visible}
+              sectionsVisible={sectionsVisible}
+              camerasVisible={gizmosVisible}
+              zonesVisible={zonesVisible}
+              onToggleCoverage={() => setOverlayOptions((o) => ({ ...o, visible: !o.visible }))}
+              onToggleSections={() => setSectionsVisible((v) => !v)}
+              onToggleCameras={() => setGizmosVisible((v) => !v)}
+              onToggleZones={() => setZonesVisible((v) => !v)}
+            />
           </div>
           {sectionsVisible && sections.length > 0 && (
             <div className="viewport-legend">

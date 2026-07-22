@@ -87,7 +87,8 @@ apps/sample-app/
       VolumePanel.tsx      selected-volume position/rotation/size + zone reassign (sampling_volumes.md §6.1)
       ZonePanel.tsx        selected-zone name + member count + per-zone stats (sampling_volumes.md §6.2)
       SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones umbrella, enable/visibility toggle, add "+" menu, delete context menu) (§5.5)
-      OverlayControls.tsx  overlay visibility + mode + intensity scale + resolution slider
+      OverlayControls.tsx  overlay mode + intensity scale + resolution slider
+      ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones visibility checkboxes (§2.4)
       SectionHeatmapControls.tsx  global section colormap + legend (§13.6)
       SamplingVolumeControls.tsx  zone tool: useZones toggle, generate, levels, marked readout (sampling_volumes.md §6.3)
       StatsPanel.tsx       coverage summary readout
@@ -161,22 +162,33 @@ viewport also carries the floating section-heatmap legend at its bottom-right, �
     glyph for Global) and the tooltip names the current space and the action
     (e.g. "Local space — click for global"). Defaults to **Local**. Always
     enabled, independent of selection, and shared by both Move and Rotate.
-- **Top-right** — icon-button visibility toggles for the viewport-only layers
-  that can clutter or obscure the scene:
-  - **Overlay** — shows/hides the coverage volumetric overlay (the `visible`
+- **Top-right** — a single **eye icon button** that opens a **layer-visibility
+  dropdown**: a checklist of the viewport-only layers that can clutter or obscure
+  the scene. Each row is a checkbox (checked = layer visible) beside the layer's
+  glyph and name. Toggling a checkbox flips that layer immediately and leaves the
+  menu **open**, so several layers can be changed in one pass; the menu closes on
+  an outside click, **Escape**, or re-clicking the eye button. All rows are always
+  present and clickable regardless of scene contents — toggling a layer that is
+  currently empty is simply a no-op. The rows are:
+  - **Coverage** — shows/hides the coverage volumetric overlay (the `visible`
     option, §9.2). This is the only control for overlay visibility — the
     sidebar has no separate checkbox for it.
-  - **Section** — a **master** show/hide-all for the section heatmap layer (§13):
+  - **Sections** — a **master** show/hide-all for the section heatmap layer (§13):
     off hides every section's heatmap; on shows each **enabled** section per its own
-    per-section enabled checkbox (§13.6), parallel to how **Gizmos** relates
+    per-section enabled checkbox (§13.6), parallel to how **Cameras** relates
     to per-camera state. Defaults to visible.
-  - **Gizmos** — shows/hides all camera frustum gizmos (§5.3) at once.
+  - **Cameras** — shows/hides all camera frustum gizmos (§5.3) at once.
     Independent of per-camera enable/disable (§5.4): a camera stays
     enabled/selectable from the camera list while its gizmo is hidden — it's
     just not drawn or clickable in the viewport. Defaults to visible.
+  - **Zones** — shows/hides all sampling-volume gizmos (`sampling_volumes.md` §5)
+    at once. Purely visual and independent of the `useZones` compute setting
+    (`sampling_volumes.md` §6.3) and per-zone enabled state: hiding the gizmos
+    does not change the coverage result or the overlay's zone filtering.
+    Defaults to visible.
 
-These render as icon buttons (eye-style glyphs) in a top-right toolbar strip,
-highlighted ("active") when the corresponding layer is currently visible.
+The eye button renders as an icon button in a top-right toolbar strip and is
+highlighted ("active") while the dropdown is open.
 
 **Two independent "WebGPU"s.** This render backend is distinct from the SDK's WebGPU
 **compute** backend (§3.2): the renderer draws on the main thread, the compute backend

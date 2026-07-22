@@ -6,6 +6,29 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Viewport-layer visibility consolidated into an eye-button dropdown
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4. The three separate top-right icon
+buttons (Overlay / Section / Gizmos) were replaced by a single **eye icon button** that opens a
+`ViewportLayerMenu.tsx` checklist: **Coverage / Sections / Cameras / Zones**. Toggling a checkbox
+flips the layer immediately and leaves the menu open (closes on outside-click / Escape / re-click).
+
+**Why.** Three always-visible buttons crowded the toolbar and had no room to grow; a dropdown
+scales as layers are added. It also gave a natural home for the previously-missing **Zones** toggle
+(sampling-volume gizmos), which had no viewport control at all. "Overlay"→"Coverage" and
+"Gizmos"→"Cameras" were renamed so every row reads as the *thing* it hides, consistent with the new
+"Zones" and "Sections" rows.
+
+**Scope of "Zones".** Drives the `SamplingVolumeGizmoSet` `group.visible` only — purely visual,
+independent of the `useZones` compute setting and per-zone enabled state, exactly as "Cameras" is
+independent of per-camera enable/disable. `update()` never resets `group.visible`, so the toggle
+survives re-renders (regression-tested in `test/samplingVolumeGizmos.test.ts`). Visibility state is
+viewport-only React state, not persisted to the scene file. The menu reuses the existing `.menu`
+popover chrome (add-entity / context menus); rows are always present and toggling an empty layer is
+a no-op.
+
+---
+
 ## All scene geometry rendered double-sided, glTF `side` overridden
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §4.1, §14.6. Every renderable mesh in the

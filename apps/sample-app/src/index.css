@@ -567,6 +567,35 @@ button.tree-caret:focus-visible {
   color: #fff;
 }
 
+/* Viewport layer-visibility dropdown (spec §2.4): eye button + checkbox list. */
+.layer-menu-anchor {
+  position: relative;
+}
+.layer-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 148px;
+}
+.layer-menu .layer-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.layer-menu-row input[type='checkbox'] {
+  margin: 0;
+  pointer-events: none;
+  accent-color: #2c66c9;
+}
+.layer-menu-icon {
+  display: inline-flex;
+  color: #9aa4b2;
+}
+.layer-menu-row:hover .layer-menu-icon {
+  color: #fff;
+}
+
 /* Probe rows + panel (spec §5.5, §12.3). */
 .tree-row .dot.probe-dot {
   background: #ff9d3f;

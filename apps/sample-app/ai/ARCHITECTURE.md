@@ -184,6 +184,11 @@ default" — see DECISIONS.md).
 - `ZonePanel.tsx` — selected-zone editable name + member count + per-zone coverage
   stats (whether the zone is enabled is controlled by the zone row's checkbox, not here).
 - `OverlayControls.tsx` — resolution slider + overlay mode / color / intensity.
+- `ViewportLayerMenu.tsx` — the top-right eye-button dropdown (§2.4): a checklist
+  of viewport-only layer toggles (Coverage / Sections / Cameras / Zones). Owns its
+  own popover open/close (outside-click + Escape) and layer glyphs; App wires each
+  checkbox to the backing visibility state. "Zones" drives the sampling-volume
+  gizmos' `group.visible` — purely visual, independent of `useZones`.
 - `SectionHeatmapControls.tsx` — the shared Turbo legend/colorbar; its caption +
   tick labels adapt to the selected section's aggregation (camera count / percent /
   fraction) via `sectionLegendScale` (§13.6). Rendered as a **floating `.viewport-legend`
