@@ -245,7 +245,7 @@ All geometry objects are reduced to a single indexed triangle mesh
 for **both**:
 
 - rendering in Three.js (primitives as room + box meshes, GLBs with their own
-  materials), and
+  materials; all surfaces double-sided — §14.6), and
 - `engine.loadScene({ positions, indices })`.
 
 ### 4.2 Workspace
@@ -1086,7 +1086,11 @@ Sketch:
 
 - **Rendering** — `room`/`box` primitives render as today (§4.1); `gltf` objects render
   with their own materials from the loaded glTF scene graph, positioned by the object
-  transform.
+  transform. **All** renderable geometry — primitives and glTF meshes alike — is forced
+  **double-sided** (`side = THREE.DoubleSide`), overriding whatever `side` a glTF file's
+  materials authored, so back-faces never cull (e.g. viewing a room from inside, or a
+  section cutaway exposing an interior face). This applies only to `side`; every other
+  material property from the glTF is preserved.
 - **Collision** — **every** geometry object contributes to occlusion. Each object is
   reduced to world-space triangles: primitives generated as before; GLB meshes traversed,
   each mesh's geometry transformed by (node world-matrix × object transform) and

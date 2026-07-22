@@ -53,7 +53,7 @@ interface Materials {
 function makeMaterials(): Materials {
   return {
     floorMat: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.9 }),
-    wallMat: new THREE.MeshStandardMaterial({ color: 0xc7cdd6, roughness: 0.85, side: THREE.DoubleSide }),
+    wallMat: new THREE.MeshStandardMaterial({ color: 0xc7cdd6, roughness: 0.85 }),
     boxMat: new THREE.MeshStandardMaterial({ color: 0xb5652b, roughness: 0.7 }),
   };
 }
@@ -131,6 +131,22 @@ async function buildGltfPieces(obj: GltfGeometryObject, resolveAsset: AssetResol
   return { collision, render: [gltf.scene] };
 }
 
+/**
+ * Forces every mesh material under `root` to `THREE.DoubleSide` (spec §14.6). The
+ * single source of truth for geometry render side — floor/box/wall primitives and
+ * glTF meshes alike. glTF materials come from the file and may be arrays; this
+ * overrides only their `side`, leaving every other property intact. Back-face
+ * culling would otherwise hide surfaces viewed from behind (the open-top room from
+ * inside, or a section clip cutaway exposing an interior face).
+ */
+export function forceDoubleSided(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    if (!(obj instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const m of materials) m.side = THREE.DoubleSide;
+  });
+}
+
 function finishBuild(collisionPieces: TriMesh[], renderPieces: THREE.Object3D[]): GeometryBuild {
   const merged = mergeTris(collisionPieces);
   const { worldMin, worldMax } = computeWorkspaceBounds(merged);
@@ -138,6 +154,7 @@ function finishBuild(collisionPieces: TriMesh[], renderPieces: THREE.Object3D[])
   // Off until a section clip sets planes (spec §13.9); disabled = no clipping.
   group.enabled = false;
   for (const piece of renderPieces) group.add(piece);
+  forceDoubleSided(group);
   return { sceneMesh: { positions: merged.positions, indices: merged.indices }, group, worldMin, worldMax };
 }
 

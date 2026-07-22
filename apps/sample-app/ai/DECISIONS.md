@@ -6,6 +6,31 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## All scene geometry rendered double-sided, glTF `side` overridden
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §4.1, §14.6. Every renderable mesh in the
+built geometry group — procedural floor/walls/boxes **and** loaded glTF meshes — has
+`material.side` forced to `THREE.DoubleSide`. A single exported helper `forceDoubleSided(root)`
+in `sceneGeometryBuild.ts` traverses the group once in `finishBuild` and flips `side` on every
+mesh material (handling the material-**array** case). It is the **only** place `side` is set:
+the previously hardcoded `side: THREE.DoubleSide` on `wallMat` was removed so there's no second
+source of truth.
+
+**Why override the glTF's own `side`.** §14.6 otherwise preserves glTF materials verbatim, and
+this is the one deliberate exception. Single-sided back-face culling makes surfaces vanish when
+viewed from behind — looking at the open-top room from inside, or a section clip cutaway (§13.9)
+exposing a wall/box interior face. Forcing double-sided keeps every surface visible from both
+sides. Only `side` is touched; all other authored material properties (color, roughness, maps)
+are preserved. There is **no** capping of clipped solids, so a sliced box reads as hollow-but-
+shaded rather than see-through — an accepted trade-off, not a bug.
+
+**Not affected.** The coverage/collision path is untouched — `side` is purely a render property;
+occlusion still uses the merged `SceneMesh` triangles. The volumetric coverage volume
+(`volumetric.ts`, `BackSide`) and the section/sampling-volume gizmos are separate objects outside
+the geometry group and keep their own `side`.
+
+---
+
 ## Editable entity names: on-entity for the app, converted at the SDK boundary
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.6, §12.1, §13.1, §14.3. Cameras,
