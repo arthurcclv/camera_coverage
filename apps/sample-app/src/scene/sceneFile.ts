@@ -5,7 +5,13 @@
  * with real decision logic) is directly unit-testable.
  */
 import type { CameraConfig, Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
-import { SECTION_AGGREGATIONS, SECTION_ORIENTATIONS, type Section } from './sectionHeatmap.ts';
+import {
+  DEFAULT_CLIP_RANGE,
+  MIN_CLIP_RANGE,
+  SECTION_AGGREGATIONS,
+  SECTION_ORIENTATIONS,
+  type Section,
+} from './sectionHeatmap.ts';
 import type { Probe } from './probeVisibility.ts';
 import type { GeometryObject } from './geometryModel.ts';
 import type { Scene } from './sceneModel.ts';
@@ -22,6 +28,8 @@ export interface SceneFileJSON {
   cameras: CameraConfig[];
   probes: Probe[];
   sections: Section[];
+  /** Which section clips the scene (§13.9), or null. */
+  clipSectionId: string | null;
   /** Region-of-interest zones (§14.3); each is `{ id, name }`. */
   zones: Zone[];
   /** Oriented sampling boxes (§14.3). */
@@ -172,6 +180,13 @@ function parseSections(raw: unknown): Section[] | string {
     }
     if (seenIds.has(item.id)) return `duplicate section id "${item.id}"`;
     seenIds.add(item.id);
+    // `clipRange` (§13.9) is optional on read for back-compat: older files (and
+    // files with no clip band set) default to a 2 m range. It is re-clamped to
+    // the collapse-axis extent at render time (sectionClipBand). *Which* section
+    // clips is the scene-level `clipSectionId`, parsed separately.
+    const clipRange = isFiniteNumber(item.clipRange)
+      ? Math.max(MIN_CLIP_RANGE, item.clipRange)
+      : DEFAULT_CLIP_RANGE;
     sections.push({
       id: item.id,
       orientation: item.orientation as Section['orientation'],
@@ -179,6 +194,7 @@ function parseSections(raw: unknown): Section[] | string {
       max: item.max,
       aggregation: item.aggregation as Section['aggregation'],
       enabled: enabledRaw,
+      clipRange,
     });
   }
   return sections;
@@ -262,7 +278,14 @@ export function parseSceneFile(json: unknown): ParseResult {
   if (json.useZones !== undefined && typeof json.useZones !== 'boolean') return fail('useZones must be a boolean');
   const useZones = json.useZones === true;
 
-  return { ok: true, scene: { geometry, cameras, probes, sections, zones, volumes, useZones } };
+  // Which section clips (§13.9): optional, default null; an id that names no
+  // loaded section is coerced to null so a stale reference never clips nothing.
+  const clipSectionId =
+    typeof json.clipSectionId === 'string' && sections.some((s) => s.id === json.clipSectionId)
+      ? json.clipSectionId
+      : null;
+
+  return { ok: true, scene: { geometry, cameras, probes, sections, clipSectionId, zones, volumes, useZones } };
 }
 
 /** Serializes a `Scene` to the `scene.json` shape (spec §14.5) — a plain data copy. */
@@ -273,6 +296,7 @@ export function serializeScene(scene: Scene): SceneFileJSON {
     cameras: scene.cameras,
     probes: scene.probes,
     sections: scene.sections,
+    clipSectionId: scene.clipSectionId,
     zones: scene.zones,
     volumes: scene.volumes,
     useZones: scene.useZones,

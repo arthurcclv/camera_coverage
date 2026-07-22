@@ -10,8 +10,10 @@
  * synchronously, exactly like the old `buildRoom()`.
  */
 import * as THREE from 'three';
+import { ClippingGroup } from 'three/webgpu';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import type { SceneMesh, Vec3 } from '@linkervision/camera-coverage-sdk';
+import type { ClipBand } from './sectionHeatmap.ts';
 import {
   boxTris,
   computeWorkspaceBounds,
@@ -28,8 +30,13 @@ import {
 export interface GeometryBuild {
   /** Merged geometry mesh, world space — pass directly to `engine.loadScene`. */
   sceneMesh: SceneMesh;
-  /** Renderable geometry, ready to add to the Three.js scene. */
-  group: THREE.Group;
+  /**
+   * Renderable geometry, ready to add to the Three.js scene. A `ClippingGroup`
+   * (not a plain `Group`) so a section's clip can cross-section every mesh
+   * inside it (spec §13.9) — the WebGPU renderer only honours clipping planes set
+   * on a `ClippingGroup` scene node, not `Material.clippingPlanes`.
+   */
+  group: ClippingGroup;
   worldMin: Vec3;
   worldMax: Vec3;
 }
@@ -127,7 +134,9 @@ async function buildGltfPieces(obj: GltfGeometryObject, resolveAsset: AssetResol
 function finishBuild(collisionPieces: TriMesh[], renderPieces: THREE.Object3D[]): GeometryBuild {
   const merged = mergeTris(collisionPieces);
   const { worldMin, worldMax } = computeWorkspaceBounds(merged);
-  const group = new THREE.Group();
+  const group = new ClippingGroup();
+  // Off until a section clip sets planes (spec §13.9); disabled = no clipping.
+  group.enabled = false;
   for (const piece of renderPieces) group.add(piece);
   return { sceneMesh: { positions: merged.positions, indices: merged.indices }, group, worldMin, worldMax };
 }
@@ -176,6 +185,35 @@ export async function buildSceneGeometry(geometry: GeometryObject[], resolveAsse
     }
   }
   return finishBuild(collisionPieces, renderPieces);
+}
+
+/**
+ * The two world-space clipping planes for a section's clip band (spec §13.9).
+ * They face inward along the band's collapse axis so their intersection (the
+ * default `clipIntersection = false`) keeps only geometry inside `[min, max]`;
+ * everything outside the band is clipped away.
+ */
+export function clipBandPlanes(band: ClipBand): THREE.Plane[] {
+  const lo: [number, number, number] = [0, 0, 0];
+  lo[band.axis] = 1; // keep points with coord >= band.min
+  const hi: [number, number, number] = [0, 0, 0];
+  hi[band.axis] = -1; // keep points with coord <= band.max
+  return [
+    new THREE.Plane(new THREE.Vector3(...lo), -band.min),
+    new THREE.Plane(new THREE.Vector3(...hi), band.max),
+  ];
+}
+
+/**
+ * Apply (or clear) clip clipping planes on a built geometry group (spec
+ * §13.9). The group is a `ClippingGroup`, so its `clippingPlanes` clip every
+ * descendant mesh (floor/walls/boxes and any glTF meshes) uniformly. Pass an
+ * empty array to disable clipping. This is the WebGPU renderer's clipping path —
+ * `Material.clippingPlanes` is not honoured there.
+ */
+export function setGeometryClippingPlanes(build: GeometryBuild, planes: THREE.Plane[]): void {
+  build.group.clippingPlanes = planes;
+  build.group.enabled = planes.length > 0;
 }
 
 function disposeMaterial(material: THREE.Material): void {

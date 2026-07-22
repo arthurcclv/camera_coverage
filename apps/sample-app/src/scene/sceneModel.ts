@@ -18,6 +18,8 @@ export interface Scene {
   cameras: CameraConfig[];
   probes: Probe[];
   sections: Section[];
+  /** Id of the section currently clipping the scene (spec §13.9), or null. */
+  clipSectionId: string | null;
   /** Region-of-interest zones (`sampling_volumes.md` §2.1, §9). */
   zones: Zone[];
   /** Oriented boxes belonging to zones (`sampling_volumes.md` §2.1, §9). */
@@ -29,5 +31,5 @@ export interface Scene {
 export function defaultScene(): Scene {
   // Zones/volumes seed empty — the default room is unchanged until the user
   // generates or adds (`sampling_volumes.md` §9).
-  return { geometry: defaultGeometry(), cameras: defaultCameras(), probes: [], sections: [], zones: [], volumes: [], useZones: false };
+  return { geometry: defaultGeometry(), cameras: defaultCameras(), probes: [], sections: [], clipSectionId: null, zones: [], volumes: [], useZones: false };
 }

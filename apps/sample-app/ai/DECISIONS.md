@@ -6,6 +6,42 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Section cells apply the zone filter before validity
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.3 and
+[`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §7.3. In
+`computeSectionCells` the zone filter runs **before** `isValid`: an out-of-zone voxel is
+skipped (not aggregated, not blacking); the cell aggregates only its in-zone valid voxels
+and is black only when it has none or an in-zone voxel is invalid (an ROI obstacle
+silhouette). **Why the order:** with zones active the SDK samples only the enabled
+volumes' neighborhood, so out-of-zone voxels are *unsampled* → `isValid === false`,
+indistinguishable from obstacles. Checking validity first (the first attempt) blacked
+every out-of-volume voxel — the all-black bug. Zone-membership must decide first.
+Consequence: obstacles outside the ROI are skipped like any out-of-zone voxel; only
+in-ROI obstacles stay black. A horizontal section over a shorter volume then shows the
+ROI's coverage instead of going all-black. With no zones `marked` is null — unchanged.
+
+## Section clip hides geometry via a ClippingGroup, chosen by a scene-level id
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.9. A section's clip hides scene
+geometry outside a band along its normal. The renderable geometry group is a
+**`three/webgpu` `ClippingGroup`** (`sceneGeometryBuild.ts`) whose two inward-facing world
+planes clip every descendant mesh uniformly (`setGeometryClippingPlanes`); the band comes
+from the pure helper `sectionClipBand()` (`sectionHeatmap.ts`, no THREE import), a width
+centred on the cut plane so it follows the slab. **Why `ClippingGroup`, not
+`Material.clippingPlanes`:** the WebGPU renderer (our only render path) **ignores**
+`material.clippingPlanes`/`renderer.localClippingEnabled` (legacy WebGLRenderer API) —
+WebGPU clipping is driven only by `ClippingGroup` scene nodes.
+
+**Which** section clips is a single scene-level `clipSectionId` (`string | null`), toggled
+by a Clip button in `SectionPanel` — not a per-section flag, not selection. The App effect
+keys off `[clipSectionId, sections, room]`. **Why:** this replaced a per-section
+`clipEnabled` + selection-gating that blinked the clip out when you selected a
+camera/probe and let two sections clip at once; one id makes "at most one clips"
+structural. A dangling id (deleted section / stale import) resolves to no clip
+(`sceneFile.ts`/`handleDeleteSection` coerce to `null`). Independent of heatmap visibility;
+never triggers `compute()`.
+
 ## Section legend floats over the viewport, gated on layer + section presence
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.2/§13.6. `SectionHeatmapControls`

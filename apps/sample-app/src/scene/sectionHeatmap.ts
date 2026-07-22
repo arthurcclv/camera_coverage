@@ -27,6 +27,9 @@ export interface Section {
   /** Whether this section's heatmap is drawn/aggregated (subject to the master
    * layer toggle, spec §2.4). The per-entity analog of a camera's enabled state. */
   enabled: boolean;
+  /** Total width (world m) of the clip band, centered on the cut plane
+   * `(min+max)/2` (spec §13.9). Clamped to `[MIN_CLIP_RANGE, collapse-axis extent]`. */
+  clipRange: number;
 }
 
 export const SECTION_ORIENTATIONS: SectionOrientation[] = ['horizontal', 'vertical-x', 'vertical-z'];
@@ -130,10 +133,61 @@ export function defaultRangeForOrientation(
   return { min: center - half, max: center + half };
 }
 
+/** Clip range slider bounds (spec §13.9). The max is dynamic — see `maxClipRange`. */
+export const MIN_CLIP_RANGE = 0.1;
+/** Default clip band width for a new section (spec §13.9). */
+export const DEFAULT_CLIP_RANGE = 2;
+
+/**
+ * The clip range slider's max for an orientation: the full workspace-AABB
+ * extent along that orientation's collapse axis (spec §13.9). At this width the
+ * band spans the whole scene, so nothing is clipped. Never below the min bound.
+ */
+export function maxClipRange(worldMin: Vec3, worldMax: Vec3, orientation: SectionOrientation): number {
+  const { min, max } = collapseAxisExtent(worldMin, worldMax, orientation);
+  return Math.max(MIN_CLIP_RANGE, max - min);
+}
+
 /** A new section: Horizontal, full (clamped) extent of the workspace AABB (spec §5.5). */
 export function defaultSection(id: string, worldMin: Vec3, worldMax: Vec3): Section {
   const { min, max } = defaultRangeForOrientation(worldMin, worldMax, 'horizontal');
-  return { id, orientation: 'horizontal', min, max, aggregation: 'mean', enabled: true };
+  return {
+    id,
+    orientation: 'horizontal',
+    min,
+    max,
+    aggregation: 'mean',
+    enabled: true,
+    clipRange: DEFAULT_CLIP_RANGE,
+  };
+}
+
+/** A world-space clip band along a section's normal (collapse axis) (spec §13.9). */
+export interface ClipBand {
+  /** The collapse axis the band is measured along (0=X, 1=Y, 2=Z). */
+  axis: 0 | 1 | 2;
+  /** Band bounds in world meters along `axis`, `min <= max`. */
+  min: number;
+  max: number;
+}
+
+/**
+ * The world-space clip band for a section (spec §13.9). The band is `clipRange`
+ * metres wide — clamped to `[MIN_CLIP_RANGE, collapse-axis extent]` — centred on
+ * the cut plane `(min+max)/2`, so it follows the slab as it is dragged (§13.8).
+ * *Whether* this band is applied is decided by the caller (the scene-level
+ * `clipSectionId`, §14.1), not here.
+ */
+export function sectionClipBand(
+  section: Pick<Section, 'orientation' | 'min' | 'max' | 'clipRange'>,
+  worldMin: Vec3,
+  worldMax: Vec3,
+): ClipBand {
+  const { collapseAxis } = axisMapping(section.orientation);
+  const extent = maxClipRange(worldMin, worldMax, section.orientation);
+  const range = Math.min(Math.max(section.clipRange, MIN_CLIP_RANGE), extent);
+  const mid = sectionCenter(section);
+  return { axis: collapseAxis, min: mid - range / 2, max: mid + range / 2 };
 }
 
 /**
@@ -186,9 +240,11 @@ export interface SectionCellGrid {
  * Aggregate every in-plane column of the slab into a `SectionCellGrid` (spec
  * §13.3). `accessors` must have one `VoxelAccessor` per retained chunk id.
  *
- * When a `marked` filter is supplied (`sampling_volumes.md` §7.3), a column is
- * treated as invalid (black) if any voxel in range is invalid **or** outside the
- * marked set (the enabled zones' union) — only columns fully inside it are colored.
+ * An invalid voxel (obstacle / out-of-range / no-data) blacks the whole cell.
+ * When a `marked` filter is supplied (`sampling_volumes.md` §7.3), voxels outside
+ * the marked set (the enabled zones' union) are **skipped** — they neither black
+ * the cell nor count toward its aggregation; the cell aggregates only its in-zone
+ * valid voxels, and is black only when the column has none (spec §13.3).
  */
 export function computeSectionCells(
   grid: Pick<WorkspaceGrid, 'worldMin' | 'voxelSize' | 'gridDims'>,
@@ -221,12 +277,13 @@ export function computeSectionCells(
 
       for (let c = start; c <= end; c++) {
         g[collapseAxis] = c;
-        const loc = chunkLocalForGlobalIndex(grid as WorkspaceGrid, g[0], g[1], g[2]);
-        const acc = loc ? accessors.get(loc.chunkId) : undefined;
-        if (!loc || !acc || !acc.isValid(loc.i, loc.j, loc.k)) {
-          allValid = false;
-          break;
-        }
+        // The zone filter is applied **first**, before any validity check: when
+        // zones are active the SDK samples only the enabled volumes' neighborhood,
+        // so a voxel outside the marked set is unsampled and reads *invalid* —
+        // indistinguishable from an obstacle via `isValid` alone. Skipping it here
+        // (not blacking) is what keeps a section from going all-black wherever its
+        // column pokes outside a shorter volume (spec §13.3). A column with no
+        // in-zone voxel ends with count === 0 and is black.
         if (
           marked &&
           !marked(
@@ -235,6 +292,13 @@ export function computeSectionCells(
             grid.worldMin[2] + (g[2] + 0.5) * grid.voxelSize,
           )
         ) {
+          continue;
+        }
+        const loc = chunkLocalForGlobalIndex(grid as WorkspaceGrid, g[0], g[1], g[2]);
+        const acc = loc ? accessors.get(loc.chunkId) : undefined;
+        if (!loc || !acc || !acc.isValid(loc.i, loc.j, loc.k)) {
+          // An **in-zone** obstacle / out-of-range / no-data voxel is a solid
+          // silhouette: it blacks the whole cell (spec §13.3).
           allValid = false;
           break;
         }

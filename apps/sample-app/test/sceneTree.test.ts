@@ -28,7 +28,7 @@ function probe(id: string): Probe {
 }
 
 function section(id: string): Section {
-  return { id, orientation: 'horizontal', min: 0, max: 1, aggregation: 'mean', enabled: true };
+  return { id, orientation: 'horizontal', min: 0, max: 1, aggregation: 'mean', enabled: true, clipRange: 2 };
 }
 
 function zone(id: string, name = id): Zone {

@@ -15,6 +15,7 @@ import { SectionGizmoSet } from './scene/sectionGizmos.ts';
 import {
   axisMapping,
   defaultSection,
+  sectionClipBand,
   SectionHeatmapStore,
   type Section,
   type SectionCellGrid,
@@ -47,7 +48,13 @@ import { selectionAfterClick, type PointerPos, type Selection } from './scene/vi
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
 import type { GeometryObject } from './scene/geometryModel.ts';
-import { buildStaticGeometrySync, disposeGeometryBuild, type GeometryBuild } from './scene/sceneGeometryBuild.ts';
+import {
+  buildStaticGeometrySync,
+  clipBandPlanes,
+  disposeGeometryBuild,
+  setGeometryClippingPlanes,
+  type GeometryBuild,
+} from './scene/sceneGeometryBuild.ts';
 import { exportSceneToDirectory, importSceneFromDirectory } from './scene/sceneIO.ts';
 import { useEngine } from './engine/useEngine.ts';
 
@@ -234,6 +241,9 @@ export function App() {
   const [cameras, setCameras] = useState<CameraConfig[]>(initialScene.cameras);
   const [probes, setProbes] = useState<Probe[]>(initialScene.probes);
   const [sections, setSections] = useState<Section[]>(initialScene.sections);
+  // Which section clips the scene geometry (spec §13.9), or null. Scene-level so
+  // at most one section ever clips; independent of selection.
+  const [clipSectionId, setClipSectionId] = useState<string | null>(initialScene.clipSectionId);
   // Sampling zones/volumes (`sampling_volumes.md` §2). `useZones` gates whether
   // they restrict coverage; each zone's `enabled` flag picks what the visualizers
   // show (the union of enabled zones, §7.3). The generation levels (§3.4) are tool
@@ -621,6 +631,16 @@ export function App() {
     };
   }, [room, viewportReady]);
 
+  // --- clip cross-section (spec §13.9): clip scene geometry to the band of the
+  // section named by `clipSectionId` (at most one; independent of selection).
+  // Never triggers compute(). Re-runs on drag (`sections`) and on geometry swap
+  // (`room`), which rebuilds the ClippingGroup the planes attach to. -----------
+  useEffect(() => {
+    const clipped = clipSectionId ? sections.find((s) => s.id === clipSectionId) : undefined;
+    const band = clipped ? sectionClipBand(clipped, room.worldMin, room.worldMax) : null;
+    setGeometryClippingPlanes(room, band ? clipBandPlanes(band) : []);
+  }, [clipSectionId, sections, room]);
+
   // --- push camera/probe state into gizmos ---------------------------------
   useEffect(() => {
     gizmosRef.current?.update(cameras, selectedCameraId, engine.state.flaggedCameras, disabledIds);
@@ -806,6 +826,12 @@ export function App() {
     setSections((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   }, []);
 
+  // Clip toggle (spec §13.9): make this section the sole clip, or turn clipping
+  // off if it already is the clipping section. Selection is irrelevant.
+  const handleToggleSectionClip = useCallback((id: string) => {
+    setClipSectionId((prev) => (prev === id ? null : id));
+  }, []);
+
   const handleDeleteCamera = useCallback((id: string) => {
     setCameras((prev) => prev.filter((c) => c.id !== id));
     setDisabledIds((prev) => {
@@ -824,6 +850,8 @@ export function App() {
 
   const handleDeleteSection = useCallback((id: string) => {
     setSections((prev) => prev.filter((s) => s.id !== id));
+    // Deleting the clipping section clears the clip (spec §13.9).
+    setClipSectionId((prev) => (prev === id ? null : prev));
     setSelection((prev) => (prev?.kind === 'section' && prev.id === id ? null : prev));
   }, []);
 
@@ -932,6 +960,7 @@ export function App() {
       cameras: CameraConfig[];
       probes: Probe[];
       sections: Section[];
+      clipSectionId: string | null;
       zones: Zone[];
       volumes: SamplingVolume[];
       useZones: boolean;
@@ -943,6 +972,7 @@ export function App() {
       setCameras(next.cameras);
       setProbes(next.probes);
       setSections(next.sections);
+      setClipSectionId(next.clipSectionId);
       // Import replaces zones/volumes from the file (may be empty, §11); the
       // cached BVH is invalidated (rebuilt lazily on the next Generate). The
       // sampled set must be re-applied on the next run.
@@ -986,6 +1016,7 @@ export function App() {
         cameras: imported.cameras,
         probes: imported.probes,
         sections: imported.sections,
+        clipSectionId: imported.clipSectionId,
         zones: imported.zones,
         volumes: imported.volumes,
         useZones: imported.useZones,
@@ -1010,7 +1041,7 @@ export function App() {
     }
     setSceneIOBusy(true);
     try {
-      const current: Scene = { geometry: geometryObjects, cameras, probes, sections, zones, volumes, useZones };
+      const current: Scene = { geometry: geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones };
       await exportSceneToDirectory(dir, current);
       setSceneError(null);
     } catch (err) {
@@ -1018,7 +1049,7 @@ export function App() {
     } finally {
       setSceneIOBusy(false);
     }
-  }, [geometryObjects, cameras, probes, sections, zones, volumes, useZones]);
+  }, [geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones]);
 
   const handleRun = useCallback(async () => {
     // Snapshot the scene "generation": if `applyScene` (import/reset) bumps
@@ -1216,6 +1247,8 @@ export function App() {
               worldMin={room.worldMin}
               worldMax={room.worldMax}
               onChange={handleSectionChange}
+              clipActive={clipSectionId === selectedSection.id}
+              onToggleClip={handleToggleSectionClip}
             />
           ) : selectedProbe ? (
             <ProbePanel

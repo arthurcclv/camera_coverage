@@ -668,7 +668,11 @@ fog — a section is a flat, per-cell heatmap of a chosen slice, and several can
 ### 13.1 Model & state
 
 - A section is
-  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, aggregation: 'mean' | 'max' | 'min' | 'blind', enabled: boolean }`.
+  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, aggregation: 'mean' | 'max' | 'min' | 'blind', enabled: boolean, clipRange: number }`.
+  `clipRange` (a world-metre width, default `2`) is the section's clip band width
+  (§13.9); *which* section clips — if any — is the single scene-level `clipSectionId`
+  (§14.1), not a per-section flag. Both are saved in the scene file (§14); everything but
+  the global colormap is per-section.
   `min`/`max` are the slab bounds in world meters **along the collapse axis** (the
   section normal), `min ≤ max`. Sections live in a canonical `sections: Section[]`
   array in `App.tsx`, parallel to `cameras` (§5) and `probes` (§12.1). A section node in
@@ -703,15 +707,24 @@ the collapse axis at a fixed in-plane grid position `(a, b)`, clipped to `[min, 
 The heatmap texture holds one texel per cell, so its resolution tracks `voxelSize` (§6)
 and reuses the workspace grid's in-plane dimensions.
 
-- **Invalid / black rule.** If a column contains **any** invalid voxel within the range
-  (wall, box, outside the sampled region, or no retained chunk) — **or**, when zones are
-  active, any voxel **outside the enabled-zones union** (`sampling_volumes.md` §7.3) — the
-  whole cell is **black**. Obstacle, out-of-range, and out-of-marked-set footprints read as
-  solid black silhouettes; only columns **fully inside** the marked set (and valid)
-  ("colored cells") are aggregated. Enabling/disabling a zone re-filters client-side, no recompute.
-- **Cell value.** For a colored cell, each voxel contributes its **coverage fraction**
+- **Invalid / black rule.** The zone filter is applied **first**. When zones are active,
+  a voxel **outside the enabled-zones union** (`sampling_volumes.md` §7.3) is **skipped** —
+  not aggregated and it does **not** black the cell. (It cannot: with zones active the SDK
+  samples only the enabled volumes' neighborhood, so an out-of-zone voxel is *unsampled*,
+  hence indistinguishable from an obstacle via validity alone — treating it as invalid is
+  exactly the all-black bug this rule avoids.) Of the **in-zone** voxels (all of them, when
+  zones are off), if **any** is invalid — wall, box, outside the sampled region, or no
+  retained chunk — the whole cell is **black**, so obstacle and out-of-range footprints read
+  as solid black silhouettes *within the region of interest*. A cell aggregates only its
+  in-zone valid voxels and is black when the column has **none** (its `(a, b)` lies entirely
+  outside the enabled zones, or an in-zone voxel is invalid). This matters for **horizontal**
+  sections especially, whose full-height columns would otherwise poke out the top/bottom of a
+  shorter sampling volume and black out every cell. Enabling/disabling a zone re-filters
+  client-side, no recompute.
+- **Cell value.** For a colored cell, each **aggregated** voxel (valid, and in-zone when
+  zones are active) contributes its **coverage fraction**
   (`popcount(mask) / involvedCameraCount`, 0..1, §16); the cell value is the
-  per-section **aggregation** over the column's voxels:
+  per-section **aggregation** over those voxels:
   - `mean` — average coverage fraction (the section analog of the §9.1 Coverage mode).
   - `max` — best-covered voxel in the column.
   - `min` — worst-covered voxel in the column.
@@ -758,8 +771,11 @@ and reuses the workspace grid's in-plane dimensions.
 
 - **Per-section editor** — when a section is selected (§5.2), the left detail panel
   shows a **`SectionPanel`** in place of the camera/probe panel: header
-  `Section — <id>`, the orientation selector, the thickness slider (§13.2), and the
-  aggregation selector.
+  `Section — <id>`, the orientation selector, the thickness slider (§13.2), the
+  aggregation selector, a **Clip toggle button**, and a **reveal-range slider** (§13.9).
+  The button is **highlighted** while this section is the one clipping (§14.1
+  `clipSectionId`); the reveal-range slider is **always shown** (it has no visible effect
+  unless this section is the clipping one).
 - **Global controls** — the section-heatmap **legend / colorbar**
   (`SectionHeatmapControls`) holds the shared **colormap** (a fixed Turbo gradient).
   It is a **floating overlay pinned to the bottom-right of the viewport** (§2.2) — a
@@ -837,6 +853,37 @@ section stats."*; retained run diverged from the live scene → the numbers plus
   **Thickness** is changed only via the thickness slider (§13.2), not in the viewport;
   **position** is changed only via the viewport drag, not the panel.
 
+### 13.9 Clip (geometry cross-section)
+
+Exactly **one section at a time** can hide all **scene geometry** (floor, walls, boxes,
+glTF — §14.6) outside a band along its **normal (collapse axis)**, giving a CAD-style
+cross-section into the scene at the heatmap plane. Which section that is — if any — is the
+scene-level **`clipSectionId`** (§14.1); it is **independent of selection**. The band is
+**`clipRange` metres wide, centred on the cut plane** `(min + max) / 2` (§13.2):
+`[mid − clipRange/2, mid + clipRange/2]`. Because it is centred on the plane, it
+**follows the slab** as the section is dragged (§13.8).
+
+- **Scope — geometry only.** The scene geometry group is a **`ClippingGroup`** (the
+  WebGPU renderer's clipping path; `Material.clippingPlanes` is not honoured there), and
+  the clip sets its two world clipping planes (at the band bounds, intersecting), which
+  clip every descendant mesh — floor, walls, boxes, glTF. The coverage overlay (§9),
+  cameras, probes, and the section's own heatmap and outline planes (§13.5) live outside
+  that group and are **never** clipped.
+- **Single, button-driven.** A **Clip toggle button** in the section's `SectionPanel`
+  (§13.6) sets `clipSectionId`: clicking it on a section that is **not** the clipping one
+  makes it the sole clip (any other section's clip turns off); clicking it on the section
+  that **is** clipping turns clipping off entirely (`clipSectionId = null`). Selection is
+  irrelevant, as are the master Section toggle (§2.4) and `section.enabled` (§13.6).
+  Deleting the clipping section clears the clip. At most one section ever clips.
+- **Range control.** A **clip toggle** and a **reveal-range slider** live in
+  `SectionPanel` (§13.6); the slider is **always shown**. Its bounds are **`0.1 m` → the
+  workspace-AABB extent along the current normal** (dynamic per orientation); at the max
+  the band spans the whole scene, so nothing is hidden. Changing orientation re-centres
+  the band on the new normal and **clamps** `clipRange` to that axis's extent.
+- **No recompute.** Toggling or resizing the clip is purely presentational — it never
+  marks coverage stale (§8.1) and never triggers `compute()` (§13.4), like everything
+  else about sections.
+
 ---
 
 ## 14. Scene file (import / export)
@@ -852,9 +899,11 @@ scale, panel split) are **not** part of the scene file — they remain app-local
 
 - All scene entities live in a single in-memory `Scene`:
   `{ geometry: GeometryObject[], cameras: CameraConfig[], probes: Probe[],
-  sections: Section[], zones: Zone[], volumes: SamplingVolume[], useZones: boolean }`.
-  `defaultScene()` seeds `zones`/`volumes` **empty** and `useZones` **false**
-  (`sampling_volumes.md` §9).
+  sections: Section[], clipSectionId: string | null, zones: Zone[],
+  volumes: SamplingVolume[], useZones: boolean }`. `clipSectionId` is the section
+  currently clipping the scene (§13.9), or `null`.
+  `defaultScene()` seeds `zones`/`volumes` **empty**, `useZones` **false**, and
+  `clipSectionId` **null** (`sampling_volumes.md` §9).
 - The startup scene is **constructed in code** as a `Scene` from today's defaults
   (`buildRoom.ts` geometry + `cameras/defaults.ts`); no folder is opened at boot (the
   File System Access API requires a user gesture). `defaultScene()` is the single
@@ -893,7 +942,12 @@ scale, panel split) are **not** part of the scene file — they remain app-local
 - **`cameras`** / **`probes`** / **`sections`** — the serialized `CameraConfig[]`,
   `Probe[]`, and `Section[]` (§5, §12.1, §13.1). A section's per-entity flag is
   **`enabled`** (renamed from the legacy `visible`, which the reader still accepts
-  for back-compat, §14.8).
+  for back-compat, §14.8). A section's **`clipRange`** (§13.9) is **optional on read**,
+  defaulting to `2` (clamped to the collapse-axis extent) when absent.
+- **`clipSectionId`** — which section clips (§13.9), a scene-level `string | null`.
+  **Optional on read**, defaulting to `null`; an id that names no loaded section is
+  coerced to `null`. Older files (and files with no clip) load unclipped — **no
+  format-version bump**.
 - **`zones`** / **`volumes`** / **`useZones`** — the region-of-interest state
   (`sampling_volumes.md` §9). Each zone is `{ id, name, enabled }` (the user-edited
   `name` round-trips; blank/missing reads as the default `Zone N`; `enabled` defaults

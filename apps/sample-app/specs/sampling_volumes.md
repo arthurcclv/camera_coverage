@@ -405,8 +405,12 @@ runs; the SDK's own `CoverageSummary` populates the stats panel exactly as today
 A voxel is included in the overlay / section aggregation iff it is valid **and**
 `inMarked(center)`, where the marked set is the **union of the enabled zones**
 (§2.2): `M(enabled) = ⋃_{z enabled} M(z)`. Voxels outside it read as unmarked — the
-overlay draws nothing there; section cells go **black**, extending the §13.3 invalid
-rule.
+overlay draws nothing there. For **sections**, an unmarked voxel is **skipped** (it
+does not black the cell): a section cell aggregates only its in-marked valid voxels
+and is black only when its column has none (§13.3). The skip is applied **before** the
+validity check — outside the enabled volumes the SDK doesn't sample, so those voxels
+read invalid and are indistinguishable from obstacles; only an **in-marked** invalid
+voxel (a wall/box inside the region of interest) blacks the cell as a silhouette.
 
 Which zones are enabled is set **only** by the per-zone **enabled checkbox** in the
 hierarchy row (§4.1), **decoupled from selection** (selecting a zone never changes
@@ -416,9 +420,12 @@ disabling all marks nothing. **Toggling a zone never triggers a recompute** — 
 only re-filters the retained masks client-side (instant), like changing a section's
 orientation. Overlay/sections **dim** when the retained run is stale, as today.
 
-- **Sections (`spec.md` §13.3).** A column cell is **black** if it contains any
-  invalid voxel in range **or any voxel outside the enabled union**. Only columns
-  fully inside the marked set (and valid) are colored/aggregated.
+- **Sections (`spec.md` §13.3).** Voxels **outside the enabled union** are **skipped
+  first**, not blacked. Among the **in-union** voxels, if any is invalid the cell is
+  **black** (obstacle/out-of-range silhouette within the ROI); otherwise the cell
+  aggregates them and is black only when the column has no in-union voxel. This keeps a
+  horizontal section from going all-black when its tall column pokes out of a shorter
+  volume.
 - **Probes (`spec.md` §12).** Conceptually unchanged (a point observer, not part of
   any zone). Because the SDK now samples only the boxes' neighborhood, a probe
   outside it reads *"No coverage data at this point"* (an existing state).

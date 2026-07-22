@@ -11,9 +11,13 @@ import {
   collapseAxisNormalSign,
   computeSectionCells,
   computeSectionStats,
+  DEFAULT_CLIP_RANGE,
   defaultRangeForOrientation,
   defaultSection,
   MAX_SECTION_THICKNESS,
+  maxClipRange,
+  MIN_CLIP_RANGE,
+  sectionClipBand,
   SECTION_ORIENTATIONS,
   SectionHeatmapStore,
   sectionCenter,
@@ -119,9 +123,74 @@ test('defaultRangeForOrientation clamps to MAX_SECTION_THICKNESS, centered on th
   assert.equal(max - min, MAX_SECTION_THICKNESS);
 });
 
-test('defaultSection is Horizontal, full (clamped) Y extent, mean aggregation, enabled (spec §5.5)', () => {
+test('defaultSection is Horizontal, full (clamped) Y extent, mean aggregation, enabled (spec §5.5, §13.9)', () => {
   const s = defaultSection('section-1', [0, -1, 0], [4, 3, 2]);
-  assert.deepEqual(s, { id: 'section-1', orientation: 'horizontal', min: -1, max: 3, aggregation: 'mean', enabled: true });
+  assert.deepEqual(s, {
+    id: 'section-1',
+    orientation: 'horizontal',
+    min: -1,
+    max: 3,
+    aggregation: 'mean',
+    enabled: true,
+    clipRange: 2,
+  });
+});
+
+// --- clip band (spec §13.9) -----------------------------------------------
+// The band is computed unconditionally; *whether* it is applied is the caller's
+// scene-level clipSectionId decision (§14.1), not sectionClipBand's.
+
+test('sectionClipBand centers the band on the cut plane along the collapse axis (spec §13.9)', () => {
+  // horizontal → collapse Y; cut plane at (min+max)/2 = 1.5; range 2 → [0.5, 2.5].
+  const band = sectionClipBand(
+    { orientation: 'horizontal', min: 1, max: 2, clipRange: 2 },
+    [0, -5, 0],
+    [4, 5, 2],
+  );
+  assert.deepEqual(band, { axis: 1, min: 0.5, max: 2.5 });
+});
+
+test('sectionClipBand uses the orientation collapse axis (spec §13.9)', () => {
+  // vertical-x → collapse X; cut plane at 2; range 4 → [0, 4] on axis 0.
+  const band = sectionClipBand(
+    { orientation: 'vertical-x', min: 1, max: 3, clipRange: 4 },
+    [-10, 0, 0],
+    [10, 4, 2],
+  );
+  assert.deepEqual(band, { axis: 0, min: 0, max: 4 });
+});
+
+test('sectionClipBand clamps the range to the collapse-axis extent (spec §13.9)', () => {
+  // Y extent is [-1, 3] = 4 m; a 100 m request clamps to 4, centered on plane 1.
+  const band = sectionClipBand(
+    { orientation: 'horizontal', min: 0, max: 2, clipRange: 100 },
+    [0, -1, 0],
+    [4, 3, 2],
+  );
+  assert.deepEqual(band, { axis: 1, min: -1, max: 3 });
+});
+
+test('sectionClipBand clamps a sub-minimum range up to MIN_CLIP_RANGE (spec §13.9)', () => {
+  const band = sectionClipBand(
+    { orientation: 'horizontal', min: 2, max: 2, clipRange: 0 },
+    [0, -5, 0],
+    [4, 5, 2],
+  );
+  assert.ok(Math.abs(band.max - band.min - MIN_CLIP_RANGE) < 1e-9);
+});
+
+test('maxClipRange is the collapse-axis world extent per orientation (spec §13.9)', () => {
+  assert.equal(maxClipRange([0, -1, 0], [4, 3, 2], 'horizontal'), 4); // Y: 3 - (-1)
+  assert.equal(maxClipRange([-10, 0, 0], [10, 4, 2], 'vertical-x'), 20); // X: 10 - (-10)
+  assert.equal(maxClipRange([0, 0, -3], [4, 4, 3], 'vertical-z'), 6); // Z: 3 - (-3)
+});
+
+test('maxClipRange never falls below MIN_CLIP_RANGE (spec §13.9)', () => {
+  assert.equal(maxClipRange([0, 1, 0], [4, 1, 2], 'horizontal'), MIN_CLIP_RANGE);
+});
+
+test('DEFAULT_CLIP_RANGE is 2 m (spec §13.9)', () => {
+  assert.equal(DEFAULT_CLIP_RANGE, 2);
 });
 
 test('sectionCenter is the midpoint of min/max (spec §13.2)', () => {
@@ -253,14 +322,15 @@ test('computeSectionCells clips the column to the section range', () => {
 
 // --- computeSectionCells: marked-set filter (sampling_volumes.md §7.3) --------
 //
-// A column is black if any voxel in range is invalid OR outside the marked set.
+// Out-of-zone voxels are SKIPPED (not blacked, spec §13.3): the cell aggregates
+// only its in-zone valid voxels, and is black only when it has none. An invalid
+// (obstacle) voxel still blacks the whole column regardless of the zone rule.
 // Voxel centers along x are 0.5,1.5,2.5,3.5 (voxelSize 1, worldMin.x 0).
 
-test('computeSectionCells marks a column black if any voxel is outside the marked set (§7.3)', () => {
-  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
-  const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
-  // Every voxel is valid, but the marked set excludes x≥2 (centers 2.5, 3.5), so
-  // the column crossing x=0..3 contains an unmarked voxel and goes black.
+test('computeSectionCells skips out-of-zone voxels and aggregates only the in-zone ones (§7.3)', () => {
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] }); // x=0 seen (1 cam), x=1 blind
+  const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] }); // x=2,3 — out of zone
+  // Marked set excludes x≥2 (centers 2.5, 3.5): the column keeps only x=0,1.
   const marked = (cx: number) => cx < 2;
   const cells = computeSectionCells(
     grid,
@@ -269,6 +339,58 @@ test('computeSectionCells marks a column black if any voxel is outside the marke
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
     marked,
+  );
+  const cell = cells.cells[0 + cells.dimsA * 0];
+  assert.equal(cell.valid, true);
+  assert.equal(cell.meanFraction, (1 + 0) / 2); // only x=0 (frac 1) and x=1 (frac 0) aggregated
+  assert.equal(cell.blindFraction, 1 / 2); // x=1 is blind
+});
+
+test('computeSectionCells marks a column black when no voxel is in the marked set (§7.3)', () => {
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
+  const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
+  const cells = computeSectionCells(
+    grid,
+    accessorsFor([chunk0, chunk1]),
+    ['cam-a'],
+    1,
+    { orientation: 'vertical-x', min: 0, max: 4 },
+    () => false, // nothing in the marked set → every voxel skipped → black
+  );
+  const cell = cells.cells[0 + cells.dimsA * 0];
+  assert.equal(cell.valid, false);
+});
+
+test('computeSectionCells skips an out-of-zone voxel that is invalid (unsampled outside the volume) (§7.3, §13.3)', () => {
+  // x=3 is both out of zone AND invalid — the realistic case, since the SDK doesn't
+  // sample outside the enabled volumes. The zone filter runs first, so it is skipped
+  // (not blacked), and the in-zone voxels x=0,1 still color the cell.
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
+  const chunk1 = denseChunk(1, [2, 0, 0], { invalidAt: [[0, 0, 0], [1, 0, 0]] }); // x=2,3 invalid + out of zone
+  const cells = computeSectionCells(
+    grid,
+    accessorsFor([chunk0, chunk1]),
+    ['cam-a'],
+    1,
+    { orientation: 'vertical-x', min: 0, max: 4 },
+    (cx: number) => cx < 2,
+  );
+  const cell = cells.cells[0 + cells.dimsA * 0];
+  assert.equal(cell.valid, true);
+  assert.equal(cell.meanFraction, (1 + 0) / 2); // only x=0 (seen) and x=1 (blind)
+});
+
+test('computeSectionCells blacks a column whose IN-zone voxel is an obstacle (§7.3, §13.3)', () => {
+  // Obstacle at x=1, which is inside the marked set (cx < 2) — an ROI silhouette.
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]], invalidAt: [[1, 0, 0]] });
+  const chunk1 = denseChunk(1, [2, 0, 0], {});
+  const cells = computeSectionCells(
+    grid,
+    accessorsFor([chunk0, chunk1]),
+    ['cam-a'],
+    1,
+    { orientation: 'vertical-x', min: 0, max: 4 },
+    (cx: number) => cx < 2,
   );
   const cell = cells.cells[0 + cells.dimsA * 0];
   assert.equal(cell.valid, false);

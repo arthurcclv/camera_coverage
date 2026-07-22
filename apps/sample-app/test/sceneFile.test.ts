@@ -36,7 +36,10 @@ function validDoc(): SceneFileJSON {
       { id: 'cam-1', position: [-6, 5.4, -9.6], rotation: [0, 0, 0, 1], fov: 60, aspect: 1.7778, near: 0.1, far: 30 },
     ],
     probes: [{ id: 'probe-1', position: [0, 1, 0] }],
-    sections: [{ id: 'section-1', orientation: 'horizontal', min: 0, max: 2, aggregation: 'mean', enabled: true }],
+    sections: [
+      { id: 'section-1', orientation: 'horizontal', min: 0, max: 2, aggregation: 'mean', enabled: true, clipRange: 3 },
+    ],
+    clipSectionId: 'section-1',
     zones: [{ id: 'zone-1', name: 'West wing', enabled: true }],
     volumes: [
       { id: 'volume-1', zoneId: 'zone-1', position: [3, 1.5, -2], rotation: [0, 0.259, 0, 0.966], size: [4, 3, 6] },
@@ -150,6 +153,35 @@ test('parseSceneFile reads a legacy section "visible" key as enabled (§14.3 bac
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.scene.sections[0].enabled, false);
+});
+
+test('parseSceneFile defaults absent section clipRange and clipSectionId (§13.9 back-compat)', () => {
+  const doc = validDoc();
+  doc.sections = [{ id: 'section-1', orientation: 'horizontal', min: 0, max: 2, aggregation: 'mean', enabled: true } as never];
+  delete (doc as { clipSectionId?: unknown }).clipSectionId;
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.scene.sections[0].clipRange, 2);
+  assert.equal(result.scene.clipSectionId, null);
+});
+
+test('parseSceneFile round-trips clipRange and clipSectionId (§13.9)', () => {
+  const doc = validDoc();
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.scene.sections[0].clipRange, 3);
+  assert.equal(result.scene.clipSectionId, 'section-1');
+});
+
+test('parseSceneFile coerces a clipSectionId that names no section to null (§13.9)', () => {
+  const doc = validDoc();
+  doc.clipSectionId = 'does-not-exist';
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.scene.clipSectionId, null);
 });
 
 test('parseSceneFile rejects an unknown geometry kind (spec §14.8)', () => {
