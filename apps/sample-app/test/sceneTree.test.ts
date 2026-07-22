@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
+import type { SceneCamera } from '../src/cameras/camera.ts';
 import type { Probe } from '../src/scene/probeVisibility.ts';
 import type { Section } from '../src/scene/sectionHeatmap.ts';
 import {
@@ -19,16 +19,16 @@ import {
 } from '../src/scene/sceneTree.ts';
 import type { SamplingVolume, Zone } from '../src/scene/samplingVolumes.ts';
 
-function cam(id: string): CameraConfig {
-  return { id, position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 };
+function cam(id: string): SceneCamera {
+  return { id, name: '', position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 };
 }
 
 function probe(id: string): Probe {
-  return { id, position: [0, 0, 0] };
+  return { id, position: [0, 0, 0], name: '' };
 }
 
 function section(id: string): Section {
-  return { id, orientation: 'horizontal', min: 0, max: 1, aggregation: 'mean', enabled: true, clipRange: 2 };
+  return { id, orientation: 'horizontal', min: 0, max: 1, aggregation: 'mean', enabled: true, clipRange: 2, name: '' };
 }
 
 function zone(id: string, name = id): Zone {

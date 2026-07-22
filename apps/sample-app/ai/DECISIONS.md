@@ -6,6 +6,33 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Editable entity names: on-entity for the app, converted at the SDK boundary
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.6, §12.1, §13.1, §14.3. Cameras,
+probes, and sections each carry an editable display `name` **on the entity** (like the
+existing `Zone.name`), resolved for display by `cameraLabel`/`probeLabel`/`sectionLabel`
+(trimmed, blank → default `Camera N`/`Probe N`/`Section N`). The tree, panel titles, and
+every per-camera stat list (`StatsPanel`/`SectionStatsPanel`/`ZonePanel`, plus the probe
+visibility list) resolve the id to the name via a `cameraNameById` map App builds from
+`cameras`.
+
+**Why on-entity and not a side map.** The camera is the tricky one: `CameraConfig` is the
+**SDK** input type, and the headless engine keys cameras only by `id`. The first design
+kept camera names in a `Scene.cameraNames` side map to leave `CameraConfig` untouched. We
+rejected it: the scene-file `cameras` array need not match the SDK type, so instead the app
+models a camera as its own `SceneCamera` (`cameras/camera.ts`) = `CameraConfig` + `name`
+and **converts to a plain `CameraConfig` (dropping `name`) only at the `setCameras()`
+boundary** (one `.map(toCameraConfig)` in `App.tsx`). This makes cameras symmetric with the
+other entities, kills the sparse-map + orphan-prune special case (a name dies with its
+entity), and every other camera consumer reads the superset unchanged. Renaming is a pure
+label write — never a coverage input, never marks the result stale (like a zone rename).
+
+**Scene file.** `name` is optional on read (blank/missing → default) and **omitted on
+write when blank** (`stripBlankName` in `sceneFile.ts`), so unnamed entities add no noise.
+Additive and back-compatible → **no format-version bump** (still v2), like
+`clipRange`/`clipSectionId`. **Volumes are deliberately excluded** — auto-generated boxes
+are low-value to name; volume rows keep their raw `volume-N` id.
+
 ## Section cells apply the zone filter before validity
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.3 and

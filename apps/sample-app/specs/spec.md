@@ -265,6 +265,12 @@ for **both**:
   wall tops, angled inward and downward. Defined in `cameras/defaults.ts`.
 - Per-camera config maps to `CameraConfig`:
   `{ id, position, rotation (quat xyzw), fov (vertical°), aspect (16/9), near (0.1), far (~30) }`.
+- A camera also carries an **editable display name** (§5.6). The app models a camera
+  as its own entity — a `Camera` = `CameraConfig` **plus** a `name` — and **converts
+  to the SDK's plain `CameraConfig`** (dropping `name`) only at the `setCameras()`
+  boundary (§8), the one place the engine type is required. So the name rides **on
+  the camera object**, exactly like a probe's or section's; the scene-file `cameras`
+  need not match the SDK type (§14.3).
 
 ### 5.1 Rotation representation
 
@@ -291,6 +297,9 @@ for **both**:
   and **Range (far)** — the detection range / far frustum plane (`CameraConfig.far`),
   slider range 0.5–100 m, step 0.1. Editing it resizes the frustum gizmo (§5.3) live
   and invalidates the displayed coverage result (§5.4).
+- **Name field** — a text input at the top of the panel edits the camera's display
+  name (§5.6). Unlike the sliders, editing the name is a pure display change: it
+  never resizes a gizmo and never invalidates coverage.
 - **TransformControls** gizmo (translate + rotate modes, in Local or Global space
   per the §2.4 space toggle) on the selected camera in the viewport, kept in
   two-way sync with the panel.
@@ -351,6 +360,12 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   **orientation** and its **aggregated coverage** (e.g. `H · mean 47%`), mirroring the
   camera coverage-rate badge; the coverage part is omitted when there is no usable run.
   A group header shows a caret, label, and passive child count.
+- **Labels.** A row's label is the entity's **resolved display name** — cameras
+  (§5.6), probes (§12.1), sections (§13.1), and zones (`sampling_volumes.md` §6.2)
+  each via their **on-entity `name`** — falling back to the default `Camera N` /
+  `Probe N` / `Section N` / `Zone N` when blank. **Volume** rows are the one
+  exception: they keep showing the raw id (`volume-N`); volume names are out of scope
+  (§15).
 - **Selection.** The app holds a single **unified selection** — a camera, probe,
   section, zone, *or* volume (`{ kind: 'camera' | 'probe' | 'section' | 'zone' |
   'volume'; id } | null`) — so selecting one deselects the others and only one
@@ -379,6 +394,31 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
   `aria-expanded`/`aria-selected`; interaction is mouse-driven (no keyboard tree
   navigation yet).
+
+### 5.6 Camera name
+
+Each camera has an **editable display name** — the camera analog of the zone name
+(`sampling_volumes.md` §6.2). The `CameraPanel` (§5.2) shows a **Name** text input at
+its top, prefilled with the camera's current name, writing back on change (live, no
+confirm step). The name is stored **on the app `Camera` entity** (a `CameraConfig`
+extended with `name`, §14.1), exactly like a probe's (§12.1) or section's (§13.1)
+name; the SDK never sees it — the app drops `name` when it converts to `CameraConfig`
+at the `setCameras()` boundary (§8). Rules:
+
+- The camera's **stable identity is `id`** (`cam-N`); the name is a pure display
+  label. Renaming never changes `id` or anything the engine sees.
+- The value is **trimmed**; an all-whitespace / empty / absent name **falls back to
+  the default `Camera N`** (derived from the id) rather than showing a blank label.
+  The stored `name` may be blank (unnamed cameras seed blank); the default is derived
+  by the label helper, not baked in.
+- **No uniqueness requirement** — two cameras may share a name (ids stay distinct).
+- Deleting the camera drops its name with it — the name is a field of the camera, so
+  there is no orphan to prune (unlike a side map).
+- Renaming updates the label **everywhere live** — the hierarchy camera row (§5.5),
+  the panel header, and every per-camera reference in the stats (§10, §13.7,
+  `sampling_volumes.md` §6.2) — and is **persisted** to `scene.json` (§14.3).
+- Renaming is **not** a coverage input: it **never marks the result stale** and
+  never triggers a recompute (§8.1), like a zone/section label change.
 
 ---
 
@@ -527,8 +567,9 @@ blind-spot counts also remain available numerically in the stats panel (§10).
 From `CoverageSummary`:
 
 - `overallRate` — fraction of valid voxels seen by ≥ 1 camera.
-- `perCamera[]` — per-camera `coverageRate`, listed alongside each camera.
-  Disabled cameras (§5.4) aren't sent to the engine, so they have no entry here.
+- `perCamera[]` — per-camera `coverageRate`, listed alongside each camera by its
+  **display name** (§5.6). Disabled cameras (§5.4) aren't sent to the engine, so they
+  have no entry here.
 - `validVoxels`, `elapsedMs`.
 - **Blind-spot count** — number of valid voxels no enabled camera sees (§16),
   derived as `round(validVoxels × (1 − overallRate))`. Surfaced here numerically so
@@ -567,7 +608,11 @@ participate in `compute()`, and never change the coverage field.
 
 ### 12.1 Model & state
 
-- A probe is `{ id, position: Vec3 }`. Probes live in a canonical `probes: Probe[]`
+- A probe is `{ id, position: Vec3, name: string }`. The `name` is an **editable
+  display label** stored **on the entity** (like the zone, `sampling_volumes.md`
+  §6.2), with the same semantics as the camera name (§5.6): trimmed, blank/absent
+  falls back to the default `Probe N`, no uniqueness, never a coverage input, and it
+  round-trips in the scene file (§14.3). Probes live in a canonical `probes: Probe[]`
   array in `App.tsx`, parallel to `cameras` (§5). A probe node in the hierarchy
   (§5.5) references its probe by id; the tree carries identity only, like camera
   nodes.
@@ -606,7 +651,9 @@ is built, and lookup uses the SDK accessor's own `O(depth)` descent.
 
 When a probe is selected (§5.2), the left panel shows, in place of the camera panel:
 
-- header `Probe — <id>`;
+- header `Probe — <name>` (§12.1);
+- a **Name** text input editing the probe's display name — live, and never marks the
+  result stale (§12.1, §5.6);
 - **position X / Y / Z** sliders (a point has no orientation — no rotation or FOV);
 - a **visibility readout** against the enabled cameras of the retained run:
   - a summary line **"Seen by K of N cameras"** (N = that run's enabled-camera count),
@@ -668,7 +715,11 @@ fog — a section is a flat, per-cell heatmap of a chosen slice, and several can
 ### 13.1 Model & state
 
 - A section is
-  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, aggregation: 'mean' | 'max' | 'min' | 'blind', enabled: boolean, clipRange: number }`.
+  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, aggregation: 'mean' | 'max' | 'min' | 'blind', enabled: boolean, clipRange: number, name: string }`.
+  The `name` is an **editable display label** stored on the entity (like the zone,
+  `sampling_volumes.md` §6.2), with the same semantics as the camera name (§5.6):
+  trimmed, blank/absent falls back to the default `Section N`, no uniqueness, never a
+  coverage input, and it round-trips in the scene file (§14.3).
   `clipRange` (a world-metre width, default `2`) is the section's clip band width
   (§13.9); *which* section clips — if any — is the single scene-level `clipSectionId`
   (§14.1), not a per-section flag. Both are saved in the scene file (§14); everything but
@@ -771,8 +822,10 @@ and reuses the workspace grid's in-plane dimensions.
 
 - **Per-section editor** — when a section is selected (§5.2), the left detail panel
   shows a **`SectionPanel`** in place of the camera/probe panel: header
-  `Section — <id>`, the orientation selector, the thickness slider (§13.2), the
-  aggregation selector, a **Clip toggle button**, and a **reveal-range slider** (§13.9).
+  `Section — <name>` (§13.1), a **Name** text input (editing the section's display
+  name — live, never marks the result stale, §13.1, §5.6), the orientation selector,
+  the thickness slider (§13.2), the aggregation selector, a **Clip toggle button**,
+  and a **reveal-range slider** (§13.9).
   The button is **highlighted** while this section is the one clipping (§14.1
   `clipSectionId`); the reveal-range slider is **always shown** (it has no visible effect
   unless this section is the clipping one).
@@ -832,7 +885,8 @@ fraction** independent of the active display aggregation (§13.3):
 - **Min / Max** — the lowest and highest colored-cell coverage.
 - **Per camera** — for each camera enabled in the retained run, the fraction of the
   section's colored cells it sees in **≥ 1** voxel of the column (analog of the
-  per-camera `coverageRate`, §10), decoded from the snapshotted enabled-camera list.
+  per-camera `coverageRate`, §10), decoded from the snapshotted enabled-camera list
+  and labeled by the camera's **display name** (§5.6).
 
 **States without usable data** — never shown as "0": no section selected → a
 placeholder; a section selected but no `compute()` completed → *"Run coverage to see
@@ -898,12 +952,17 @@ scale, panel split) are **not** part of the scene file — they remain app-local
 ### 14.1 Unified `Scene` model
 
 - All scene entities live in a single in-memory `Scene`:
-  `{ geometry: GeometryObject[], cameras: CameraConfig[], probes: Probe[],
+  `{ geometry: GeometryObject[], cameras: Camera[], probes: Probe[],
   sections: Section[], clipSectionId: string | null, zones: Zone[],
-  volumes: SamplingVolume[], useZones: boolean }`. `clipSectionId` is the section
-  currently clipping the scene (§13.9), or `null`.
+  volumes: SamplingVolume[], useZones: boolean }`. A **`Camera`** is the app camera
+  entity — `CameraConfig` extended with a `name` (§5.6); the app **converts each to a
+  plain `CameraConfig`** (dropping `name`) at the `setCameras()` boundary (§8), the
+  only place the SDK type is required — so probe/section/zone **and camera** names all
+  live on their own entities (no side map). `clipSectionId` is the section currently
+  clipping the scene (§13.9), or `null`.
   `defaultScene()` seeds `zones`/`volumes` **empty**, `useZones` **false**, and
-  `clipSectionId` **null** (`sampling_volumes.md` §9).
+  `clipSectionId` **null** (`sampling_volumes.md` §9); the default cameras
+  (`cameras/defaults.ts`) carry **blank** names, so they display as `Camera N`.
 - The startup scene is **constructed in code** as a `Scene` from today's defaults
   (`buildRoom.ts` geometry + `cameras/defaults.ts`); no folder is opened at boot (the
   File System Access API requires a user gesture). `defaultScene()` is the single
@@ -939,11 +998,20 @@ scale, panel split) are **not** part of the scene file — they remain app-local
     open top (§4.1).
   - `box` — axis-aligned obstacle (`min`, `max`) in the object's local frame.
   - `gltf` — a `src` reference (§14.2) to a GLB/GLTF asset.
-- **`cameras`** / **`probes`** / **`sections`** — the serialized `CameraConfig[]`,
-  `Probe[]`, and `Section[]` (§5, §12.1, §13.1). A section's per-entity flag is
-  **`enabled`** (renamed from the legacy `visible`, which the reader still accepts
-  for back-compat, §14.8). A section's **`clipRange`** (§13.9) is **optional on read**,
-  defaulting to `2` (clamped to the collapse-axis extent) when absent.
+- **`cameras`** / **`probes`** / **`sections`** — the serialized cameras, `Probe[]`,
+  and `Section[]` (§5, §12.1, §13.1). A **camera** object is the app `Camera` shape —
+  the `CameraConfig` fields **plus** an optional `name` — **not** the bare SDK type;
+  the reader builds the app `Camera`, and the app converts to `CameraConfig` only at
+  `setCameras()` (§14.1). A section's per-entity flag is **`enabled`** (renamed from
+  the legacy `visible`, which the reader still accepts for back-compat, §14.8). A
+  section's **`clipRange`** (§13.9) is **optional on read**, defaulting to `2`
+  (clamped to the collapse-axis extent) when absent.
+- **`name`** on each **camera**, **probe**, and **section** is the user-edited
+  display label (§5.6, §12.1, §13.1), **optional on read** — a blank/missing name
+  reads as the default `Camera N` / `Probe N` / `Section N`, never an error — and, to
+  keep files tidy, is **omitted on write when blank** (an unnamed entity has no `name`
+  key and reads back as its default). Adding `name` is back-compatible, so there is
+  **no format-version bump** (still `2`), exactly like `clipRange`/`clipSectionId`.
 - **`clipSectionId`** — which section clips (§13.9), a scene-level `string | null`.
   **Optional on read**, defaulting to `null`; an id that names no loaded section is
   coerced to `null`. Older files (and files with no clip) load unclipped — **no
@@ -972,12 +1040,12 @@ Sketch:
   ],
   "cameras": [
     { "id": "cam-1", "position": [-6,5.4,-9.6], "rotation": [0,0,0,1],
-      "fov": 60, "aspect": 1.7778, "near": 0.1, "far": 30 }
+      "fov": 60, "aspect": 1.7778, "near": 0.1, "far": 30, "name": "Front door" }
   ],
-  "probes": [ { "id": "probe-1", "position": [0,1,0] } ],
+  "probes": [ { "id": "probe-1", "position": [0,1,0], "name": "Aisle 3" } ],
   "sections": [
     { "id": "section-1", "orientation": "horizontal", "min": 0, "max": 2,
-      "aggregation": "mean", "enabled": true }
+      "aggregation": "mean", "enabled": true, "name": "Ground floor" }
   ],
   "zones": [ { "id": "zone-1", "name": "West wing", "enabled": true } ],
   "volumes": [

@@ -13,6 +13,8 @@ export interface SectionStatsPanelProps {
   hasRunOnce: boolean;
   /** Whether the live scene has diverged from the retained run (spec §8.1, §13.4). */
   stale: boolean;
+  /** Camera id → display name (spec §5.6) for the per-camera list. */
+  cameraNameById: Map<string, string>;
 }
 
 const ORIENTATION_LABELS: Record<SectionOrientation, string> = {
@@ -21,7 +23,7 @@ const ORIENTATION_LABELS: Record<SectionOrientation, string> = {
   'vertical-z': 'Vertical Z',
 };
 
-export function SectionStatsPanel({ section, cellGrid, hasRunOnce, stale }: SectionStatsPanelProps) {
+export function SectionStatsPanel({ section, cellGrid, hasRunOnce, stale, cameraNameById }: SectionStatsPanelProps) {
   return (
     <div className="panel">
       <p className="panel-title">Section stats</p>
@@ -30,13 +32,13 @@ export function SectionStatsPanel({ section, cellGrid, hasRunOnce, stale }: Sect
       ) : !hasRunOnce || !cellGrid ? (
         <p className="hint">Run coverage to see section stats.</p>
       ) : (
-        <SectionStatsBody section={section} cellGrid={cellGrid} stale={stale} />
+        <SectionStatsBody section={section} cellGrid={cellGrid} stale={stale} cameraNameById={cameraNameById} />
       )}
     </div>
   );
 }
 
-function SectionStatsBody({ section, cellGrid, stale }: { section: Section; cellGrid: SectionCellGrid; stale: boolean }) {
+function SectionStatsBody({ section, cellGrid, stale, cameraNameById }: { section: Section; cellGrid: SectionCellGrid; stale: boolean; cameraNameById: Map<string, string> }) {
   const stats = computeSectionStats(cellGrid);
   return (
     <>
@@ -87,7 +89,7 @@ function SectionStatsBody({ section, cellGrid, stale }: { section: Section; cell
       </p>
       {stats.perCamera.map((c) => (
         <div className="stat-line" key={c.id}>
-          <span>{c.id}</span>
+          <span>{cameraNameById.get(c.id) ?? c.id}</span>
           <b>{(c.seenFraction * 100).toFixed(1)}%</b>
         </div>
       ))}

@@ -5,16 +5,19 @@
  * state, so it never drifts.
  */
 import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
+import { cameraLabel, type SceneCamera } from '../cameras/camera.ts';
 import { eulerToQuat, quatToEuler } from '../cameras/math.ts';
 import { Slider } from './Slider.tsx';
 
 export interface CameraPanelProps {
-  camera: CameraConfig | null;
+  camera: SceneCamera | null;
   flagged: boolean;
   onChange(id: string, patch: Partial<CameraConfig>): void;
+  /** Live display-name write (spec §5.6); never marks the result stale. */
+  onRename(id: string, name: string): void;
 }
 
-export function CameraPanel({ camera, flagged, onChange }: CameraPanelProps) {
+export function CameraPanel({ camera, flagged, onChange, onRename }: CameraPanelProps) {
   if (!camera) {
     return (
       <div className="panel">
@@ -39,11 +42,23 @@ export function CameraPanel({ camera, flagged, onChange }: CameraPanelProps) {
   return (
     <div className="panel">
       <p className="panel-title">
-        Camera — {camera.id}
+        Camera — {cameraLabel(camera)}
         {flagged && <span className="badge flagged" style={{ marginLeft: 8 }}>inside geometry</span>}
       </p>
 
       <div className="panel-body">
+        <div className="row">
+          <label htmlFor="camera-name">Name</label>
+          <input
+            id="camera-name"
+            type="text"
+            className="text-input"
+            value={camera.name}
+            placeholder={cameraLabel(camera)}
+            onChange={(e) => onRename(camera.id, e.target.value)}
+          />
+        </div>
+
         <Slider label="Pos X" value={camera.position[0]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(0, v)} />
         <Slider label="Pos Y" value={camera.position[1]} min={0} max={6.5} step={0.1} onChange={(v) => setPosition(1, v)} />
         <Slider label="Pos Z" value={camera.position[2]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(2, v)} />

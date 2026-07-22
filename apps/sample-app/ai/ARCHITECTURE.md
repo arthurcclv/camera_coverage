@@ -162,7 +162,11 @@ default" — see DECISIONS.md).
 - `transformSpace.ts` — pure local/global ↔ Three.js space mapping + icon/tooltip.
 
 **Cameras (`cameras/`)**
-- `defaults.ts` — the 10 default CCTV camera configs.
+- `camera.ts` — the `SceneCamera` entity (`CameraConfig` + editable `name`), its
+  `defaultCameraName`/`cameraLabel` helpers, and `toCameraConfig` (drops `name` at the
+  SDK `setCameras()` boundary). See [DECISIONS.md](DECISIONS.md) for why names are
+  on-entity + converted rather than a side map.
+- `defaults.ts` — the 10 default CCTV cameras (blank names → display as `Camera N`).
 - `math.ts` — Euler (YXZ, degrees) ↔ quaternion helpers.
 
 **UI (`ui/`, presentational React)**

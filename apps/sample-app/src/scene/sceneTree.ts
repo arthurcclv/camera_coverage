@@ -7,16 +7,18 @@
  * groups. Nodes carry hierarchy + identity only; entity payload stays in the
  * canonical arrays — cameras in `CameraConfig[]`, probes in `Probe[]`, sections
  * in `Section[]`, zones in `Zone[]`, volumes in `SamplingVolume[]` — which a node
- * references by id. The tree is derived from those arrays via `buildSceneTree` —
- * there is no separate mutable node state.
+ * references by id (cameras in `SceneCamera[]`). The tree is derived from those
+ * arrays via `buildSceneTree` — there is no separate mutable node state. Row labels
+ * resolve to each entity's display name (`cameraLabel`/`probeLabel`/`sectionLabel`/
+ * `zoneLabel`, spec §5.6); volume rows are the one exception and show the raw id.
  *
  * Zones introduce the first **user-created, selectable sub-groups**: a zone node
  * is both selectable (drives the ZonePanel) and expandable (its
  * volume children), unlike today's passive type-group umbrellas.
  */
-import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
-import type { Probe } from './probeVisibility.ts';
-import type { Section } from './sectionHeatmap.ts';
+import { cameraLabel, type SceneCamera } from '../cameras/camera.ts';
+import { probeLabel, type Probe } from './probeVisibility.ts';
+import { sectionLabel, type Section } from './sectionHeatmap.ts';
 import { zoneLabel, type SamplingVolume, type Zone } from './samplingVolumes.ts';
 
 export type SceneNode =
@@ -110,7 +112,7 @@ function childIdsOf(node: SceneNode): string[] {
  * reachable via `childIds`.
  */
 export function buildSceneTree(
-  cameras: CameraConfig[],
+  cameras: SceneCamera[],
   probes: Probe[] = [],
   sections: Section[] = [],
   zones: Zone[] = [],
@@ -119,7 +121,7 @@ export function buildSceneTree(
   const cameraNodes: SceneNode[] = cameras.map((c) => ({
     kind: 'camera',
     id: nodeIdForCamera(c.id),
-    label: c.id,
+    label: cameraLabel(c),
     cameraId: c.id,
   }));
   const cameraGroup: SceneNode = {
@@ -135,7 +137,7 @@ export function buildSceneTree(
     const probeNodes: SceneNode[] = probes.map((p) => ({
       kind: 'probe',
       id: nodeIdForProbe(p.id),
-      label: p.id,
+      label: probeLabel(p),
       probeId: p.id,
     }));
     const probeGroup: SceneNode = {
@@ -151,7 +153,7 @@ export function buildSceneTree(
     const sectionNodes: SceneNode[] = sections.map((s) => ({
       kind: 'section',
       id: nodeIdForSection(s.id),
-      label: s.id,
+      label: sectionLabel(s),
       sectionId: s.id,
     }));
     const sectionGroup: SceneNode = {

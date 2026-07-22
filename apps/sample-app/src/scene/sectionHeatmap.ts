@@ -30,6 +30,23 @@ export interface Section {
   /** Total width (world m) of the clip band, centered on the cut plane
    * `(min+max)/2` (spec §13.9). Clamped to `[MIN_CLIP_RANGE, collapse-axis extent]`. */
   clipRange: number;
+  /** User-editable display label (§13.1, §5.6); blank → falls back to `Section N`. */
+  name: string;
+}
+
+/** The default `Section N` label derived from a `section-N` id (§5.6). */
+export function defaultSectionName(id: string): string {
+  const m = /^section-(\d+)$/.exec(id);
+  return m ? `Section ${m[1]}` : id;
+}
+
+/**
+ * The label to display for a section (§5.6): the trimmed `name`, or the default
+ * `Section N` when blank/all-whitespace. Never returns an empty string.
+ */
+export function sectionLabel(section: Section): string {
+  const trimmed = section.name.trim();
+  return trimmed.length > 0 ? trimmed : defaultSectionName(section.id);
 }
 
 export const SECTION_ORIENTATIONS: SectionOrientation[] = ['horizontal', 'vertical-x', 'vertical-z'];
@@ -159,6 +176,8 @@ export function defaultSection(id: string, worldMin: Vec3, worldMax: Vec3): Sect
     aggregation: 'mean',
     enabled: true,
     clipRange: DEFAULT_CLIP_RANGE,
+    // Blank name (spec §14.1) — a new section displays as `Section N`.
+    name: '',
   };
 }
 

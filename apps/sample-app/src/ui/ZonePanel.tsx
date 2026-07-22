@@ -18,9 +18,11 @@ export interface ZonePanelProps {
   hasRunOnce: boolean;
   stale: boolean;
   onRename(id: string, name: string): void;
+  /** Camera id → display name (spec §5.6) for the per-camera list. */
+  cameraNameById: Map<string, string>;
 }
 
-export function ZonePanel({ zone, memberCount, summary, hasRunOnce, stale, onRename }: ZonePanelProps) {
+export function ZonePanel({ zone, memberCount, summary, hasRunOnce, stale, onRename, cameraNameById }: ZonePanelProps) {
   if (!zone) return null;
 
   return (
@@ -51,14 +53,14 @@ export function ZonePanel({ zone, memberCount, summary, hasRunOnce, stale, onRen
         ) : summary.validVoxels === 0 ? (
           <p className="hint">This zone marks no valid voxels.</p>
         ) : (
-          <ZoneStatsBody summary={summary} stale={stale} />
+          <ZoneStatsBody summary={summary} stale={stale} cameraNameById={cameraNameById} />
         )}
       </div>
     </div>
   );
 }
 
-function ZoneStatsBody({ summary, stale }: { summary: ZoneSummary; stale: boolean }) {
+function ZoneStatsBody({ summary, stale, cameraNameById }: { summary: ZoneSummary; stale: boolean; cameraNameById: Map<string, string> }) {
   const blindPct = summary.validVoxels > 0 ? summary.blindVoxels / summary.validVoxels : 0;
   return (
     <>
@@ -81,7 +83,7 @@ function ZoneStatsBody({ summary, stale }: { summary: ZoneSummary; stale: boolea
       <p className="panel-title subhead">Per camera</p>
       {summary.perCamera.map((c) => (
         <div className="stat-line" key={c.id}>
-          <span>{c.id}</span>
+          <span>{cameraNameById.get(c.id) ?? c.id}</span>
           <b>{(c.coverageRate * 100).toFixed(1)}%</b>
         </div>
       ))}

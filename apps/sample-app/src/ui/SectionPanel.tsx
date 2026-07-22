@@ -12,6 +12,7 @@ import {
   MIN_CLIP_RANGE,
   MIN_SECTION_THICKNESS,
   sectionCenter,
+  sectionLabel,
   SECTION_AGGREGATIONS,
   SECTION_ORIENTATIONS,
   type Section,
@@ -25,6 +26,8 @@ export interface SectionPanelProps {
   worldMin: Vec3;
   worldMax: Vec3;
   onChange(id: string, patch: Partial<Section>): void;
+  /** Live display-name write (spec §5.6); never marks the result stale. */
+  onRename(id: string, name: string): void;
   /** Whether this section is the one currently clipping the scene (spec §13.9). */
   clipActive: boolean;
   /** Toggle this section as the clipping section (spec §13.9). */
@@ -44,7 +47,7 @@ const AGGREGATION_LABELS: Record<SectionAggregation, string> = {
   blind: 'Blind',
 };
 
-export function SectionPanel({ section, worldMin, worldMax, onChange, clipActive, onToggleClip }: SectionPanelProps) {
+export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, clipActive, onToggleClip }: SectionPanelProps) {
   if (!section) return null;
 
   const setOrientation = (orientation: SectionOrientation) => {
@@ -69,9 +72,21 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, clipActive
 
   return (
     <div className="panel">
-      <p className="panel-title">Section — {section.id}</p>
+      <p className="panel-title">Section — {sectionLabel(section)}</p>
 
       <div className="panel-body">
+        <div className="row">
+          <label htmlFor="section-name">Name</label>
+          <input
+            id="section-name"
+            type="text"
+            className="text-input"
+            value={section.name}
+            placeholder={sectionLabel(section)}
+            onChange={(e) => onRename(section.id, e.target.value)}
+          />
+        </div>
+
         <p className="hint">Orientation</p>
         <div className="segmented" role="radiogroup" aria-label="Section orientation">
           {SECTION_ORIENTATIONS.map((o) => (

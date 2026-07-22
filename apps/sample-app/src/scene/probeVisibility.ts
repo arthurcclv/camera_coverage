@@ -18,6 +18,23 @@ import type { ChunkResult, Vec3, WorkspaceGrid } from '@linkervision/camera-cove
 export interface Probe {
   id: string;
   position: Vec3;
+  /** User-editable display label (§12.1, §5.6); blank → falls back to `Probe N`. */
+  name: string;
+}
+
+/** The default `Probe N` label derived from a `probe-N` id (§5.6). */
+export function defaultProbeName(id: string): string {
+  const m = /^probe-(\d+)$/.exec(id);
+  return m ? `Probe ${m[1]}` : id;
+}
+
+/**
+ * The label to display for a probe (§5.6): the trimmed `name`, or the default
+ * `Probe N` when blank/all-whitespace. Never returns an empty string.
+ */
+export function probeLabel(probe: Probe): string {
+  const trimmed = probe.name.trim();
+  return trimmed.length > 0 ? trimmed : defaultProbeName(probe.id);
 }
 
 /** Visibility of a probe against the retained run's enabled cameras (spec §12.3). */

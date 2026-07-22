@@ -136,6 +136,31 @@ test('parseSceneFile falls back a blank/missing zone name to the default Zone N 
   assert.equal(result.scene.zones[1].name, 'Zone 2');
 });
 
+test('parseSceneFile reads camera/probe/section names, trimming them; blank/missing → "" (spec §5.6, §14.3)', () => {
+  const doc = validDoc();
+  doc.cameras[0].name = '  Front door  ';
+  doc.sections[0].name = 'Ground floor';
+  // probe-1 keeps no `name` key (validDoc leaves it absent).
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.scene.cameras[0].name, 'Front door'); // trimmed on read
+  assert.equal(result.scene.sections[0].name, 'Ground floor');
+  assert.equal(result.scene.probes[0].name, ''); // missing → blank (displays as Probe N)
+});
+
+test('serializeScene omits blank names and writes named entities trimmed (spec §5.6, §14.3)', () => {
+  const parsed = parseSceneFile(validDoc());
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  // Name one camera; leave probe/section blank.
+  parsed.scene.cameras[0].name = '  Front door  ';
+  const out = serializeScene(parsed.scene);
+  assert.equal(out.cameras[0].name, 'Front door'); // trimmed, written
+  assert.equal('name' in out.probes[0], false); // blank → omitted
+  assert.equal('name' in out.sections[0], false); // blank → omitted
+});
+
 test('zone.enabled defaults to true when absent and round-trips when set (§7.3)', () => {
   const doc = validDoc();
   doc.zones = [{ id: 'zone-1', name: 'A' } as never, { id: 'zone-2', name: 'B', enabled: false }];

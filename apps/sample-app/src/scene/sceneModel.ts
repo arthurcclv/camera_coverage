@@ -5,7 +5,7 @@
  * single source of both the boot state and the "Reset to default" action (spec
  * §14.7).
  */
-import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
+import type { SceneCamera } from '../cameras/camera.ts';
 import { defaultCameras } from '../cameras/defaults.ts';
 import { defaultGeometry } from './buildRoom.ts';
 import type { GeometryObject } from './geometryModel.ts';
@@ -15,7 +15,9 @@ import type { SamplingVolume, Zone } from './samplingVolumes.ts';
 
 export interface Scene {
   geometry: GeometryObject[];
-  cameras: CameraConfig[];
+  /** App camera entities — `CameraConfig` + a display `name` (spec §5.6, §14.1);
+   * converted to plain `CameraConfig` at the `setCameras()` boundary. */
+  cameras: SceneCamera[];
   probes: Probe[];
   sections: Section[];
   /** Id of the section currently clipping the scene (spec §13.9), or null. */

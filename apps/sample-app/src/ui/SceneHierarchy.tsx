@@ -11,8 +11,8 @@
  * probe, section, zone, or volume row opens a Delete context menu.
  */
 import { useEffect, useMemo, useState } from 'react';
-import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
 
+import type { SceneCamera } from '../cameras/camera.ts';
 import type { Probe } from '../scene/probeVisibility.ts';
 import { averageDisplayValue, type Section, type SectionCellGrid } from '../scene/sectionHeatmap.ts';
 import type { SamplingVolume, Zone, ZoneSummary } from '../scene/samplingVolumes.ts';
@@ -30,7 +30,7 @@ import {
 } from '../scene/sceneTree.ts';
 
 export interface SceneHierarchyProps {
-  cameras: CameraConfig[];
+  cameras: SceneCamera[];
   probes: Probe[];
   sections: Section[];
   zones: Zone[];

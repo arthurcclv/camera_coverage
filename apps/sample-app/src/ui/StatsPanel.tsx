@@ -11,13 +11,15 @@ export interface StatsPanelProps {
   computeBackend: 'webgpu' | 'cpu' | null;
   renderBackend: RenderBackend | null;
   voxelSize: number;
+  /** Camera id → display name (spec §5.6) for the per-camera list. */
+  cameraNameById: Map<string, string>;
 }
 
 function renderBackendLabel(b: RenderBackend): string {
   return b === 'webgpu' ? 'WebGPU' : 'WebGL2';
 }
 
-export function StatsPanel({ summary, computeBackend, renderBackend, voxelSize }: StatsPanelProps) {
+export function StatsPanel({ summary, computeBackend, renderBackend, voxelSize, cameraNameById }: StatsPanelProps) {
   // Blind spots: valid voxels no enabled camera sees (§13). overallRate is the
   // covered fraction, so (1 − rate) of the valid voxels are blind spots.
   const blindSpots = summary ? Math.round(summary.validVoxels * (1 - summary.overallRate)) : 0;
@@ -60,7 +62,7 @@ export function StatsPanel({ summary, computeBackend, renderBackend, voxelSize }
           </p>
           {summary.perCamera.map((c) => (
             <div className="stat-line" key={c.id}>
-              <span>{c.id}</span>
+              <span>{cameraNameById.get(c.id) ?? c.id}</span>
               <b>{(c.coverageRate * 100).toFixed(1)}%</b>
             </div>
           ))}

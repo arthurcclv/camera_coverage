@@ -343,7 +343,8 @@ The zone's **coverage stats** — the per-zone analog of the §10 stats panel, o
 
 - overall coverage (covered by ≥1 camera), **blind-spot** count/%, **per-camera**
   coverage rate (decoded from the retained run's enabled-camera snapshot, `spec.md`
-  §12.2). "Run coverage to see results." / stale-hint states as elsewhere.
+  §12.2, and labeled by the camera's **display name**, `spec.md` §5.6). "Run coverage
+  to see results." / stale-hint states as elsewhere.
 
 ### 6.3 Global tool controls — `SamplingVolumeControls.tsx` (right sidebar)
 

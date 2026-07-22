@@ -14,6 +14,8 @@ import {
   DEFAULT_CLIP_RANGE,
   defaultRangeForOrientation,
   defaultSection,
+  defaultSectionName,
+  sectionLabel,
   MAX_SECTION_THICKNESS,
   maxClipRange,
   MIN_CLIP_RANGE,
@@ -133,7 +135,18 @@ test('defaultSection is Horizontal, full (clamped) Y extent, mean aggregation, e
     aggregation: 'mean',
     enabled: true,
     clipRange: 2,
+    name: '',
   });
+});
+
+test('sectionLabel trims the name and falls back to "Section N" when blank (spec §5.6, §13.1)', () => {
+  assert.equal(defaultSectionName('section-1'), 'Section 1');
+  assert.equal(defaultSectionName('odd'), 'odd');
+  const base = defaultSection('section-2', [0, -1, 0], [4, 3, 2]);
+  assert.equal(sectionLabel({ ...base, name: 'Ground floor' }), 'Ground floor');
+  assert.equal(sectionLabel({ ...base, name: '  Mezzanine  ' }), 'Mezzanine');
+  assert.equal(sectionLabel({ ...base, name: '' }), 'Section 2');
+  assert.equal(sectionLabel({ ...base, name: '   ' }), 'Section 2');
 });
 
 // --- clip band (spec §13.9) -----------------------------------------------

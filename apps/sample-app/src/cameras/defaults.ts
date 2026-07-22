@@ -2,8 +2,8 @@
  * Default camera rig (spec §5): 10 CCTV-style cameras around the room
  * perimeter, mounted high near the wall tops, angled inward and downward.
  */
-import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
 import { ROOM_HALF_X, ROOM_HALF_Z, ROOM_HEIGHT } from '../scene/buildRoom.ts';
+import type { SceneCamera } from './camera.ts';
 import { eulerToQuat } from './math.ts';
 
 const MOUNT_HEIGHT = ROOM_HEIGHT - 0.6; // 5.4m
@@ -14,9 +14,11 @@ const ASPECT = 16 / 9;
 const NEAR = 0.1;
 const FAR = 30;
 
-function cam(id: string, position: [number, number, number], yaw: number): CameraConfig {
+function cam(id: string, position: [number, number, number], yaw: number): SceneCamera {
   return {
     id,
+    // Default cameras carry a blank name (spec §14.1) — they display as `Camera N`.
+    name: '',
     position,
     rotation: eulerToQuat({ yaw, pitch: PITCH_DOWN, roll: 0 }),
     fov: FOV,
@@ -26,7 +28,7 @@ function cam(id: string, position: [number, number, number], yaw: number): Camer
   };
 }
 
-export function defaultCameras(): CameraConfig[] {
+export function defaultCameras(): SceneCamera[] {
   const zFront = -ROOM_HALF_Z + INSET; // -Z wall, looks toward +Z (yaw 180)
   const zBack = ROOM_HALF_Z - INSET; // +Z wall, looks toward -Z (yaw 0)
   const xLeft = -ROOM_HALF_X + INSET; // -X wall, looks toward +X (yaw -90)

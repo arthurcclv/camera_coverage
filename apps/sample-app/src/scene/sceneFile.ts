@@ -4,7 +4,8 @@
  * resolution and is the only impure layer, kept thin so this module (the part
  * with real decision logic) is directly unit-testable.
  */
-import type { CameraConfig, Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
+import type { Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
+import type { SceneCamera } from '../cameras/camera.ts';
 import {
   DEFAULT_CLIP_RANGE,
   MIN_CLIP_RANGE,
@@ -22,12 +23,16 @@ export const SCENE_FILE_FORMAT_VERSION = 2;
 /** Versions {@link parseSceneFile} accepts; a v1 file reads with empty zones/volumes (§14.8). */
 export const SUPPORTED_FORMAT_VERSIONS = [1, 2] as const;
 
+/** On-disk shape of a name-bearing entity: `name` is optional (§14.3 omit-on-write). */
+type Serialized<T extends { name: string }> = Omit<T, 'name'> & { name?: string };
+
 export interface SceneFileJSON {
   formatVersion: number;
   geometry: GeometryObject[];
-  cameras: CameraConfig[];
-  probes: Probe[];
-  sections: Section[];
+  /** App camera shape — `CameraConfig` fields plus an optional `name` (§14.3). */
+  cameras: Serialized<SceneCamera>[];
+  probes: Serialized<Probe>[];
+  sections: Serialized<Section>[];
   /** Which section clips the scene (§13.9), or null. */
   clipSectionId: string | null;
   /** Region-of-interest zones (§14.3); each is `{ id, name }`. */
@@ -68,6 +73,15 @@ function isQuat(x: unknown): x is Quat {
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x);
+}
+
+/**
+ * The display `name` of a camera/probe/section entity (§5.6, §14.3): the trimmed
+ * string, or `''` when absent/blank/non-string (which reads back as the default
+ * `Camera N` / `Probe N` / `Section N`). Never an error.
+ */
+function readName(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : '';
 }
 
 function hasTransform(o: Record<string, unknown>): boolean {
@@ -119,9 +133,9 @@ function parseGeometry(raw: unknown): GeometryObject[] | string {
   return geometry;
 }
 
-function parseCameras(raw: unknown): CameraConfig[] | string {
+function parseCameras(raw: unknown): SceneCamera[] | string {
   if (!Array.isArray(raw)) return 'cameras must be an array';
-  const cameras: CameraConfig[] = [];
+  const cameras: SceneCamera[] = [];
   const seenIds = new Set<string>();
   for (const [i, item] of raw.entries()) {
     if (!isRecord(item) || typeof item.id !== 'string' || !isVec3(item.position) || !isQuat(item.rotation) || !isFiniteNumber(item.fov)) {
@@ -129,7 +143,8 @@ function parseCameras(raw: unknown): CameraConfig[] | string {
     }
     if (seenIds.has(item.id)) return `duplicate camera id "${item.id}"`;
     seenIds.add(item.id);
-    const camera: CameraConfig = { id: item.id, position: item.position, rotation: item.rotation, fov: item.fov };
+    // `name` (§5.6) is optional on read; blank/missing reads as the default `Camera N`.
+    const camera: SceneCamera = { id: item.id, name: readName(item.name), position: item.position, rotation: item.rotation, fov: item.fov };
     if (item.aspect !== undefined) {
       if (!isFiniteNumber(item.aspect)) return `cameras[${i}]: aspect must be a number`;
       camera.aspect = item.aspect;
@@ -155,7 +170,8 @@ function parseProbes(raw: unknown): Probe[] | string {
     if (!isRecord(item) || typeof item.id !== 'string' || !isVec3(item.position)) return `probes[${i}]: requires id, position`;
     if (seenIds.has(item.id)) return `duplicate probe id "${item.id}"`;
     seenIds.add(item.id);
-    probes.push({ id: item.id, position: item.position });
+    // `name` (§12.1, §5.6) is optional on read; blank/missing reads as `Probe N`.
+    probes.push({ id: item.id, position: item.position, name: readName(item.name) });
   }
   return probes;
 }
@@ -195,6 +211,8 @@ function parseSections(raw: unknown): Section[] | string {
       aggregation: item.aggregation as Section['aggregation'],
       enabled: enabledRaw,
       clipRange,
+      // `name` (§13.1, §5.6) is optional on read; blank/missing reads as `Section N`.
+      name: readName(item.name),
     });
   }
   return sections;
@@ -288,14 +306,27 @@ export function parseSceneFile(json: unknown): ParseResult {
   return { ok: true, scene: { geometry, cameras, probes, sections, clipSectionId, zones, volumes, useZones } };
 }
 
+/**
+ * Drops a blank display `name` so it is **omitted on write** (§14.3): an unnamed
+ * entity has no `name` key (and reads back as its default), keeping files tidy. A
+ * non-blank name is written trimmed.
+ */
+function stripBlankName<T extends { name: string }>(entity: T): Serialized<T> {
+  const { name, ...rest } = entity;
+  const trimmed = name.trim();
+  return trimmed.length > 0 ? { ...rest, name: trimmed } : rest;
+}
+
 /** Serializes a `Scene` to the `scene.json` shape (spec §14.5) — a plain data copy. */
 export function serializeScene(scene: Scene): SceneFileJSON {
   return {
     formatVersion: SCENE_FILE_FORMAT_VERSION,
     geometry: scene.geometry,
-    cameras: scene.cameras,
-    probes: scene.probes,
-    sections: scene.sections,
+    // Camera/probe/section display names ride on the entity; blank names are
+    // omitted on write (§5.6, §14.3).
+    cameras: scene.cameras.map(stripBlankName),
+    probes: scene.probes.map(stripBlankName),
+    sections: scene.sections.map(stripBlankName),
     clipSectionId: scene.clipSectionId,
     zones: scene.zones,
     volumes: scene.volumes,

@@ -10,6 +10,7 @@ import { WorkspaceGrid, type CameraConfig, type CoverageSummary, type Vec3 } fro
 import { createViewport, type RenderBackend, type Viewport } from './scene/viewport.ts';
 import { CameraGizmoSet } from './scene/cameraGizmos.ts';
 import { ProbeGizmoSet } from './scene/probeGizmos.ts';
+import { cameraLabel, toCameraConfig, type SceneCamera } from './cameras/camera.ts';
 import { ProbeVisibility, type Probe, type ProbeVisibilityResult } from './scene/probeVisibility.ts';
 import { SectionGizmoSet } from './scene/sectionGizmos.ts';
 import {
@@ -238,7 +239,7 @@ export function App() {
     [room],
   );
 
-  const [cameras, setCameras] = useState<CameraConfig[]>(initialScene.cameras);
+  const [cameras, setCameras] = useState<SceneCamera[]>(initialScene.cameras);
   const [probes, setProbes] = useState<Probe[]>(initialScene.probes);
   const [sections, setSections] = useState<Section[]>(initialScene.sections);
   // Which section clips the scene geometry (spec §13.9), or null. Scene-level so
@@ -794,6 +795,20 @@ export function App() {
     setProbes((prev) => prev.map((p) => (p.id === id ? { ...p, position } : p)));
   }, []);
 
+  // Renames (spec §5.6): pure display-label writes — like a zone rename they never
+  // touch the engine or mark the result stale (§8.1).
+  const handleRenameCamera = useCallback((id: string, name: string) => {
+    setCameras((prev) => prev.map((c) => (c.id === id ? { ...c, name } : c)));
+  }, []);
+
+  const handleRenameProbe = useCallback((id: string, name: string) => {
+    setProbes((prev) => prev.map((p) => (p.id === id ? { ...p, name } : p)));
+  }, []);
+
+  const handleRenameSection = useCallback((id: string, name: string) => {
+    setSections((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+  }, []);
+
   const handleToggleCollapse = useCallback((nodeId: string) => {
     setCollapsedIds((prev) => {
       const next = new Set(prev);
@@ -806,13 +821,13 @@ export function App() {
   // --- add / delete entities (spec §5.5, §12.5) ------------------------------
   const handleAddCamera = useCallback(() => {
     const id = nextFreeId('cam', camerasRef.current.map((c) => c.id));
-    setCameras((prev) => [...prev, { id, position: [...workspaceCenter] as Vec3, rotation: [0, 0, 0, 1], ...NEW_CAMERA }]);
+    setCameras((prev) => [...prev, { id, name: '', position: [...workspaceCenter] as Vec3, rotation: [0, 0, 0, 1], ...NEW_CAMERA }]);
     setSelection({ kind: 'camera', id });
   }, [workspaceCenter]);
 
   const handleAddProbe = useCallback(() => {
     const id = nextFreeId('probe', probesRef.current.map((p) => p.id));
-    setProbes((prev) => [...prev, { id, position: [...workspaceCenter] as Vec3 }]);
+    setProbes((prev) => [...prev, { id, position: [...workspaceCenter] as Vec3, name: '' }]);
     setSelection({ kind: 'probe', id });
   }, [workspaceCenter]);
 
@@ -957,7 +972,7 @@ export function App() {
     (next: {
       geometry: GeometryObject[];
       build: GeometryBuild;
-      cameras: CameraConfig[];
+      cameras: SceneCamera[];
       probes: Probe[];
       sections: Section[];
       clipSectionId: string | null;
@@ -1080,8 +1095,10 @@ export function App() {
       samplingDirtyRef.current = false;
     }
 
+    // Convert app cameras to plain `CameraConfig` (drop the display `name`) at the
+    // SDK boundary — the one place the engine type is required (spec §5.6, §14.1).
     const enabledCameras = camerasRef.current.filter((c) => !disabledIdsRef.current.has(c.id));
-    const ok = engine.setCameras(enabledCameras);
+    const ok = engine.setCameras(enabledCameras.map(toCameraConfig));
     if (!ok) return;
 
     // Retain this run's chunks + ordered enabled-camera ids for probe lookup
@@ -1145,6 +1162,14 @@ export function App() {
   const selectedZone = zones.find((z) => z.id === selectedZoneId) ?? null;
   const selectedVolume = volumes.find((v) => v.id === selectedVolumeId) ?? null;
   const selectedZoneMemberCount = selectedZoneId ? volumes.filter((v) => v.zoneId === selectedZoneId).length : 0;
+
+  // Camera id → display name (spec §5.6), so every per-camera stat list (§10, §13.7,
+  // `sampling_volumes.md` §6.2) and the probe visibility list read the camera's name
+  // rather than its raw id.
+  const cameraNameById = useMemo(
+    () => new Map(cameras.map((c) => [c.id, cameraLabel(c)])),
+    [cameras],
+  );
 
   // The main StatsPanel reflects the enabled-zones union when zones are active
   // (`sampling_volumes.md` §7.4): overriding the SDK summary's coverage numbers
@@ -1240,6 +1265,7 @@ export function App() {
               hasRunOnce={hasRunOnce}
               stale={stale}
               onRename={handleRenameZone}
+              cameraNameById={cameraNameById}
             />
           ) : selectedSection ? (
             <SectionPanel
@@ -1247,6 +1273,7 @@ export function App() {
               worldMin={room.worldMin}
               worldMax={room.worldMax}
               onChange={handleSectionChange}
+              onRename={handleRenameSection}
               clipActive={clipSectionId === selectedSection.id}
               onToggleClip={handleToggleSectionClip}
             />
@@ -1257,6 +1284,8 @@ export function App() {
               hasRunOnce={hasRunOnce}
               stale={stale}
               onChange={handleProbeChange}
+              onRename={handleRenameProbe}
+              cameraNameById={cameraNameById}
               onSelectCamera={(id) => setSelection({ kind: 'camera', id })}
             />
           ) : (
@@ -1264,6 +1293,7 @@ export function App() {
               camera={selectedCamera}
               flagged={selectedCameraId ? engine.state.flaggedCameras.has(selectedCameraId) : false}
               onChange={handleCameraChange}
+              onRename={handleRenameCamera}
             />
           )}
         </div>
@@ -1384,6 +1414,7 @@ export function App() {
           computeBackend={engine.state.backend}
           renderBackend={renderBackend}
           voxelSize={debouncedVoxelSize}
+          cameraNameById={cameraNameById}
         />
         {selectedSection && (
           <SectionStatsPanel
@@ -1391,6 +1422,7 @@ export function App() {
             cellGrid={sectionCellGrids.get(selectedSection.id) ?? null}
             hasRunOnce={hasRunOnce}
             stale={stale}
+            cameraNameById={cameraNameById}
           />
         )}
       </div>
