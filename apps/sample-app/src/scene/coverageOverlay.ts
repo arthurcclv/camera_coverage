@@ -20,6 +20,7 @@ import {
   DEFAULT_INTENSITY_SCALE,
   type Voxel,
 } from './volumetric.ts';
+import { RenderOrder } from './renderOrder.ts';
 import type { MarkedFilter } from './samplingVolumes.ts';
 
 export type OverlayMode = 'coverage' | 'blindspots';
@@ -87,6 +88,12 @@ export function popcount32(x: number): number {
 export class CoverageOverlay {
   private readonly renderer = new VoxelVolumetricRenderer();
   readonly object = this.renderer.object;
+
+  constructor() {
+    // Draw the fog after the section plane but before the volume fill so depth
+    // testing against the plane's depth resolves occlusion (spec §9, §13.5).
+    this.renderer.setRenderOrder(RenderOrder.coverageFog);
+  }
 
   private leaves: Leaf[] = [];
   // The marked-set filter (union of enabled zones' volumes, `sampling_volumes.md`

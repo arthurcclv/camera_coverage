@@ -151,6 +151,10 @@ export class VoxelVolumetricRenderer {
 
   private capacity = 0;
   private count = 0;
+  // Draw order for the instanced mesh; re-applied on every reallocation so it
+  // survives the mesh being rebuilt (specs/volumetric_rendering.md §4). The order
+  // among transparent layers is the caller's concern, not the primitive's.
+  private renderOrder = 0;
 
   private mesh: THREE.InstancedMesh | null = null;
   private material: THREE.NodeMaterial | null = null;
@@ -206,6 +210,17 @@ export class VoxelVolumetricRenderer {
 
   setVisible(visible: boolean): void {
     this.object.visible = visible;
+  }
+
+  /**
+   * Set the instanced mesh's draw order (Three.js `renderOrder`). Persisted so it
+   * is re-applied whenever the mesh is rebuilt to grow the instance buffers. The
+   * primitive stays visualization-agnostic; the *value* comes from the caller's
+   * layer convention (`scene/renderOrder.ts`).
+   */
+  setRenderOrder(order: number): void {
+    this.renderOrder = order;
+    if (this.mesh) this.mesh.renderOrder = order;
   }
 
   dispose(): void {
@@ -273,6 +288,7 @@ export class VoxelVolumetricRenderer {
     const material = this.buildMaterial(centerAttr, halfAttr, intensityAttr, colorAttr);
     const mesh = new THREE.InstancedMesh(this.geometry, material, capacity);
     mesh.frustumCulled = false; // one draw call spanning the whole workspace
+    mesh.renderOrder = this.renderOrder; // re-apply across rebuilds (setRenderOrder)
 
     // Re-establish proxy transforms for voxels carried over from the old mesh.
     for (let i = 0; i < this.count; i++) {

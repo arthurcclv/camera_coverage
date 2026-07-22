@@ -6,6 +6,35 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Transparent-layer draw order pinned centrally; depth-writer first, depth test resolves the rest
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §9, §13.5;
+[`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md) §1, §4. The
+scene has three overlapping `transparent:true` layers — the section heatmap plane, the
+coverage voxel fog, and the sampling-volume fill. Left to Three.js's default, transparent
+objects are sorted by bounding-sphere center distance to the camera, which **flips with
+viewpoint**: in some views the section plane sorted *after* the fog and over-painted it.
+There is no fixed render order that fixes this, because the correct order is
+viewpoint-dependent.
+
+**Resolution:** stop relying on the transparency sort and let the **depth buffer** decide.
+Only the section plane writes depth (`depthWrite:true`); the fog and fill are
+`depthWrite:false`/`depthTest:true`. So the plane must draw **first** to lay its depth
+down, after which the fog and fill depth-test against it — correct per-viewpoint occlusion,
+no `depthWrite`/`depthTest` changes needed. The only thing pinned is *order*, via explicit
+`renderOrder` (plane 1 → fog 2 → fill 3), fog-before-fill so a fill tints over the fog.
+
+**Why a dedicated `scene/renderOrder.ts`.** The three layers live in three unrelated
+modules (`sectionGizmos.ts`, `volumetric.ts`/`coverageOverlay.ts`, `samplingVolumeGizmos.ts`);
+their relative order is only correct when read together, so the constants live in one file
+all three import. The generic `volumetric.ts` primitive stays visualization-agnostic — it
+gains a `setRenderOrder(n)` that just forwards to its mesh (persisted so it survives the
+mesh being rebuilt on buffer growth); the *value* comes from the caller. Objects not listed
+(bound outlines, wireframe edges, camera/probe gizmos) keep the default order 0 — harmless
+as they are thin or sit elsewhere.
+
+---
+
 ## Section cells are three-way (colored / obstacle-black / no-data-transparent), valid data wins
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.3, §13.5, §13.7. A section cell

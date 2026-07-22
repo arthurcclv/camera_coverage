@@ -295,7 +295,10 @@ Zones                         (group umbrella — passive; expand/collapse only)
   selected volume is highlighted. Boxes are **pickable** like camera/probe bodies —
   the viewport pick (`spec.md` §5.2) returns the nearest hit across cameras,
   probes, **and volumes**. Zones themselves have no viewport body (selected from
-  the hierarchy); sections stay non-pickable.
+  the hierarchy); sections stay non-pickable. The translucent **fill** draws **last**
+  of the three transparent coverage layers (`scene/renderOrder.ts`), so it tints over
+  the coverage fog (`spec.md` §9) while still being occluded by any section plane in
+  front of it (`spec.md` §13.5).
 - **TransformControls.** Selecting a **volume** attaches the gizmo in **translate /
   rotate / scale**. This adds a third transform mode — **Scale** — to the top-left
   toolbar (`spec.md` §2.4), available **only while a volume is selected** (cameras

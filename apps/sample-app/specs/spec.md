@@ -551,6 +551,12 @@ union of the enabled zones' volumes; voxels outside it read as unmarked and draw
 nothing. Enabling/disabling a zone re-filters the retained leaves client-side, with
 no recompute.
 
+The overlay is assigned an explicit **render order** (`scene/renderOrder.ts`) that
+places it **after** the section heatmap planes (§13.5) and **before** the
+sampling-volume fills (`sampling_volumes.md` §5). Because the overlay uses
+`depthWrite:false`/`depthTest:true`, depth-testing against the section plane's depth
+gives correct per-viewpoint occlusion (§13.5).
+
 ### 9.1 Visualization modes
 
 A **mode selector** switches between two mappings from coverage data to the
@@ -864,7 +870,13 @@ and reuses the workspace grid's in-plane dimensions.
   the plane. The heatmap material discards fully-transparent texels via a small
   `alphaTest` (~0.01) so they write no color and no depth — they never occlude the
   coverage overlay (§9) or another section behind them — while stale-dimmed colored cells
-  (whose alpha is the reduced overall opacity, §13.4) survive the test. The `blind`
+  (whose alpha is the reduced overall opacity, §13.4) survive the test. The heatmap plane
+  also carries an explicit **render order** (`scene/renderOrder.ts`) so it draws **before**
+  the coverage overlay (§9) and the sampling-volume fills (`sampling_volumes.md` §5). Since
+  it writes depth while those layers use `depthWrite:false`/`depthTest:true`, occlusion
+  between the plane and the fog/fills is resolved by the **depth buffer per viewpoint** —
+  fog/fill in front of the slab glows over it, behind it is hidden — rather than by
+  Three.js's viewpoint-dependent transparency sorting. The `blind`
   aggregation is drawn through the same colormap (0 → no blind voxels, 1 → all blind); its
   meaning is labeled in the controls and Section stats so the shared legend stays
   unambiguous.

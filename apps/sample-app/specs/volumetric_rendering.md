@@ -29,6 +29,13 @@ Global input:
 
 - **intensityScale** — a single multiplier applied to every voxel's contribution
   (the overall brightness knob).
+- **renderOrder** — the mesh's Three.js draw order (`setRenderOrder(order)`,
+  alongside `setVisible`/`setIntensityScale`). The primitive stays
+  visualization-agnostic — it only forwards the value onto its mesh (and re-applies
+  it across buffer reallocation); *what* order to use is the caller's layer
+  convention. In the sample app that convention lives in `scene/renderOrder.ts` and
+  places the coverage fog between the section planes and the volume fills (§4;
+  `spec.md` §9, §13.5).
 - **compositeMode** — how per-voxel contributions combine along a view ray:
   - **`max`** (default) — the pixel shows the **largest** single voxel contribution
     along the ray (per-channel max), not the sum. In this mode the chord term is
@@ -119,6 +126,13 @@ construction. `depthWrite: false`, `depthTest: true` in both modes:
 - **`depthTest: true`** against the already-drawn opaque scene (room, boxes, floor,
   gizmos), so a wall or box correctly hides fog behind it; fog in front of geometry
   glows over it.
+
+While the fog's *internal* compositing is order-independent by construction (above),
+its ordering **relative to other transparent layers** (section heatmap planes, volume
+fills) is not — and must not be left to Three.js's viewpoint-dependent transparency
+sort. Callers pin it via `setRenderOrder` (§1): drawing a depth-writing layer (the
+section plane) first lets the fog's `depthTest` resolve occlusion against it per
+viewpoint (`spec.md` §9, §13.5). The primitive itself is agnostic to the chosen value.
 
 Consequences, for callers to reason about (§9 of `spec.md` relies on these):
 

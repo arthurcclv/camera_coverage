@@ -12,6 +12,7 @@
 import * as THREE from 'three';
 import type { Vec3, Quat } from '@linkervision/camera-coverage-sdk';
 import type { SamplingVolume } from './samplingVolumes.ts';
+import { RenderOrder } from './renderOrder.ts';
 
 interface VolumeEntry {
   /** Attach target + transform carrier: position/quaternion/scale == volume's. */
@@ -107,6 +108,9 @@ export class SamplingVolumeGizmoSet {
       new THREE.MeshBasicMaterial({ color: FILL_COLOR, transparent: true, opacity: 0.1, depthWrite: false }),
     );
     fill.name = id;
+    // Draw last of the transparent layers so the fill tints over the coverage fog,
+    // while still occluded by any section plane in front of it (`renderOrder.ts`).
+    fill.renderOrder = RenderOrder.volumeFill;
 
     const edges = new THREE.LineSegments(
       new THREE.EdgesGeometry(box),

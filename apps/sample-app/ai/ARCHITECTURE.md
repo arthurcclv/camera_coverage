@@ -129,7 +129,13 @@ default" — see DECISIONS.md).
   mask decode (pure `locateVoxel` / `chunkLocalForGlobalIndex`, the latter shared
   with the section column walker).
 - `volumetric.ts` — instanced-cube TSL volumetric renderer + pure-TS
-  slab/chord/composite reference.
+  slab/chord/composite reference. Exposes `setRenderOrder` (draw order forwarded to
+  the mesh, re-applied across buffer reallocation); the primitive stays agnostic to
+  *which* order — that comes from `renderOrder.ts`.
+- `renderOrder.ts` — single source of truth for the draw order of the scene's
+  transparent layers (section heatmap plane → coverage fog → volume fill). The plane
+  is the only depth writer, so it draws first and the depth test resolves the rest
+  per viewpoint (spec §9, §13.5). See DECISIONS.md's transparent-layer draw-order entry.
 - `coverageOverlay.ts` — maps `ChunkResult` leaves → volumetric voxels per mode;
   hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`).
 - `sectionHeatmap.ts` — `Section` model, retained-chunk store, cross-chunk column

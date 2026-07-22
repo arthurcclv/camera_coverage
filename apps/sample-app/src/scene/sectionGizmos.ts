@@ -18,6 +18,7 @@ import {
   type Section,
   type SectionCellGrid,
 } from './sectionHeatmap.ts';
+import { RenderOrder } from './renderOrder.ts';
 
 const OUTLINE_COLOR = 0x9aa3b0;
 const OUTLINE_OPACITY = 0.35;
@@ -138,6 +139,9 @@ export class SectionGizmoSet {
     });
     const heatmapMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), heatmapMaterial);
     heatmapMesh.raycast = noRaycast;
+    // Draw first of the transparent layers: it is the only one that writes depth,
+    // so the fog/fill depth-test against it (spec §13.5, `renderOrder.ts`).
+    heatmapMesh.renderOrder = RenderOrder.sectionPlane;
 
     const outlineMaterial = new THREE.LineBasicMaterial({ color: OUTLINE_COLOR, transparent: true, opacity: OUTLINE_OPACITY });
     const minOutline = new THREE.LineSegments(outlineGeometry(1, 1), outlineMaterial);
