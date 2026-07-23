@@ -34,9 +34,12 @@ interface SectionEntry {
   minOutline: THREE.LineSegments;
   maxOutline: THREE.LineSegments;
   outlineMaterial: THREE.LineBasicMaterial;
-  /** Invisible TransformControls attach target; only its collapse-axis coordinate is meaningful. */
+  /** Invisible TransformControls attach target at the box center; dragged freely on all 3 axes (spec §13.8). */
   attachTarget: THREE.Object3D;
   lastOrientation: string | null;
+  /** Plane/outline geometry is rebuilt when orientation or footprint size changes. */
+  lastWidth: number;
+  lastHeight: number;
   lastDimsA: number;
   lastDimsB: number;
 }
@@ -82,8 +85,6 @@ export class SectionGizmoSet {
     cellGrids: ReadonlyMap<string, SectionCellGrid | null>,
     masterVisible: boolean,
     stale: boolean,
-    worldMin: Vec3,
-    worldMax: Vec3,
   ): void {
     const seen = new Set<string>();
     for (const section of sections) {
@@ -93,7 +94,7 @@ export class SectionGizmoSet {
         entry = this.createEntry();
         this.entries.set(section.id, entry);
       }
-      this.updateEntry(entry, section, cellGrids.get(section.id) ?? null, masterVisible, stale, worldMin, worldMax);
+      this.updateEntry(entry, section, cellGrids.get(section.id) ?? null, masterVisible, stale);
     }
     for (const [id, entry] of this.entries) {
       if (!seen.has(id)) {
@@ -165,6 +166,8 @@ export class SectionGizmoSet {
       outlineMaterial,
       attachTarget,
       lastOrientation: null,
+      lastWidth: 0,
+      lastHeight: 0,
       lastDimsA: 0,
       lastDimsB: 0,
     };
@@ -176,17 +179,26 @@ export class SectionGizmoSet {
     cellGrid: SectionCellGrid | null,
     masterVisible: boolean,
     stale: boolean,
-    worldMin: Vec3,
-    worldMax: Vec3,
   ): void {
     const { collapseAxis, axisA, axisB } = axisMapping(section.orientation);
-    const width = worldMax[axisA] - worldMin[axisA];
-    const height = worldMax[axisB] - worldMin[axisB];
-    const centerA = (worldMin[axisA] + worldMax[axisA]) / 2;
-    const centerB = (worldMin[axisB] + worldMax[axisB]) / 2;
+    // The heatmap plane spans the footprint (spec §13.2). When a run is retained,
+    // use its grid-aligned selected-column extent (§13.3) so the plane matches the
+    // drawn cells exactly; before any run, fall back to the raw footprint bounds.
+    const extentA = cellGrid ? cellGrid.extentA : { min: section.minA, max: section.maxA };
+    const extentB = cellGrid ? cellGrid.extentB : { min: section.minB, max: section.maxB };
+    const width = extentA.max - extentA.min;
+    const height = extentB.max - extentB.min;
+    const centerA = (extentA.min + extentA.max) / 2;
+    const centerB = (extentB.min + extentB.max) / 2;
     const mid = (section.min + section.max) / 2;
 
-    if (entry.lastOrientation !== section.orientation) {
+    // Rebuild geometry on orientation OR footprint-size change (spec §13.2): unlike
+    // before, width/height are no longer constant (the whole workspace).
+    if (
+      entry.lastOrientation !== section.orientation ||
+      entry.lastWidth !== width ||
+      entry.lastHeight !== height
+    ) {
       entry.heatmapMesh.geometry.dispose();
       entry.heatmapMesh.geometry = new THREE.PlaneGeometry(width, height);
       entry.minOutline.geometry.dispose();
@@ -195,6 +207,8 @@ export class SectionGizmoSet {
       entry.maxOutline.geometry = outlineGeometry(width, height);
       entry.group.rotation.set(...sectionPlaneRotation(section.orientation));
       entry.lastOrientation = section.orientation;
+      entry.lastWidth = width;
+      entry.lastHeight = height;
     }
 
     const pos: Vec3 = [0, 0, 0];

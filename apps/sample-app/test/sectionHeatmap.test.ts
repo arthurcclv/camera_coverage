@@ -12,17 +12,23 @@ import {
   computeSectionCells,
   computeSectionStats,
   DEFAULT_CLIP_RANGE,
+  defaultFootprintForOrientation,
   defaultRangeForOrientation,
   defaultSection,
   defaultSectionName,
+  footprintSliderMax,
+  inPlaneExtent,
   sectionLabel,
   MAX_SECTION_THICKNESS,
   maxClipRange,
   MIN_CLIP_RANGE,
+  MIN_SECTION_FOOTPRINT,
   sectionClipBand,
   SECTION_ORIENTATIONS,
   SectionHeatmapStore,
   sectionCenter,
+  sectionCenterA,
+  sectionCenterB,
   sectionHeatmapTextureData,
   sectionLegendScale,
   sectionPlaneRotation,
@@ -125,18 +131,60 @@ test('defaultRangeForOrientation clamps to MAX_SECTION_THICKNESS, centered on th
   assert.equal(max - min, MAX_SECTION_THICKNESS);
 });
 
-test('defaultSection is Horizontal, full (clamped) Y extent, mean aggregation, enabled (spec §5.5, §13.9)', () => {
+test('defaultSection is Horizontal, full (clamped) Y extent, full X×Z footprint, mean aggregation, enabled (spec §5.5, §13.2, §13.9)', () => {
   const s = defaultSection('section-1', [0, -1, 0], [4, 3, 2]);
   assert.deepEqual(s, {
     id: 'section-1',
     orientation: 'horizontal',
     min: -1,
     max: 3,
+    // Footprint defaults to the full workspace-AABB extent on both in-plane
+    // axes (X and Z for horizontal) — uncapped, unlike thickness (spec §13.2).
+    minA: 0,
+    maxA: 4,
+    minB: 0,
+    maxB: 2,
     aggregation: 'mean',
     enabled: true,
     clipRange: 2,
     name: '',
   });
+});
+
+// --- footprint helpers (spec §13.2) ------------------------------------------
+
+test('defaultFootprintForOrientation is the FULL (uncapped) in-plane extent per orientation (spec §13.2)', () => {
+  const wMin: [number, number, number] = [0, -1, 0];
+  const wMax: [number, number, number] = [4, 3, 2];
+  // horizontal spans X×Z → full X [0,4], full Z [0,2].
+  assert.deepEqual(defaultFootprintForOrientation(wMin, wMax, 'horizontal'), { minA: 0, maxA: 4, minB: 0, maxB: 2 });
+  // vertical-x spans Z×Y → full Z [0,2], full Y [-1,3].
+  assert.deepEqual(defaultFootprintForOrientation(wMin, wMax, 'vertical-x'), { minA: 0, maxA: 2, minB: -1, maxB: 3 });
+  // vertical-z spans X×Y → full X [0,4], full Y [-1,3].
+  assert.deepEqual(defaultFootprintForOrientation(wMin, wMax, 'vertical-z'), { minA: 0, maxA: 4, minB: -1, maxB: 3 });
+});
+
+test('footprint default is uncapped, unlike the 5 m-capped thickness (spec §13.2)', () => {
+  // A 20 m span: thickness caps at 5, footprint keeps the full 20.
+  const fp = defaultFootprintForOrientation([0, 0, 0], [20, 20, 20], 'horizontal');
+  assert.equal(fp.maxA - fp.minA, 20);
+  const range = defaultRangeForOrientation([0, 0, 0], [20, 20, 20], 'horizontal');
+  assert.equal(range.max - range.min, MAX_SECTION_THICKNESS);
+});
+
+test('inPlaneExtent + footprintSliderMax give the per-axis slider max (spec §13.2)', () => {
+  const { a, b } = inPlaneExtent([0, -1, 0], [4, 3, 2], 'vertical-x'); // Z×Y
+  assert.deepEqual(a, { min: 0, max: 2 });
+  assert.deepEqual(b, { min: -1, max: 3 });
+  assert.equal(footprintSliderMax(a), 2);
+  assert.equal(footprintSliderMax(b), 4);
+  // Never below the min bound, even for a degenerate (zero-extent) axis.
+  assert.equal(footprintSliderMax({ min: 5, max: 5 }), MIN_SECTION_FOOTPRINT);
+});
+
+test('sectionCenterA/B are the footprint midpoints (spec §13.2)', () => {
+  assert.equal(sectionCenterA({ minA: -2, maxA: 6 }), 2);
+  assert.equal(sectionCenterB({ minB: 1, maxB: 3 }), 2);
 });
 
 test('sectionLabel trims the name and falls back to "Section N" when blank (spec §5.6, §13.1)', () => {
@@ -366,6 +414,47 @@ test('computeSectionCells clips the column to the section range', () => {
   const cell = cells.cells[0 + cells.dimsA * 0];
   assert.equal(cell.valid, true);
   assert.equal(cell.meanFraction, 1); // only x=0, coverage fraction 1/1
+});
+
+test('computeSectionCells restricts cells to the in-plane footprint and reports grid-aligned extents (spec §13.2, §13.3)', () => {
+  // horizontal collapses Y; axisA=X (grid 0..3), axisB=Z (grid 0..1). Footprint
+  // selects X columns 1..2 and Z column 0 only → a 2×1 sub-rectangle of columns.
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[1, 0, 0, 0b1]] }); // x=1: y=0 seen, y=1 blind
+  const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b1], [0, 1, 0, 0b1]] }); // x=2: y=0,1 both seen
+  const cells = computeSectionCells(grid, accessorsFor([chunk0, chunk1]), ['cam-a'], 1, {
+    orientation: 'horizontal',
+    min: 0,
+    max: 2, // full Y column
+    minA: 1,
+    maxA: 3, // X columns 1,2 (centers 1.5, 2.5)
+    minB: 0,
+    maxB: 1, // Z column 0 only
+  });
+  // dims are the SELECTED column counts, not the full grid (which would be 4×2).
+  assert.equal(cells.dimsA, 2);
+  assert.equal(cells.dimsB, 1);
+  assert.equal(cells.cells.length, 2);
+  // Grid-aligned world extent of the selected columns (column low edge → high edge).
+  assert.deepEqual(cells.extentA, { min: 1, max: 3 });
+  assert.deepEqual(cells.extentB, { min: 0, max: 1 });
+  // Local index la + dimsA*lb: la=0 → x=1 (mean 0.5), la=1 → x=2 (mean 1).
+  assert.equal(cells.cells[0].meanFraction, 0.5);
+  assert.equal(cells.cells[1].meanFraction, 1);
+});
+
+test('computeSectionCells with no footprint spans the whole grid (pre-footprint fallback, spec §13.3)', () => {
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
+  const chunk1 = denseChunk(1, [2, 0, 0], {});
+  const cells = computeSectionCells(grid, accessorsFor([chunk0, chunk1]), ['cam-a'], 1, {
+    orientation: 'horizontal',
+    min: 0,
+    max: 2,
+  });
+  // gridDims X×Z = 4×2 → full grid, and the extent is the whole workspace.
+  assert.equal(cells.dimsA, 4);
+  assert.equal(cells.dimsB, 2);
+  assert.deepEqual(cells.extentA, { min: 0, max: 4 });
+  assert.deepEqual(cells.extentB, { min: 0, max: 2 });
 });
 
 // --- computeSectionCells: marked-set filter (sampling_volumes.md §7.3) --------

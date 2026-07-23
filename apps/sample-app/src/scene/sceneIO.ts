@@ -8,7 +8,7 @@
  * `ai/CONVENTIONS.md`).
  */
 import { buildSceneGeometry, type GeometryBuild } from './sceneGeometryBuild.ts';
-import { parseSceneFile, serializeScene } from './sceneFile.ts';
+import { parseSceneFile, resolveSectionFootprints, serializeScene } from './sceneFile.ts';
 import type { Scene } from './sceneModel.ts';
 
 const SCENE_JSON_NAME = 'scene.json';
@@ -52,7 +52,10 @@ export async function importSceneFromDirectory(dir: FileSystemDirectoryHandle): 
   if (!parsed.ok) throw new Error(parsed.error);
 
   const build = await buildSceneGeometry(parsed.scene.geometry, (src) => resolveAssetFromDirectory(dir, src));
-  return { scene: parsed.scene, build };
+  // Section footprints left unset in the file default to the full workspace-AABB
+  // extent, resolvable only now that the geometry's world bounds are built (§14.3).
+  const sections = resolveSectionFootprints(parsed.scene.sections, build.worldMin, build.worldMax);
+  return { scene: { ...parsed.scene, sections }, build };
 }
 
 /**

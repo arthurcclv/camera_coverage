@@ -47,9 +47,15 @@ function SectionStatsBody({ section, cellGrid, stale, cameraNameById }: { sectio
         <b>{ORIENTATION_LABELS[section.orientation]}</b>
       </div>
       <div className="stat-line">
-        <span>Range</span>
+        <span>Thickness</span>
         <b>
           {section.min.toFixed(2)}–{section.max.toFixed(2)} m
+        </b>
+      </div>
+      <div className="stat-line">
+        <span>Footprint</span>
+        <b>
+          {(section.maxA - section.minA).toFixed(1)} × {(section.maxB - section.minB).toFixed(1)} m
         </b>
       </div>
       <div className="stat-line">

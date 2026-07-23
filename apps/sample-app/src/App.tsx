@@ -469,20 +469,8 @@ export function App() {
         enabledZoneIdsRef.current,
       );
       volumeGizmos.group.visible = zonesVisibleRef.current;
-      sectionGizmos.update(
-        sectionsRef.current,
-        new Map(),
-        sectionsVisibleRef.current,
-        false,
-        roomRef.current.worldMin,
-        roomRef.current.worldMax,
-      );
+      sectionGizmos.update(sectionsRef.current, new Map(), sectionsVisibleRef.current, false);
       viewport.transformControls.setSpace(threeSpace(transformSpaceRef.current));
-      const initialSection = sel?.kind === 'section' ? sectionsRef.current.find((s) => s.id === sel.id) : undefined;
-      const initialCollapseAxis = initialSection ? axisMapping(initialSection.orientation).collapseAxis : null;
-      viewport.transformControls.showX = initialCollapseAxis === null || initialCollapseAxis === 0;
-      viewport.transformControls.showY = initialCollapseAxis === null || initialCollapseAxis === 1;
-      viewport.transformControls.showZ = initialCollapseAxis === null || initialCollapseAxis === 2;
       attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, volumeGizmos, sel);
 
       const raycaster = new THREE.Raycaster();
@@ -547,17 +535,33 @@ export function App() {
           ];
           setVolumes((prev) => prev.map((v) => (v.id === sel.id ? { ...v, position: t.position, rotation: t.rotation, size } : v)));
         } else if (sel.kind === 'section') {
-          // Axis-constrained slide: the target's position on the collapse axis is
-          // the slab's new midpoint; thickness (max - min) stays fixed (spec §13.8).
-          // Never marks results stale (spec §13.4).
+          // Free 3-axis translate (spec §13.8): the target's position is the box's
+          // new center; thickness/width/height stay fixed (each bound-pair moves as
+          // a unit). Never marks results stale (spec §13.4).
           const current = sectionsRef.current.find((s) => s.id === sel.id);
           if (!current) return;
-          const { collapseAxis } = axisMapping(current.orientation);
+          const { collapseAxis, axisA, axisB } = axisMapping(current.orientation);
           const mid = sectionGizmos.readAxisPosition(sel.id, collapseAxis);
-          if (mid === undefined) return;
+          const centerA = sectionGizmos.readAxisPosition(sel.id, axisA);
+          const centerB = sectionGizmos.readAxisPosition(sel.id, axisB);
+          if (mid === undefined || centerA === undefined || centerB === undefined) return;
           const halfThickness = (current.max - current.min) / 2;
+          const halfA = (current.maxA - current.minA) / 2;
+          const halfB = (current.maxB - current.minB) / 2;
           setSections((prev) =>
-            prev.map((s) => (s.id === sel.id ? { ...s, min: mid - halfThickness, max: mid + halfThickness } : s)),
+            prev.map((s) =>
+              s.id === sel.id
+                ? {
+                    ...s,
+                    min: mid - halfThickness,
+                    max: mid + halfThickness,
+                    minA: centerA - halfA,
+                    maxA: centerA + halfA,
+                    minB: centerB - halfB,
+                    maxB: centerB + halfB,
+                  }
+                : s,
+            ),
           );
         }
       };
@@ -624,8 +628,8 @@ export function App() {
   }, [probes, selectedProbeId]);
 
   useEffect(() => {
-    sectionGizmosRef.current?.update(sections, sectionCellGrids, sectionsVisible, stale, room.worldMin, room.worldMax);
-  }, [sections, sectionCellGrids, sectionsVisible, stale, room]);
+    sectionGizmosRef.current?.update(sections, sectionCellGrids, sectionsVisible, stale);
+  }, [sections, sectionCellGrids, sectionsVisible, stale]);
 
   // --- push volume state into gizmos; dim volumes of disabled zones (spec §5) --
   useEffect(() => {
@@ -662,19 +666,6 @@ export function App() {
   useEffect(() => {
     viewportRef.current?.transformControls.setSpace(threeSpace(transformSpace));
   }, [transformSpace]);
-
-  // --- axis-constrained handles while a section is selected (spec §13.8): only
-  // the collapse-axis handle is shown, so dragging can only slide the slab along
-  // its normal. Reset to all-axes for camera/probe selections. -----------------
-  useEffect(() => {
-    const controls = viewportRef.current?.transformControls;
-    if (!controls) return;
-    const current = selection?.kind === 'section' ? sections.find((s) => s.id === selection.id) : undefined;
-    const collapseAxis = current ? axisMapping(current.orientation).collapseAxis : null;
-    controls.showX = collapseAxis === null || collapseAxis === 0;
-    controls.showY = collapseAxis === null || collapseAxis === 1;
-    controls.showZ = collapseAxis === null || collapseAxis === 2;
-  }, [selection, sections]);
 
   // --- push overlay option state into the overlay ---------------------------
   useEffect(() => {

@@ -44,6 +44,26 @@ export interface InitResult {
   samplingStats: SamplingStats;
 }
 
+/**
+ * Build the `WorkerClient.init` config (spec §3.2, §4.2).
+ *
+ * `solidDetection` is hard-coded `false`: the SDK's flood-fill SOLID detection
+ * assumes closed objects float in reachable open space, but a watertight
+ * imported room (§14) inverts that and its whole interior — cameras included —
+ * would be marked `SOLID_GEOMETRY` (every in-room camera flagged
+ * `CAMERA_INSIDE_GEOMETRY`, coverage zeroed). Visibility is unaffected: it always
+ * comes from BVH ray casting, never occupancy.
+ */
+export function initConfig(
+  worldMin: Vec3,
+  worldMax: Vec3,
+  voxelSize: number,
+  chunkSizeXZ: number,
+  backend: 'auto' | 'cpu',
+) {
+  return { worldMin, worldMax, voxelSize, chunkSizeXZ, solidDetection: false, backend };
+}
+
 const INITIAL_STATE: EngineState = {
   status: 'idle',
   backend: null,
@@ -86,11 +106,11 @@ export function useEngine() {
 
       let backend: 'webgpu' | 'cpu';
       try {
-        const caps = await client.init({ worldMin, worldMax, voxelSize, chunkSizeXZ, backend: 'auto' });
+        const caps = await client.init(initConfig(worldMin, worldMax, voxelSize, chunkSizeXZ, 'auto'));
         backend = caps.backend;
       } catch {
         try {
-          const caps = await client.init({ worldMin, worldMax, voxelSize, chunkSizeXZ, backend: 'cpu' });
+          const caps = await client.init(initConfig(worldMin, worldMax, voxelSize, chunkSizeXZ, 'cpu'));
           backend = caps.backend;
         } catch (err) {
           setState((s) => ({ ...s, status: 'error', errorMessage: describeError(err) }));

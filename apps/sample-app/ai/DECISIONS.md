@@ -6,6 +6,65 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Sections are finite boxes, sized by sliders and moved by free 3-axis drag
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.1–13.3, §13.6, §13.8, §14.3.
+A section used to be a slab that spanned the **whole workspace** in-plane; only its
+thickness and along-normal position were adjustable. It is now a bounded axis-aligned
+**box** with a finite in-plane footprint (`minA/maxA/minB/maxB` on `Section`, relative
+to the orientation's in-plane axes), on top of the existing thickness/normal bounds.
+
+**Interaction split.** Width/height are panel sliders (`SectionPanel`), matching the
+existing thickness slider — each holds the footprint's center on its axis and grows
+symmetrically. Position is the viewport `TransformControls`, now unlocked from the old
+collapse-axis-only constraint to **free 3-axis translate**; the drag handler decomposes
+the box center into all three axes and moves each bound-pair as a unit (`App.tsx`
+`onObjectChange`). Sizing changes extent about a fixed center; dragging changes the
+center — complementary, never overlapping. We rejected custom viewport resize handles:
+`TransformControls` has no box-resize mode, and sliders reuse an established pattern.
+
+**Cells snap to the grid.** `computeSectionCells` selects the voxel columns whose
+in-plane position falls inside the footprint (via `axisIndexRange` on both in-plane
+axes), so the texture dims are the *selected* column counts and the footprint snaps to
+column boundaries. It returns the grid-aligned `extentA/extentB` so `sectionGizmos`
+sizes the plane/outlines to exactly the drawn cells. The footprint params are **optional**
+on `computeSectionCells`/`SectionHeatmapStore.computeCells` (absent → whole grid), which
+keeps the aggregation callable with just the slab fields and matches the pre-footprint
+behavior; real callers always pass a full `Section`.
+
+**Defaults & back-compat.** A new section (and an orientation switch) defaults the
+footprint to the **full** workspace-AABB extent on both in-plane axes — uncapped, unlike
+the 5 m-capped thickness — so it looks identical to the old full-workspace slab until
+shrunk. Scene files omit-tolerant: a section with no `minA/maxA/minB/maxB` parses to
+`NaN` and `resolveSectionFootprints` fills the full extent once the imported geometry's
+AABB is built (`sceneIO`), so pre-feature files load unchanged. No format-version bump.
+
+**Clip unchanged.** The CAD cross-section (§13.9) stays a full-scene band along the
+normal; the footprint bounds the heatmap only, not the clip.
+
+## `solidDetection` is hard-coded off in the demo
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §3.2 / §4.2. The app now inits
+the SDK with `solidDetection: false` (via `initConfig()` in `engine/useEngine.ts`).
+
+**Why.** The SDK's flood-fill SOLID detection seeds a BFS from the workspace
+boundary and marks any empty voxel it can't reach as `SOLID_GEOMETRY` — it assumes
+closed objects float in open space reachable from the boundary. A watertight room
+*inverts* that assumption: its free space is enclosed by walls/floor/ceiling, so
+the entire interior (cameras included) gets classified `SOLID_GEOMETRY`, every
+in-room camera is flagged `CAMERA_INSIDE_GEOMETRY`, and coverage reads 0. The
+built-in room is open-top so it happened to work, but imported closed rooms (§14)
+broke. Turning solid detection off keeps enclosed interiors `EMPTY_SPACE`.
+
+**Why it's safe.** Occupancy never determines visibility in the SDK — visible /
+blocked always comes from BVH ray casting (SDK spec §6.2 invariant). The only thing
+lost is culling of voxels truly buried inside a solid; those still report 0
+coverage via ray casting, they just also count toward the valid denominator.
+
+**Why not a UI toggle.** No user benefit — solid detection is a preprocessing
+optimization, not a feature; the failure mode (silently zeroed coverage) is exactly
+what a demo must never show. One hard-coded value, tested in `test/initConfig.test.ts`.
+
 ## Frustum wireframe renders for the selected camera only
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3. Previously every enabled

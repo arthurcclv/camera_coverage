@@ -6,12 +6,18 @@
  */
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 import {
+  defaultFootprintForOrientation,
   defaultRangeForOrientation,
+  footprintSliderMax,
+  inPlaneExtent,
   MAX_SECTION_THICKNESS,
   maxClipRange,
   MIN_CLIP_RANGE,
+  MIN_SECTION_FOOTPRINT,
   MIN_SECTION_THICKNESS,
   sectionCenter,
+  sectionCenterA,
+  sectionCenterB,
   sectionLabel,
   SECTION_AGGREGATIONS,
   SECTION_ORIENTATIONS,
@@ -47,18 +53,28 @@ const AGGREGATION_LABELS: Record<SectionAggregation, string> = {
   blind: 'Blind',
 };
 
+// Footprint slider labels name the actual world axis per orientation (spec §13.6),
+// so a horizontal section's two horizontal axes are never mislabeled "height".
+const FOOTPRINT_LABELS: Record<SectionOrientation, { a: string; b: string }> = {
+  horizontal: { a: 'Width (X)', b: 'Depth (Z)' },
+  'vertical-x': { a: 'Width (Z)', b: 'Height (Y)' },
+  'vertical-z': { a: 'Width (X)', b: 'Height (Y)' },
+};
+
 export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, clipActive, onToggleClip }: SectionPanelProps) {
   if (!section) return null;
 
   const setOrientation = (orientation: SectionOrientation) => {
     if (orientation === section.orientation) return;
-    // Resetting to the new axis's full (clamped) extent (spec §5.5) — the old
-    // min/max are in the previous collapse axis's units and would otherwise be
-    // a meaningless (or out-of-bounds) range on the new one. The clip range
-    // is likewise clamped to the new normal's extent (spec §13.9).
+    // Resetting to the new axis's defaults (spec §13.2): the old thickness and
+    // footprint bounds are in the previous axes' units and would be meaningless
+    // (or out of bounds) on the new orientation. Thickness → full (clamped) extent
+    // of the new normal; footprint → full extent of the new in-plane axes; clip
+    // range → clamped to the new normal's extent (spec §13.9).
     const { min, max } = defaultRangeForOrientation(worldMin, worldMax, orientation);
+    const footprint = defaultFootprintForOrientation(worldMin, worldMax, orientation);
     const clipRange = Math.min(section.clipRange, maxClipRange(worldMin, worldMax, orientation));
-    onChange(section.id, { orientation, min, max, clipRange });
+    onChange(section.id, { orientation, min, max, ...footprint, clipRange });
   };
 
   const center = sectionCenter(section);
@@ -66,6 +82,24 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
 
   const setThickness = (newThickness: number) => {
     onChange(section.id, { min: center - newThickness / 2, max: center + newThickness / 2 });
+  };
+
+  // Footprint (width/height) sliders (spec §13.2): each keeps the footprint's
+  // center on its axis fixed and grows/shrinks symmetrically, like thickness.
+  const { a: extentA, b: extentB } = inPlaneExtent(worldMin, worldMax, section.orientation);
+  const widthMax = footprintSliderMax(extentA);
+  const heightMax = footprintSliderMax(extentB);
+  const centerA = sectionCenterA(section);
+  const centerB = sectionCenterB(section);
+  const width = section.maxA - section.minA;
+  const height = section.maxB - section.minB;
+  const footprintLabels = FOOTPRINT_LABELS[section.orientation];
+
+  const setWidth = (w: number) => {
+    onChange(section.id, { minA: centerA - w / 2, maxA: centerA + w / 2 });
+  };
+  const setHeight = (h: number) => {
+    onChange(section.id, { minB: centerB - h / 2, maxB: centerB + h / 2 });
   };
 
   const clipMax = maxClipRange(worldMin, worldMax, section.orientation);
@@ -112,6 +146,24 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
           onChange={setThickness}
         />
         <p className="hint">Centered at {center.toFixed(2)} m; changing thickness keeps the center fixed.</p>
+
+        <Slider
+          label={`${footprintLabels.a} (m)`}
+          value={Math.min(width, widthMax)}
+          min={MIN_SECTION_FOOTPRINT}
+          max={widthMax}
+          step={0.1}
+          onChange={setWidth}
+        />
+        <Slider
+          label={`${footprintLabels.b} (m)`}
+          value={Math.min(height, heightMax)}
+          min={MIN_SECTION_FOOTPRINT}
+          max={heightMax}
+          step={0.1}
+          onChange={setHeight}
+        />
+        <p className="hint">Footprint centered at ({centerA.toFixed(2)}, {centerB.toFixed(2)}) m; drag in the viewport to move it.</p>
 
         <p className="hint" style={{ marginTop: 10 }}>
           Aggregation

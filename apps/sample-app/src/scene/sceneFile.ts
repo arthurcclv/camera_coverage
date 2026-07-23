@@ -8,6 +8,7 @@ import type { Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 import type { SceneCamera } from '../cameras/camera.ts';
 import {
   DEFAULT_CLIP_RANGE,
+  defaultFootprintForOrientation,
   MIN_CLIP_RANGE,
   SECTION_AGGREGATIONS,
   SECTION_ORIENTATIONS,
@@ -211,11 +212,19 @@ function parseSections(raw: unknown): Section[] | string {
     const clipRange = isFiniteNumber(item.clipRange)
       ? Math.max(MIN_CLIP_RANGE, item.clipRange)
       : DEFAULT_CLIP_RANGE;
+    // Footprint bounds (§13.1) are optional on read (§14.3): a bound that is
+    // absent/invalid becomes `NaN` here and is defaulted to the full workspace-AABB
+    // extent by `resolveSectionFootprints` once the AABB is known (sceneIO), so
+    // files predating finite footprints load spanning the whole workspace in-plane.
     sections.push({
       id: item.id,
       orientation: item.orientation as Section['orientation'],
       min: item.min,
       max: item.max,
+      minA: isFiniteNumber(item.minA) ? item.minA : Number.NaN,
+      maxA: isFiniteNumber(item.maxA) ? item.maxA : Number.NaN,
+      minB: isFiniteNumber(item.minB) ? item.minB : Number.NaN,
+      maxB: isFiniteNumber(item.maxB) ? item.maxB : Number.NaN,
       aggregation: item.aggregation as Section['aggregation'],
       enabled: enabledRaw,
       clipRange,
@@ -224,6 +233,29 @@ function parseSections(raw: unknown): Section[] | string {
     });
   }
   return sections;
+}
+
+/**
+ * Fills in any section footprint bound left `NaN` by {@link parseSceneFile} with
+ * the full workspace-AABB extent along that in-plane axis (spec §14.3), resolved
+ * per axis-pair. Called by `sceneIO` once the imported geometry's AABB is built,
+ * since the default depends on the workspace bounds. A section with a complete
+ * footprint is returned unchanged.
+ */
+export function resolveSectionFootprints(sections: Section[], worldMin: Vec3, worldMax: Vec3): Section[] {
+  return sections.map((s) => {
+    const aSet = Number.isFinite(s.minA) && Number.isFinite(s.maxA);
+    const bSet = Number.isFinite(s.minB) && Number.isFinite(s.maxB);
+    if (aSet && bSet) return s;
+    const full = defaultFootprintForOrientation(worldMin, worldMax, s.orientation);
+    return {
+      ...s,
+      minA: aSet ? s.minA : full.minA,
+      maxA: aSet ? s.maxA : full.maxA,
+      minB: bSet ? s.minB : full.minB,
+      maxB: bSet ? s.maxB : full.maxB,
+    };
+  });
 }
 
 /** Parses `zones` (§14.3): each `{ id, name }`, ids unique, blank name → default. */

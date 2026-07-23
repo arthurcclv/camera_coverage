@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isSafeAssetPath, parseSceneFile, serializeScene, type SceneFileJSON } from '../src/scene/sceneFile.ts';
+import {
+  isSafeAssetPath,
+  parseSceneFile,
+  resolveSectionFootprints,
+  serializeScene,
+  type SceneFileJSON,
+} from '../src/scene/sceneFile.ts';
 
 function validDoc(): SceneFileJSON {
   return {
@@ -37,7 +43,19 @@ function validDoc(): SceneFileJSON {
     ],
     probes: [{ id: 'probe-1', position: [0, 1, 0] }],
     sections: [
-      { id: 'section-1', orientation: 'horizontal', min: 0, max: 2, aggregation: 'mean', enabled: true, clipRange: 3 },
+      {
+        id: 'section-1',
+        orientation: 'horizontal',
+        min: 0,
+        max: 2,
+        minA: -10,
+        maxA: 10,
+        minB: -10,
+        maxB: 10,
+        aggregation: 'mean',
+        enabled: true,
+        clipRange: 3,
+      },
     ],
     clipSectionId: 'section-1',
     zones: [{ id: 'zone-1', name: 'West wing', enabled: true }],
@@ -68,6 +86,40 @@ test('serializeScene . parseSceneFile round-trips', () => {
   if (!parsed.ok) return;
   const reserialized = serializeScene(parsed.scene);
   assert.deepEqual(reserialized, doc);
+});
+
+test('parseSceneFile leaves a missing footprint as NaN; resolveSectionFootprints defaults it to full extent (spec §14.3)', () => {
+  const doc = validDoc();
+  // A file written before finite footprints: no minA/maxA/minB/maxB.
+  delete (doc.sections[0] as Record<string, unknown>).minA;
+  delete (doc.sections[0] as Record<string, unknown>).maxA;
+  delete (doc.sections[0] as Record<string, unknown>).minB;
+  delete (doc.sections[0] as Record<string, unknown>).maxB;
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const before = parsed.scene.sections[0];
+  assert.equal(Number.isNaN(before.minA), true);
+  assert.equal(Number.isNaN(before.maxB), true);
+  // Resolved against the workspace AABB → full extent on both in-plane axes
+  // (horizontal spans X×Z).
+  const [resolved] = resolveSectionFootprints(parsed.scene.sections, [-10, -3, -8], [10, 5, 8]);
+  assert.equal(resolved.minA, -10);
+  assert.equal(resolved.maxA, 10);
+  assert.equal(resolved.minB, -8);
+  assert.equal(resolved.maxB, 8);
+});
+
+test('resolveSectionFootprints leaves a fully-specified footprint untouched (spec §14.3)', () => {
+  const parsed = parseSceneFile(validDoc());
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const [resolved] = resolveSectionFootprints(parsed.scene.sections, [-10, -3, -8], [10, 5, 8]);
+  // validDoc's section carries an explicit ±10 footprint — kept, not overwritten.
+  assert.equal(resolved.minA, -10);
+  assert.equal(resolved.maxA, 10);
+  assert.equal(resolved.minB, -10);
+  assert.equal(resolved.maxB, 10);
 });
 
 test('parseSceneFile rejects non-object JSON', () => {

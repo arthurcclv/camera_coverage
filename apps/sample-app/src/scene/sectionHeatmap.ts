@@ -16,13 +16,19 @@ import type { MarkedFilter } from './samplingVolumes.ts';
 export type SectionOrientation = 'horizontal' | 'vertical-x' | 'vertical-z';
 export type SectionAggregation = 'mean' | 'max' | 'min' | 'blind';
 
-/** A user-placed, axis-aligned coverage slab (spec §13.1). */
+/** A user-placed, axis-aligned coverage box (spec §13.1). */
 export interface Section {
   id: string;
   orientation: SectionOrientation;
-  /** Slab bounds in world meters along the collapse axis, `min <= max`. */
+  /** Thickness bounds in world meters along the collapse axis, `min <= max`. */
   min: number;
   max: number;
+  /** Footprint bounds in world meters along in-plane `axisA`, `minA <= maxA` (spec §13.1). */
+  minA: number;
+  maxA: number;
+  /** Footprint bounds in world meters along in-plane `axisB`, `minB <= maxB` (spec §13.1). */
+  minB: number;
+  maxB: number;
   aggregation: SectionAggregation;
   /** Whether this section's heatmap is drawn/aggregated (subject to the master
    * layer toggle, spec §2.4). The per-entity analog of a camera's enabled state. */
@@ -129,9 +135,57 @@ export function sectionCenter(section: Pick<Section, 'min' | 'max'>): number {
   return (section.min + section.max) / 2;
 }
 
+/** The footprint's midpoint along `axisA` — `(minA + maxA) / 2` (spec §13.2). */
+export function sectionCenterA(section: Pick<Section, 'minA' | 'maxA'>): number {
+  return (section.minA + section.maxA) / 2;
+}
+
+/** The footprint's midpoint along `axisB` — `(minB + maxB) / 2` (spec §13.2). */
+export function sectionCenterB(section: Pick<Section, 'minB' | 'maxB'>): number {
+  return (section.minB + section.maxB) / 2;
+}
+
 /** Thickness slider bounds (spec §13.2). */
 export const MIN_SECTION_THICKNESS = 0.1;
 export const MAX_SECTION_THICKNESS = 5;
+
+/** Footprint (width/height) slider min bound (spec §13.2); the max is per-axis, see `footprintSliderMax`. */
+export const MIN_SECTION_FOOTPRINT = 0.1;
+
+/** The world-AABB extents of a section's two in-plane axes (spec §13.2 footprint bounds). */
+export function inPlaneExtent(
+  worldMin: Vec3,
+  worldMax: Vec3,
+  orientation: SectionOrientation,
+): { a: { min: number; max: number }; b: { min: number; max: number } } {
+  const { axisA, axisB } = axisMapping(orientation);
+  return {
+    a: { min: worldMin[axisA], max: worldMax[axisA] },
+    b: { min: worldMin[axisB], max: worldMax[axisB] },
+  };
+}
+
+/**
+ * The footprint (width/height) slider's max along an in-plane axis: the full
+ * workspace-AABB extent along that axis (spec §13.2). Never below the min bound.
+ */
+export function footprintSliderMax(extent: { min: number; max: number }): number {
+  return Math.max(MIN_SECTION_FOOTPRINT, extent.max - extent.min);
+}
+
+/**
+ * The default in-plane footprint for `orientation`: the **full** workspace-AABB
+ * extent on both in-plane axes (spec §13.2) — unlike thickness, footprint is not
+ * capped, so a new section spans the whole workspace in-plane.
+ */
+export function defaultFootprintForOrientation(
+  worldMin: Vec3,
+  worldMax: Vec3,
+  orientation: SectionOrientation,
+): { minA: number; maxA: number; minB: number; maxB: number } {
+  const { a, b } = inPlaneExtent(worldMin, worldMax, orientation);
+  return { minA: a.min, maxA: a.max, minB: b.min, maxB: b.max };
+}
 
 /**
  * The collapse axis's world extent for `orientation`, centered and clamped to
@@ -165,14 +219,19 @@ export function maxClipRange(worldMin: Vec3, worldMax: Vec3, orientation: Sectio
   return Math.max(MIN_CLIP_RANGE, max - min);
 }
 
-/** A new section: Horizontal, full (clamped) extent of the workspace AABB (spec §5.5). */
+/**
+ * A new section: Horizontal, thickness the full (5 m-clamped) collapse-axis extent,
+ * footprint the full workspace-AABB extent on both in-plane axes (spec §5.5, §13.2).
+ */
 export function defaultSection(id: string, worldMin: Vec3, worldMax: Vec3): Section {
   const { min, max } = defaultRangeForOrientation(worldMin, worldMax, 'horizontal');
+  const footprint = defaultFootprintForOrientation(worldMin, worldMax, 'horizontal');
   return {
     id,
     orientation: 'horizontal',
     min,
     max,
+    ...footprint,
     aggregation: 'mean',
     enabled: true,
     clipRange: DEFAULT_CLIP_RANGE,
@@ -251,14 +310,21 @@ export interface SectionCellStats {
 }
 
 export interface SectionCellGrid {
-  /** In-plane texture dimensions: column count (a) × row count (b). */
+  /** In-plane texture dimensions: selected column count (a) × row count (b), spec §13.3. */
   dimsA: number;
   dimsB: number;
-  /** Row-major: index = a + dimsA * b. */
+  /** Row-major over the selected sub-rectangle: index = a + dimsA * b. */
   cells: SectionCellStats[];
   camWords: number;
   /** Enabled-camera ids in mask-bit order, snapshotted from the retained run. */
   cameraIds: string[];
+  /**
+   * Grid-aligned world extent of the selected columns along `axisA`/`axisB`
+   * (spec §13.3): the footprint snapped to voxel-column boundaries, so the
+   * heatmap plane can be sized/positioned to span exactly the drawn cells.
+   */
+  extentA: { min: number; max: number };
+  extentB: { min: number; max: number };
 }
 
 /**
@@ -279,20 +345,37 @@ export function computeSectionCells(
   accessors: ReadonlyMap<number, VoxelAccessor>,
   cameraIds: string[],
   camWords: number,
-  section: Pick<Section, 'orientation' | 'min' | 'max'>,
+  section: Pick<Section, 'orientation' | 'min' | 'max'> &
+    Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
   marked: MarkedFilter | null = null,
 ): SectionCellGrid {
   const { collapseAxis, axisA, axisB } = axisMapping(section.orientation);
-  const dimsA = grid.gridDims[axisA];
-  const dimsB = grid.gridDims[axisB];
+  // The footprint (spec §13.2) selects a grid-aligned sub-rectangle of whole
+  // voxel columns: only columns inside [minA,maxA]×[minB,maxB] are aggregated,
+  // so the texture dims are the selected column counts, not the full grid (§13.3).
+  // A missing footprint bound falls back to the whole grid on that axis (the
+  // pre-footprint behavior), which the SectionHeatmapStore never relies on but
+  // keeps the aggregation callable with just the slab fields.
+  const rangeA =
+    section.minA !== undefined && section.maxA !== undefined
+      ? axisIndexRange(grid, axisA, section.minA, section.maxA)
+      : { start: 0, end: grid.gridDims[axisA] - 1 };
+  const rangeB =
+    section.minB !== undefined && section.maxB !== undefined
+      ? axisIndexRange(grid, axisB, section.minB, section.maxB)
+      : { start: 0, end: grid.gridDims[axisB] - 1 };
+  const dimsA = rangeA.end - rangeA.start + 1;
+  const dimsB = rangeB.end - rangeB.start + 1;
   const { start, end } = axisIndexRange(grid, collapseAxis, section.min, section.max);
 
   const cells: SectionCellStats[] = new Array(dimsA * dimsB);
   const g: [number, number, number] = [0, 0, 0];
 
-  for (let b = 0; b < dimsB; b++) {
+  for (let lb = 0; lb < dimsB; lb++) {
+    const b = rangeB.start + lb;
     g[axisB] = b;
-    for (let a = 0; a < dimsA; a++) {
+    for (let la = 0; la < dimsA; la++) {
+      const a = rangeA.start + la;
       g[axisA] = a;
 
       let sum = 0;
@@ -352,7 +435,7 @@ export function computeSectionCells(
 
       // Valid data wins → colored; else no-data/empty → transparent; else the
       // column is entirely obstacle → black (spec §13.3, precedence order).
-      const idx = a + dimsA * b;
+      const idx = la + dimsA * lb;
       cells[idx] = count > 0
         ? {
             valid: true,
@@ -367,7 +450,19 @@ export function computeSectionCells(
     }
   }
 
-  return { dimsA, dimsB, cells, camWords, cameraIds };
+  // Grid-aligned world extent of the selected columns (spec §13.3): the column
+  // start's low edge to the column end's high edge, so the rendered plane spans
+  // exactly the drawn cells.
+  const extentA = {
+    min: grid.worldMin[axisA] + rangeA.start * grid.voxelSize,
+    max: grid.worldMin[axisA] + (rangeA.end + 1) * grid.voxelSize,
+  };
+  const extentB = {
+    min: grid.worldMin[axisB] + rangeB.start * grid.voxelSize,
+    max: grid.worldMin[axisB] + (rangeB.end + 1) * grid.voxelSize,
+  };
+
+  return { dimsA, dimsB, cells, camWords, cameraIds, extentA, extentB };
 }
 
 /** The display value a cell contributes to the heatmap for a given aggregation (spec §13.3). */
@@ -661,7 +756,8 @@ export class SectionHeatmapStore {
    * zone re-filters without a recompute.
    */
   computeCells(
-    section: Pick<Section, 'orientation' | 'min' | 'max'>,
+    section: Pick<Section, 'orientation' | 'min' | 'max'> &
+      Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
     marked: MarkedFilter | null = null,
   ): SectionCellGrid | null {
     if (!this.grid) return null;

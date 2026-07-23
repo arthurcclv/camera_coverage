@@ -265,10 +265,18 @@ where the overlay is (re)built.
 
 ### 3.2 Backend selection
 
-1. Try `engine.init({ ...workspace, backend: 'auto' })`.
-2. On any failure (e.g. `WEBGPU_UNAVAILABLE`), re-`init` with `backend: 'cpu'`.
+1. Try `engine.init({ ...workspace, solidDetection: false, backend: 'auto' })`.
+2. On any failure (e.g. `WEBGPU_UNAVAILABLE`), re-`init` with `backend: 'cpu'`
+   (same `solidDetection: false`).
 3. Display the resolved backend from the returned `GpuCapabilities.backend`
    ("WebGPU" / "CPU") in the UI.
+
+> **`solidDetection` is always off in the demo (§4.2).** The default room is
+> open-top, but imported scenes (§14) may be watertight closed rooms whose whole
+> interior the flood fill would misclassify as `SOLID_GEOMETRY` — flagging every
+> in-room camera `CAMERA_INSIDE_GEOMETRY` and zeroing coverage. Disabling solid
+> detection sidesteps this; visibility is unaffected (it always comes from BVH ray
+> casting, never occupancy).
 
 > Note: the SDK README flags the WebGPU path as written-to-spec but not
 > runtime-validated; the CPU path is the tested reference. The fallback guarantees
@@ -308,6 +316,12 @@ for **both**:
 - `worldMin` / `worldMax` — the room's AABB (with a small margin).
 - `voxelSize` — see §6.
 - `chunkSizeXZ` — `10` (default).
+- `solidDetection` — **hard-coded `false`**. The SDK's flood-fill SOLID detection
+  assumes closed objects float in open free space reachable from the workspace
+  boundary; a watertight room inverts that (its free space is *enclosed*), so the
+  whole interior — cameras included — would be marked `SOLID_GEOMETRY`. Turning it
+  off keeps enclosed interiors `EMPTY_SPACE` (valid, but any voxel truly buried in
+  a solid still reads as fully blocked via ray casting). See §3.2.
 
 ---
 
@@ -521,8 +535,10 @@ at the `setCameras()` boundary (§8). Rules:
 
 - **Default (no zones):** the full volume,
   `setSampling({ regions: [{ type: 'full' }] })`. Coverage is evaluated over every
-  valid (free-space `EMPTY_SPACE`) voxel in the room; voxels inside walls/boxes are
-  invalid and excluded by the SDK.
+  valid (free-space `EMPTY_SPACE`) voxel in the room; voxels *on* a wall/box surface
+  (`MIXED_SPACE`) are invalid and excluded by the SDK. With `solidDetection` off
+  (§4.2) the enclosed interiors of solids are not culled as `SOLID_GEOMETRY` — they
+  count as valid but read as fully blocked (0 coverage) via ray casting.
 - **Zone-driven (region of interest):** when the user enables zones and at least
   one **sampling volume** exists, the run derives the SDK regions from the world
   AABB of every volume — `setSampling({ regions: volumes.map(v => ({ type: 'box',
@@ -804,7 +820,7 @@ fog — a section is a flat, per-cell heatmap of a chosen slice, and several can
 ### 13.1 Model & state
 
 - A section is
-  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, aggregation: 'mean' | 'max' | 'min' | 'blind', enabled: boolean, clipRange: number, name: string }`.
+  `{ id, orientation: 'horizontal' | 'vertical-x' | 'vertical-z', min: number, max: number, minA: number, maxA: number, minB: number, maxB: number, aggregation: 'mean' | 'max' | 'min' | 'blind', enabled: boolean, clipRange: number, name: string }`.
   The `name` is an **editable display label** stored on the entity (like the zone,
   `sampling_volumes.md` §6.2), with the same semantics as the camera name (§5.6):
   trimmed, blank/absent falls back to the default `Section N`, no uniqueness, never a
@@ -813,8 +829,13 @@ fog — a section is a flat, per-cell heatmap of a chosen slice, and several can
   (§13.9); *which* section clips — if any — is the single scene-level `clipSectionId`
   (§14.1), not a per-section flag. Both are saved in the scene file (§14); everything but
   the global colormap is per-section.
-  `min`/`max` are the slab bounds in world meters **along the collapse axis** (the
-  section normal), `min ≤ max`. Sections live in a canonical `sections: Section[]`
+  `min`/`max` are the slab **thickness** bounds in world meters **along the collapse axis**
+  (the section normal), `min ≤ max`. `minA`/`maxA` and `minB`/`maxB` are the finite
+  rectangular **footprint** bounds in world meters along the two **in-plane axes**
+  (`axisA`, `axisB` per orientation, below), `minA ≤ maxA` and `minB ≤ maxB` — so a section
+  is a bounded axis-aligned **box**, not a full-workspace slab. The footprint bounds are
+  stored relative to the current orientation's in-plane axes and **reset on orientation
+  change** (§13.2). Sections live in a canonical `sections: Section[]`
   array in `App.tsx`, parallel to `cameras` (§5) and `probes` (§12.1). A section node in
   the hierarchy (§5.5) references its section by id; the tree carries identity only.
 - The **collapse axis** and the two **in-plane axes** follow the orientation:
@@ -825,27 +846,50 @@ fog — a section is a flat, per-cell heatmap of a chosen slice, and several can
   scene-file export/import (§14). The global colormap and its legend (§13.5) are
   shared by all sections; everything else in the record above is per-section.
 
-### 13.2 Orientation & range (the slab)
+### 13.2 Orientation, thickness & footprint (the box)
+
+A section is a finite, axis-aligned **box**: a slab of thickness `[min, max]` along the
+collapse axis (the normal) with a bounded rectangular **footprint** `[minA, maxA] ×
+[minB, maxB]` across the two in-plane axes (§13.1). Three sliders size it about a fixed
+center; the viewport drag (§13.8) positions it — the two never overlap.
 
 - **Orientation** — a three-way selector (Horizontal / Vertical X / Vertical Z),
-  choosing the collapse axis per §13.1.
-- **Range** — a single **thickness** slider, **0.1–5 m**. Changing it keeps the slab's
-  **center** (`(min + max) / 2`) fixed and grows/shrinks `[min, max]` symmetrically around
-  it — the slab's *position* is only ever changed by the viewport drag (§13.8), never by
-  this control. A new section defaults to the collapse axis's full workspace-AABB extent,
+  choosing the collapse axis per §13.1. Changing orientation **resets** both the thickness
+  range and the in-plane footprint to their defaults for the new axes (below): the in-plane
+  axes swap, so carried-over bounds would be meaningless.
+- **Thickness** — a single slider, **0.1–5 m**, along the normal. Changing it keeps the
+  slab's **center** (`(min + max) / 2`) fixed and grows/shrinks `[min, max]` symmetrically
+  around it. A new section defaults to the collapse axis's full workspace-AABB extent,
   **capped to 5 m** and centered on that axis (so on an axis whose extent already fits
   within 5 m, the default is the true full extent; otherwise it's a 5 m slab centered on
-  the axis). The slab is `[min, max]` along the normal.
-- The heatmap draws on a single **plane at the range midpoint** `(min + max) / 2`,
-  perpendicular to the collapse axis. Two faint, **non-interactive outline planes** at
-  `min` and `max` mark the slab's extent so the aggregated volume is visible.
+  the axis).
+- **Width & height** — two sliders sizing the footprint, one per in-plane axis (`axisA`,
+  `axisB`). Each ranges **0.1 m → the workspace-AABB extent along that axis** and, like
+  thickness, keeps the footprint's **center on that axis** fixed while growing/shrinking its
+  bounds symmetrically. A new section defaults to the **full workspace-AABB extent** on both
+  in-plane axes — so it initially spans the whole workspace in-plane, matching a section's
+  appearance before finite footprints. The sliders are labeled by the world axis they size
+  for the current orientation (§13.6).
+- Sizing (thickness / width / height) only ever changes the box's **extent** about a fixed
+  center; its **position** (center on all three axes) is changed only by the viewport drag
+  (§13.8). The two controls are complementary — one holds center and moves an edge, the
+  other holds size and moves the center.
+- The heatmap draws on a single **plane at the thickness midpoint** `(min + max) / 2`,
+  perpendicular to the collapse axis and **spanning the footprint** `[minA, maxA] × [minB,
+  maxB]`. Two faint, **non-interactive outline planes** at `min` and `max` (same footprint)
+  mark the slab's thickness so the aggregated volume is visible.
 
 ### 13.3 Aggregation & cell mapping
 
-The slab is divided into **cells** — one per **voxel column**: the run of voxels along
+The box is divided into **cells** — one per **voxel column**: the run of voxels along
 the collapse axis at a fixed in-plane grid position `(a, b)`, clipped to `[min, max]`.
-The heatmap texture holds one texel per cell, so its resolution tracks `voxelSize` (§6)
-and reuses the workspace grid's in-plane dimensions.
+Only columns whose in-plane position falls **within the footprint** `[minA, maxA] × [minB,
+maxB]` (§13.2) are included, so the footprint selects a **grid-aligned sub-rectangle of
+whole voxel columns**; the rendered plane and outlines (§13.2) span exactly those selected
+columns, which means a footprint slider value snaps to the nearest column boundary. The
+heatmap texture holds one texel per selected cell, so its resolution tracks `voxelSize`
+(§6) and its in-plane dimensions are the **selected column counts** along `axisA`/`axisB`
+(the full workspace grid when the footprint is at its default full extent).
 
 - **Cell classification (black / transparent / colored).** The zone filter is applied
   **first**. When zones are active, a voxel **outside the enabled-zones union**
@@ -942,8 +986,12 @@ and reuses the workspace grid's in-plane dimensions.
   shows a **`SectionPanel`** in place of the camera/probe panel: header
   `Section — <name>` (§13.1), a **Name** text input (editing the section's display
   name — live, never marks the result stale, §13.1, §5.6), the orientation selector,
-  the thickness slider (§13.2), the aggregation selector, a **Clip toggle button**,
-  and a **reveal-range slider** (§13.9).
+  the thickness slider, **two footprint sliders (width & height)** (§13.2), the
+  aggregation selector, a **Clip toggle button**, and a **reveal-range slider** (§13.9).
+  The width/height sliders are **labeled by the world axis they size for the current
+  orientation** — horizontal: `Width (X)` / `Depth (Z)`; vertical-x: `Width (Z)` /
+  `Height (Y)`; vertical-z: `Width (X)` / `Height (Y)` — so a horizontal footprint's two
+  horizontal axes are never mislabeled "height".
   The button is **highlighted** while this section is the one clipping (§14.1
   `clipSectionId`); the reveal-range slider is **always shown** (it has no visible effect
   unless this section is the clipping one).
@@ -994,7 +1042,8 @@ Stats panel (§10). Numbers are computed over the **colored cells** (obstacle an
 transparent columns excluded) so they match what the heatmap shows, on the underlying
 **coverage fraction** independent of the active display aggregation (§13.3):
 
-- **Context** — orientation and range (`min`–`max` m).
+- **Context** — orientation, thickness range (`min`–`max` m), and footprint size
+  (width × height m).
 - **Cells** — total / colored / obstacle (black). **Total is the region of interest** —
   colored plus obstacle cells; **transparent no-data/empty cells (§13.3) are excluded**,
   mirroring how out-of-zone voxels are skipped. A section whose slab lies entirely in
@@ -1019,14 +1068,18 @@ section stats."*; retained run diverged from the live scene → the numbers plus
 - A section is **selected from its hierarchy row** (§5.5); the **heatmap plane is not a
   pick target**, so clicking it passes through to the cameras/probes (or empty space)
   behind it and the viewport pick (§5.2) is unchanged.
-- Selecting a section attaches **`TransformControls` in translate mode only, constrained
-  to the collapse axis**: dragging slides the whole slab along its normal, moving `min`
-  and `max` together (fixed thickness) — the same "keep thickness, move center" relationship
-  the thickness slider (§13.2) mirrors in the other direction (keep center, change
-  thickness). Rotate mode and the space toggle (§2.4) are ignored while a section is
-  selected (a slab has no orientation to rotate, and translation is axis-locked).
-  **Thickness** is changed only via the thickness slider (§13.2), not in the viewport;
-  **position** is changed only via the viewport drag, not the panel.
+- Selecting a section attaches **`TransformControls` in translate mode, free on all three
+  axes**: dragging slides the whole box, moving its **center** on each axis while holding
+  thickness/width/height fixed — the complement of the sizing sliders (§13.2), which change
+  extent about a fixed center. Moving `min`/`max` together along the normal repositions the
+  cut plane; moving `minA`/`maxA` and `minB`/`maxB` together repositions the footprint
+  in-plane. The box may be dragged **partly or wholly outside** the workspace; columns that
+  leave the voxel grid simply read no-data (transparent, §13.3) and drop out of the stats
+  (§13.7), exactly as an out-of-range slab does along the normal. Rotate mode and the space
+  toggle (§2.4) are ignored while a section is selected (an axis-aligned box has no
+  orientation to rotate). **Size** (thickness/width/height) is changed only via the panel
+  sliders (§13.2), not in the viewport; **position** is changed only via the viewport drag,
+  not the panel.
 
 ### 13.9 Clip (geometry cross-section)
 
@@ -1130,7 +1183,12 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   `enabled: false` is written). A section's per-entity flag is **`enabled`** (renamed from
   the legacy `visible`, which the reader still accepts for back-compat, §14.8). A
   section's **`clipRange`** (§13.9) is **optional on read**, defaulting to `2`
-  (clamped to the collapse-axis extent) when absent.
+  (clamped to the collapse-axis extent) when absent. A section's in-plane footprint
+  bounds **`minA`/`maxA`/`minB`/`maxB`** (§13.1) are also **optional on read**, each pair
+  defaulting to the **full workspace-AABB extent** along its in-plane axis when absent — so
+  files written before finite footprints load spanning the whole workspace in-plane,
+  unchanged in appearance. Like `clipRange` and the camera `enabled` flag, adding them is
+  back-compatible, so there is **no format-version bump** (still `2`).
 - **`name`** on each **camera**, **probe**, and **section** is the user-edited
   display label (§5.6, §12.1, §13.1), **optional on read** — a blank/missing name
   reads as the default `Camera N` / `Probe N` / `Section N`, never an error — and, to
@@ -1173,6 +1231,7 @@ Sketch:
   "probes": [ { "id": "probe-1", "position": [0,1,0], "name": "Aisle 3" } ],
   "sections": [
     { "id": "section-1", "orientation": "horizontal", "min": 0, "max": 2,
+      "minA": -10, "maxA": 10, "minB": -10, "maxB": 10,
       "aggregation": "mean", "enabled": true, "name": "Ground floor" }
   ],
   "zones": [ { "id": "zone-1", "name": "West wing", "enabled": true } ],
