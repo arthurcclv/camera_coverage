@@ -63,11 +63,6 @@ export function OverlayControls({
           </button>
         ))}
       </div>
-      <p className="hint">
-        {options.mode === 'coverage'
-          ? 'Brightness = fraction of enabled cameras that see each voxel.'
-          : 'Fog over voxels no enabled camera sees (blind spots).'}
-      </p>
 
       <Slider
         label="Overlay color"

@@ -28,14 +28,6 @@ export function StatsPanel({ summary, computeBackend, renderBackend, voxelSize, 
     <div className="panel">
       <p className="panel-title">Coverage stats</p>
       <div className="stat-line">
-        <span>Compute backend</span>
-        <b>{computeBackend ? (computeBackend === 'webgpu' ? 'WebGPU' : 'CPU') : '—'}</b>
-      </div>
-      <div className="stat-line">
-        <span>Render backend</span>
-        <b>{renderBackend ? renderBackendLabel(renderBackend) : '—'}</b>
-      </div>
-      <div className="stat-line">
         <span>Voxel size</span>
         <b>{voxelSize.toFixed(2)} m</b>
       </div>
