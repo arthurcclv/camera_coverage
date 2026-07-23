@@ -40,18 +40,21 @@ spec change:
 
 ## Adding a feature (the app's grain)
 
-Because React owns state and Three.js objects are dumb sinks
-(see [ARCHITECTURE.md](./ARCHITECTURE.md)), a typical feature touches three
-places:
+Because React owns state and the Three.js side is one imperative sink (`SceneView`,
+see [ARCHITECTURE.md](./ARCHITECTURE.md)), a typical feature touches three places:
 
-1. **State** — add `useState` (+ a `useRef` mirror if an imperative callback needs
-   the live value) in `App.tsx`.
+1. **State** — add `useState` in `App.tsx`. If the scene needs to reflect it, add
+   a field to `SceneViewState` (`scene/sceneView/`) and include it in the
+   `sceneViewState` snapshot — App builds the snapshot; it no longer mirrors state
+   into imperative callbacks. A `useRef` mirror is now only for the run/handler
+   path (values `handleRun`/`applyScene` read imperatively), not for the scene.
 2. **Pure logic** — put the actual decision/derivation in a pure function under
    `scene/` or `ui/` (e.g. how selection resolves, how a chunk maps to voxels),
    so it can be unit-tested without React or a GPU.
-3. **Sink + UI** — push state into the relevant `scene/*` object via
-   `update()`/`setOptions()` in an effect, and render a presentational `ui/*`
-   component driven by props/callbacks.
+3. **Sink + UI** — consume the new snapshot field in a guarded block of
+   `SceneView.sync()` (drive the relevant `scene/*` object's `update()`/
+   `setOptions()`), and render a presentational `ui/*` component driven by
+   props/callbacks. A drag that edits state comes back through `onTransform`.
 
 Then add a test for the pure function.
 

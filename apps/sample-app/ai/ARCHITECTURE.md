@@ -7,19 +7,25 @@ behavioral contract see [`../specs/spec.md`](../specs/spec.md).
 
 ```
 React UI layer  (App.tsx owns state; ui/* are presentational panels)
-      │  canonical arrays pushed down via update()/setOptions() in effects
+      │  one immutable snapshot pushed down via SceneView.sync() in one effect
       ▼
-Three.js scene layer  (scene/* imperative objects: gizmos, overlay, viewport)
-      │
+SceneView  (scene/sceneView/ — the imperative Three.js bridge: viewport,
+      │     gizmos, overlay, pick, listeners, behind sync/onSelect/onTransform)
+      ▼
 SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → CoverageEngine)
       run off-thread in a Web Worker
 ```
 
 1. **React UI** — `App.tsx` owns *all* state and layout; `ui/*` components are
    presentational, driven by props and callbacks.
-2. **Three.js scene** — `scene/*` classes run **imperatively** inside a
-   ref-driven `useEffect`. React holds the canonical data and pushes it into these
-   objects; there is no react-three-fiber.
+2. **SceneView** (`scene/sceneView/`) — owns everything Three.js behind one small
+   interface (`sync` · `onSelect` · `onTransform` · `resetCoverage`/
+   `addCoverageChunk` · `dispose`). React holds the canonical data and pushes one
+   snapshot per change through `sync()`, which diffs each field by reference and
+   drives the `scene/*` imperative objects (gizmos, overlay, viewport); selection
+   and transform edits come back as resolved events. There is no
+   react-three-fiber. The individual `scene/*` gizmo/overlay/viewport modules are
+   SceneView's internal parts, not App's.
 3. **SDK engine** — runs inside a Web Worker, reached through a thin hook.
 
 ## Talking to the SDK
@@ -43,10 +49,12 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
   built geometry) was replaced since the last init — a scene-file import (spec
   §14.4) always forces a fresh `loadScene`/workspace even at the same voxel
   size, tracked via `initializedRoomRef`. It filters out disabled cameras,
-  builds a `WorkspaceGrid`, resets probe-visibility, the section-heatmap store,
-  and overlay, then `compute({ mode: 1, onChunkDone })` feeds each streamed
-  chunk into **three** retained-data consumers: the coverage overlay, the
-  probe-visibility store, and the section-heatmap store. Every stage after the
+  builds a `WorkspaceGrid`, resets probe-visibility, the section-heatmap and
+  zone-coverage stores, and the overlay (via `SceneView.resetCoverage()`), then
+  `compute({ mode: 1, onChunkDone })` feeds each streamed chunk into **four**
+  retained-data consumers: the coverage overlay (through
+  `SceneView.addCoverageChunk()`), the probe-visibility store, the
+  section-heatmap store, and the zone-coverage store. Every stage after the
   initial `runGenerationRef` snapshot re-checks it before touching state or
   feeding a stream consumer, so a run superseded mid-flight by `applyScene`
   (import) can't land its results or contaminate the new scene's retained
@@ -62,18 +70,23 @@ selection, `collapsedIds`, overlay options, `voxelSize`
 visibility, `sectionsVisible` (the viewport master toggle), probe queries,
 `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`,
 inspector split height. Per-section `SectionCellGrid`s are derived state
-(`useMemo` over `sections` + `masksVersion`), not stored directly. Live values
-are mirrored into `useRef`s so the imperative Three.js callbacks read current
-state without re-subscribing. **Auto-run** is a 10 Hz `setInterval` that fires
-`handleRun` when inputs are stale and the engine is idle and error-free (spec
-§8.1 throttle).
+(`useMemo` over `sections` + `masksVersion`), not stored directly. All of that,
+plus two derived `useMemo`s (`clipBand`, `sightlines`), is bundled into one
+immutable `sceneViewState` (`useMemo`) and pushed to `SceneView.sync()` in a
+single effect — SceneView diffs each field by reference, so an expensive op runs
+only on its own change. A handful of `useRef`s remain, but only for the
+**run/handler path** (`camerasRef`, `roomRef`, `runGenerationRef`,
+`samplingDirtyRef`, …), not for the scene sink; the ~21 mirror refs that used to
+feed the imperative Three.js callbacks now live as locals inside SceneView.
+**Auto-run** is a 10 Hz `setInterval` that fires `handleRun` when inputs are
+stale and the engine is idle and error-free (spec §8.1 throttle).
 
 `room` used to be a `useMemo(() => buildRoom(), [])` constant; it's now real
-state so scene-file import (spec §14) can replace it. The Three.js setup
-effect (viewport, gizmos, listeners) still runs exactly once — it no longer
-depends on `room` — and a separate effect (deps `[room, viewportReady]`) owns
-adding/removing `room.group` from the scene, so a geometry swap never tears
-down or recreates the WebGPU renderer/orbit camera. `applyScene` (in
+state so scene-file import (spec §14) can replace it. The `SceneView.create()`
+effect runs exactly once (it depends only on the stable `applyTransformChange`);
+the `room.group` swap and the clip planes are snapshot fields, so `sync()`
+adds/removes the geometry group on a `room` change without tearing down or
+recreating the WebGPU renderer/orbit camera. `applyScene` (in
 `App.tsx`) is the single place that replaces geometry + cameras + probes +
 sections + all derived/retained-run state together; `handleImportScene` is a
 thin wrapper around it and `scene/sceneIO.ts` (there is no in-app "reset to
@@ -83,13 +96,25 @@ default" — see DECISIONS.md).
 
 **Entry / orchestration**
 - `main.tsx` — React entry; mounts `<App>` in StrictMode.
-- `App.tsx` — layout, engine lifecycle, all state orchestration, imperative
-  Three.js wiring.
+- `App.tsx` — layout, engine lifecycle, all state orchestration, and building
+  the `sceneViewState` snapshot it pushes to `SceneView` (no direct Three.js
+  wiring — that lives in `scene/sceneView/`).
 - `worker.ts` — SDK worker host + warning side-channel.
 - `engine/useEngine.ts` — `WorkerClient` lifecycle + init/load/setCameras/compute
   wrappers with CPU fallback.
 
 **Scene (`scene/`, imperative Three.js + pure math)**
+- `sceneView/` — the imperative Three.js bridge (spec §2–§13). `sceneView.ts` is
+  the `SceneView` class: it constructs and owns the viewport + all gizmo sets +
+  the overlay, wires the pick raycaster and the pointer/`objectChange` listeners,
+  and presents `create` · `sync(SceneViewState)` · `onSelect` · `onTransform` ·
+  `resetCoverage`/`addCoverageChunk` · `dispose`. `sync` diffs each snapshot field
+  by reference and fans it out to the objects below; drags come back as resolved
+  `onTransform` events, clicks as resolved `onSelect`. The decision logic it owns
+  is pure and unit-tested: `pick.ts` (`nearestHit`), `transformReadback.ts`
+  (`floorVolumeSize`, `sectionBoundsFromCenters`), plus `types.ts`
+  (`SceneViewState`, `TransformChange`). The gizmo/overlay/viewport modules below
+  are its internal parts — App never touches them directly.
 - `geometryModel.ts` — the `GeometryObject` union (`room`/`box`/`gltf`, spec
   §14.1, §14.3) + pure triangle-mesh math shared by the default room and
   imported geometry: `boxTris`/`roomTris`/`mergeTris`, `transformTriMesh`
@@ -238,9 +263,12 @@ default" — see DECISIONS.md).
 
 A single unified selection: `Selection = { kind: 'camera' | 'probe' | 'section' |
 'zone' | 'volume', id } | null` (`scene/viewportSelection.ts`). A viewport click
-picks the nearest hit across cameras, probes, and **volumes** — sections and zones
-have no pickable body, so they're selected from their hierarchy rows; drag-tail
-clicks (> 5 px travel) are ignored. Exactly one `TransformControls` gizmo is
+picks the nearest hit across cameras, probes, and **volumes** (raycast in
+`SceneView`, arbitration by the pure `scene/sceneView/pick.ts` `nearestHit`, then
+the click-vs-drag decision `selectionAfterClick`) — sections and zones have no
+pickable body, so they're selected from their hierarchy rows; drag-tail
+clicks (> 5 px travel) are ignored. `SceneView` emits the resolved selection to
+App via `onSelect`. Exactly one `TransformControls` gizmo is
 attached at a time; selecting a probe forces translate-only, selecting a section
 forces translate-only **and** constrains the visible handle to its collapse axis,
 selecting a **volume** enables the volume-only **scale** mode (translate/rotate/

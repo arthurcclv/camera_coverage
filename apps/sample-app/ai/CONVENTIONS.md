@@ -18,7 +18,7 @@ Grouped by layer:
 | Folder | Contents |
 |---|---|
 | `engine/` | The SDK bridge (`useEngine.ts`). |
-| `scene/` | Imperative Three.js objects **and** the pure math they rely on. |
+| `scene/` | Imperative Three.js objects **and** the pure math they rely on. `scene/sceneView/` is the `SceneView` bridge cluster (the imperative class + its pure `pick`/`transformReadback` helpers). |
 | `cameras/` | Camera config + Euler/quaternion math. |
 | `ui/` | Presentational React components. |
 | `test/` | Unit tests, mirroring the pure modules. |
@@ -45,13 +45,17 @@ Grouped by layer:
 
 ## The state pattern
 
-React owns canonical state; Three.js objects are dumb sinks updated via imperative
-`update()` / `setOptions()` in effects, with `useRef` bridging live state into
-imperative callbacks. **Keep engine/renderer mutation out of component render
-bodies.** Factor pure decision logic out of React/Three so it can be unit-tested
-(see below) — this is why `viewportSelection`, `transformSpace`, `leftPanelSplit`,
-`sceneTree`, the slab/chord math, and probe `locateVoxel` are standalone pure
-functions.
+React owns canonical state; the Three.js side is a single imperative sink,
+`SceneView` (`scene/sceneView/`), fed one immutable snapshot per change through
+`sync()` and answering with resolved `onSelect`/`onTransform` events. SceneView
+diffs the snapshot by reference internally, so each `scene/*` object's
+`update()`/`setOptions()` still fires only on its own inputs — but App no longer
+mirrors live state into imperative callbacks (that now lives inside SceneView).
+**Keep engine/renderer mutation out of component render bodies.** Factor pure
+decision logic out of React/Three so it can be unit-tested (see below) — this is
+why `viewportSelection`, `transformSpace`, `leftPanelSplit`, `sceneTree`, the
+slab/chord math, probe `locateVoxel`, and SceneView's own `pick` /
+`transformReadback` are standalone pure functions.
 
 ## Testing
 
@@ -60,7 +64,10 @@ functions.
 - **Tests target pure functions only** — never the React render tree or live
   Three.js/WebGPU. Existing suites: `sceneTree`, `coverageOverlay`,
   `transformSpace`, `volumetric`, `leftPanelSplit`, `probeVisibility`,
-  `viewportSelection`, `sectionHeatmap`.
+  `viewportSelection`, `sectionHeatmap`, `sceneView/pick`,
+  `sceneView/transformReadback`. The imperative `SceneView` class itself stays
+  untested (like `viewport.ts`); its decision logic is tested through those two
+  pure helpers.
 - **Every change ships with a test.** When adding behavior, extract the decision
   logic into a pure function in `scene/`/`ui/` and test that, rather than testing
   through React.

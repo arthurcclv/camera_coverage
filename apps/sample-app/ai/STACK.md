@@ -51,7 +51,7 @@ draw call, order-independent.
 
 ## Not in the stack (deliberately)
 
-- No react-three-fiber — Three.js is driven imperatively.
-- No state library (Redux/Zustand/…) — state is React hooks + `useRef` mirrors.
+- No react-three-fiber — Three.js is driven imperatively, behind the `SceneView` bridge.
+- No state library (Redux/Zustand/…) — state is React hooks, pushed to the scene as a `SceneView` snapshot.
 - No component/CSS framework — styling is hand-written in `index.css`.
 - No test framework beyond `node:test`.

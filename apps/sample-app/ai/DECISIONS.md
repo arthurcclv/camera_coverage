@@ -6,6 +6,49 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## App's imperative Three.js bridge collapsed behind a `SceneView` module
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2–§13 — **unchanged**; this was
+a pure structural extraction (no spec edit). `App.tsx` used to *be* the
+React↔Three.js bridge: a 175-line "created once" mount effect (viewport + 5 scene
+objects + pointer/click/`objectChange` listeners + teardown), ten single-value
+"push state into a scene object" effects, inline pick arbitration, an inline
+`attachForSelection`, and ~21 `useRef`s that existed only to smuggle live state
+into those imperative callbacks. None of it had a seam, so none of it was testable
+under `node --test` (the repo's convention), even though that wiring is exactly
+where the bugs recorded below kept surfacing.
+
+**Resolution.** A `scene/sceneView/` module presents one small interface —
+`create` · `sync(SceneViewState)` · `onSelect` · `onTransform` ·
+`resetCoverage`/`addCoverageChunk` · `dispose` — behind which the viewport, all
+gizmo sets, the overlay, the pick raycaster, and the listeners now live. App holds
+canonical state, bundles it into one immutable `sceneViewState` snapshot, and
+pushes it through `sync()` in a single effect; selection and transform edits come
+back as resolved events. `App.tsx` dropped from 1474 → 1246 lines and 23 → 9
+effects; the ~21 mirror refs are gone (a handful of run/handler refs remain).
+
+**Why `sync()` diffs by reference.** Re-applying every imperative op on every
+snapshot would rebuild the overlay/sightlines on unrelated changes (e.g. a camera
+drag) — a real perf regression, and perf is part of the interface. So `sync`
+compares each field against the previous snapshot by reference and fires each op
+only on its own change; App passes every field as stable React state or `useMemo`
+output, so reference identity reproduces the old effect dependency arrays exactly.
+The first `sync` (no previous snapshot) applies everything — that is the async-mount
+catch-up, replacing the old hand-written pre-mount push.
+
+**Why extract `pick`/`transformReadback` as pure helpers.** The two pieces of real
+decision logic the bridge owns — nearest-hit arbitration and the volume-size-floor
+/ section-bound-pair readback math — moved into pure, unit-tested modules
+(`pick.ts`, `transformReadback.ts`); the section bound-pair algebra is precisely
+the class of math that carried the "mirrored along its in-plane Z axis" sign bug
+below, and now has a test surface. The `SceneView` class itself stays untested,
+like `viewport.ts`. **Trade-off:** one large snapshot recomputed each render (cheap
+— it's object-literal assembly) and a per-field diff inside `sync` instead of
+React's effect scheduler; accepted for a single testable seam and a 230-line
+lighter `App`. The overlay is owned by SceneView but still fed by the run path via
+`resetCoverage`/`addCoverageChunk`; folding all four retained-chunk consumers
+behind one coordinator was left as a separate future step.
+
 ## Sections are finite boxes, sized by sliders and moved by free 3-axis drag
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.1–13.3, §13.6, §13.8, §14.3.
@@ -636,7 +679,10 @@ objects are plain Three.js classes updated imperatively via
 state into imperative callbacks. **Why:** the SDK and Three.js are inherently
 imperative and stream results through callbacks; wrapping them in a declarative
 scene-graph library (r3f) would fight both. **Trade-off:** manual synchronization
-between React state and scene objects, accepted for a reference demo.
+between React state and scene objects, accepted for a reference demo. (That
+synchronization — originally `useRef` mirrors + per-value push effects in
+`App.tsx` — was later collapsed behind the `SceneView` bridge; see the
+`SceneView` entry at the top of this file.)
 
 ## Two independent WebGPU surfaces, each with its own fallback
 

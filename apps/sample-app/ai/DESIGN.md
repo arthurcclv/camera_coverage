@@ -52,9 +52,9 @@ controls/stats. No mobile, no persistence.
    is built once and reused for both rendering and `loadScene`; there is no
    in-app scene editing.
 2. **React owns state; Three.js objects are dumb sinks.** React holds the
-   canonical arrays (cameras, probes, selection, options) and pushes them into
-   imperative Three.js scene objects via `update()`/`setOptions()`. No
-   react-three-fiber.
+   canonical arrays (cameras, probes, selection, options) and pushes them, as one
+   snapshot, through the `SceneView` bridge into the imperative Three.js scene
+   objects (`update()`/`setOptions()`). No react-three-fiber.
 3. **Two independent WebGPU surfaces.** The **render** backend (Three.js
    `WebGPURenderer`, main thread) is separate from the SDK's **compute** backend
    (in the worker). Each falls back independently — render to WebGL2, compute to
