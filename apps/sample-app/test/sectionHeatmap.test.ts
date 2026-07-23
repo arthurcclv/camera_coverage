@@ -30,12 +30,11 @@ import {
   sectionCenterA,
   sectionCenterB,
   sectionHeatmapTextureData,
-  sectionLegendScale,
+  sectionLegendVisible,
   sectionPlaneRotation,
-  turboColormap,
-  turboCssGradient,
   type SectionCellGrid,
 } from '../src/scene/sectionHeatmap.ts';
+import { turboColormap } from '../src/scene/heatmapLegend.ts';
 import { accessor } from '@linkervision/camera-coverage-sdk';
 
 // --- axisMapping / collapseAxisExtent / defaultSection (spec §13.1, §5.5) ----
@@ -568,7 +567,7 @@ test('computeSectionCells: a column fully inside the marked set colors identical
   assert.equal(at(filtered).blindFraction, at(unfiltered).blindFraction);
 });
 
-// --- cellDisplayValue / turboColormap / texture data (spec §13.3, §13.5) ----
+// --- cellDisplayValue / texture data (spec §13.3, §13.5) --------------------
 
 test('cellDisplayValue picks the field matching the aggregation', () => {
   const cell = { valid: true, black: false, meanFraction: 0.4, maxFraction: 0.9, minFraction: 0.1, blindFraction: 0.2, seenWords: new Uint32Array(1) };
@@ -578,87 +577,22 @@ test('cellDisplayValue picks the field matching the aggregation', () => {
   assert.equal(cellDisplayValue(cell, 'blind'), 0.2);
 });
 
-test('turboColormap: blue end (t=0) stays distinct from black; red end (t=1) is red-dominant', () => {
-  const [r0, , b0] = turboColormap(0);
-  assert.ok(b0 > r0, 'low end should be blue-dominant, not black');
-  assert.ok(b0 > 0.05);
-  const [r1, , b1] = turboColormap(1);
-  assert.ok(r1 > b1, 'high end should be red-dominant');
-});
+// --- sectionLegendVisible (spec §2.2, §13.6) ---------------------------------
 
-test('turboCssGradient starts blue and ends red, one stop per control point', () => {
-  const gradient = turboCssGradient();
-  assert.match(gradient, /^linear-gradient\(to right, /);
-  const [r0, g0, b0] = turboColormap(0);
-  const [r1, g1, b1] = turboColormap(1);
-  assert.ok(gradient.includes(`rgb(${Math.round(r0 * 255)}, ${Math.round(g0 * 255)}, ${Math.round(b0 * 255)}) 0%`));
-  assert.ok(gradient.includes(`rgb(${Math.round(r1 * 255)}, ${Math.round(g1 * 255)}, ${Math.round(b1 * 255)}) 100%`));
-});
-
-test('turboColormap interpolates linearly between control points', () => {
-  const [r0, g0, b0] = turboColormap(0);
-  assert.ok(Math.abs(r0 - 0.19) < 1e-9 && Math.abs(g0 - 0.07) < 1e-9 && Math.abs(b0 - 0.23) < 1e-9);
-  const [r1, g1, b1] = turboColormap(1);
-  assert.ok(Math.abs(r1 - 0.62) < 1e-9 && Math.abs(g1 - 0.09) < 1e-9 && Math.abs(b1 - 0.06) < 1e-9);
-});
-
-test('turboColormap clamps outside [0, 1]', () => {
-  assert.deepEqual(turboColormap(-5), turboColormap(0));
-  assert.deepEqual(turboColormap(5), turboColormap(1));
-});
-
-// --- sectionLegendScale (spec §13.6) -----------------------------------------
-
-test('sectionLegendScale: no section / no run falls back to coverage fraction 0..1', () => {
-  const noSel = sectionLegendScale(null, 10);
-  const noRun = sectionLegendScale('mean', null);
-  const zeroCams = sectionLegendScale('mean', 0);
-  for (const scale of [noSel, noRun, zeroCams]) {
-    assert.equal(scale.caption, 'Coverage fraction');
-    assert.deepEqual(scale.ticks.map((t) => t.label), ['0', '0.25', '0.5', '0.75', '1']);
-    assert.deepEqual(scale.ticks.map((t) => t.pos), [0, 0.25, 0.5, 0.75, 1]);
-  }
-});
-
-test('sectionLegendScale: blind shows a 0..100% share scale regardless of camera count', () => {
-  const scale = sectionLegendScale('blind', 10);
-  assert.equal(scale.caption, 'Blind-voxel share');
-  assert.deepEqual(scale.ticks.map((t) => t.label), ['0%', '50%', '100%']);
-  assert.deepEqual(scale.ticks.map((t) => t.pos), [0, 0.5, 1]);
-});
-
-test('sectionLegendScale: coverage aggregations show whole camera counts, 0..N', () => {
-  for (const agg of ['mean', 'max', 'min'] as const) {
-    const scale = sectionLegendScale(agg, 8);
-    assert.equal(scale.caption, 'Cameras seeing voxel');
-    // N=8 → step 1 → every integer 0..8
-    assert.deepEqual(scale.ticks.map((t) => t.label), ['0', '1', '2', '3', '4', '5', '6', '7', '8']);
-    // Count k sits at position k/N (linear), first at 0, last at 1.
-    assert.equal(scale.ticks[0].pos, 0);
-    assert.equal(scale.ticks[scale.ticks.length - 1].pos, 1);
-    assert.ok(Math.abs(scale.ticks[4].pos - 0.5) < 1e-9);
-  }
-});
-
-test('sectionLegendScale: adaptive step keeps ~5-9 ticks and always includes 0 and N', () => {
-  for (const n of [1, 2, 4, 7, 10, 15, 50, 100, 128]) {
-    const scale = sectionLegendScale('mean', n);
-    const labels = scale.ticks.map((t) => Number(t.label));
-    assert.equal(labels[0], 0, `N=${n} starts at 0`);
-    assert.equal(labels[labels.length - 1], n, `N=${n} ends at N`);
-    assert.ok(scale.ticks.length <= 10, `N=${n} not overcrowded (${scale.ticks.length} ticks)`);
-    // Labels are whole numbers, strictly increasing, correctly positioned.
-    for (let i = 0; i < scale.ticks.length; i++) {
-      assert.ok(Number.isInteger(labels[i]), `N=${n} label ${labels[i]} is integer`);
-      assert.ok(Math.abs(scale.ticks[i].pos - labels[i] / n) < 1e-9, `N=${n} tick ${labels[i]} positioned at k/N`);
-      if (i > 0) assert.ok(labels[i] > labels[i - 1], `N=${n} strictly increasing`);
-    }
-  }
-});
-
-test('sectionLegendScale: N=100 uses a nice step of 20', () => {
-  const scale = sectionLegendScale('max', 100);
-  assert.deepEqual(scale.ticks.map((t) => t.label), ['0', '20', '40', '60', '80', '100']);
+test('sectionLegendVisible: shown only when layer visible and clipSectionId references an existing, enabled section', () => {
+  const secs = [{ id: 'sec-1', enabled: true }, { id: 'sec-2', enabled: true }];
+  // Layer on and the (enabled) clip section exists → shown.
+  assert.equal(sectionLegendVisible(true, secs, 'sec-1'), true);
+  // No clip active → hidden even with the layer on and sections present.
+  assert.equal(sectionLegendVisible(true, secs, null), false);
+  // Master Section toggle off → hidden even while a section clips.
+  assert.equal(sectionLegendVisible(false, secs, 'sec-1'), false);
+  // Dangling clipSectionId (no matching section) → hidden.
+  assert.equal(sectionLegendVisible(true, secs, 'ghost'), false);
+  // Clip section exists but is disabled (its heatmap isn't drawn) → hidden.
+  assert.equal(sectionLegendVisible(true, [{ id: 'sec-1', enabled: false }], 'sec-1'), false);
+  // No sections at all → hidden.
+  assert.equal(sectionLegendVisible(true, [], 'sec-1'), false);
 });
 
 test('sectionHeatmapTextureData: obstacle cells are opaque black, transparent cells are alpha 0, colored cells map through Turbo', () => {

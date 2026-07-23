@@ -1,7 +1,9 @@
 /**
- * Section model + column aggregation + colormap + stats (spec §13). Pure data
- * layer — no Three.js here; `sectionGizmos.ts` consumes `SectionCellGrid` /
- * `sectionHeatmapTextureData` to build the renderable plane.
+ * Section model + column aggregation + stats (spec §13). Pure data layer — no
+ * Three.js here; `sectionGizmos.ts` consumes `SectionCellGrid` /
+ * `sectionHeatmapTextureData` to build the renderable plane. The shared Turbo
+ * colormap and the legend-scale builders live in `heatmapLegend.ts`; this module
+ * imports `turboColormap` for the heatmap texture and re-uses it there only.
  *
  * Like `probeVisibility.ts`, this reads the **retained `ChunkResult`s of the most
  * recent completed run** (a third stream consumer alongside the overlay and the
@@ -11,6 +13,7 @@
 import { accessor, type ChunkResult, type Vec3, type VoxelAccessor, type WorkspaceGrid } from '@linkervision/camera-coverage-sdk';
 import { chunkLocalForGlobalIndex } from './probeVisibility.ts';
 import { coverageFraction, popcount32 } from './coverageOverlay.ts';
+import { turboColormap } from './heatmapLegend.ts';
 import type { MarkedFilter } from './samplingVolumes.ts';
 
 export type SectionOrientation = 'horizontal' | 'vertical-x' | 'vertical-z';
@@ -479,113 +482,21 @@ export function cellDisplayValue(cell: SectionCellStats, aggregation: SectionAgg
   }
 }
 
-// --- Turbo-style colormap (spec §13.5): dark blue (0) through cyan, green,
-// yellow, orange, to red (1). Piecewise-linear over a fixed set of control
-// points rather than a fitted polynomial, so the curve is exact-by-construction
-// and easy to verify (see test/sectionHeatmap.test.ts). -----------------------
-const TURBO_STOPS: [number, number, number][] = [
-  [0.19, 0.07, 0.23], // 0.00 — dark blue/violet
-  [0.16, 0.40, 0.85], // 0.14 — blue
-  [0.14, 0.65, 0.86], // 0.29 — cyan
-  [0.17, 0.82, 0.56], // 0.43 — teal-green
-  [0.52, 0.86, 0.27], // 0.57 — green
-  [0.86, 0.80, 0.20], // 0.71 — yellow
-  [0.97, 0.55, 0.17], // 0.86 — orange
-  [0.62, 0.09, 0.06], // 1.00 — dark red
-];
-
-function clamp01(x: number): number {
-  return Math.max(0, Math.min(1, x));
-}
-
-/** CSS `linear-gradient` string over the same control points, for the legend bar (spec §13.6). */
-export function turboCssGradient(): string {
-  const n = TURBO_STOPS.length - 1;
-  const stops = TURBO_STOPS.map(([r, g, b], i) => {
-    const pct = (i / n) * 100;
-    return `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}) ${pct}%`;
-  });
-  return `linear-gradient(to right, ${stops.join(', ')})`;
-}
-
-// --- Legend scale (spec §13.6): the colorbar's Turbo gradient is fixed, but its
-// tick labels + caption read in the units the selected section's aggregation
-// encodes — a camera count for mean/max/min, a percentage for blind, or the
-// plain coverage fraction as a fallback. Value→color is always the same linear
-// 0..1 Turbo mapping; only the labels change. Pure (no React) so the tick math
-// is unit-testable (see test/sectionHeatmap.test.ts). --------------------------
-
-/** One legend tick: its label and its fractional position (0..1) along the bar. */
-export interface LegendTick {
-  label: string;
-  /** Position along the colorbar, 0 (left) .. 1 (right). */
-  pos: number;
-}
-
-export interface LegendScale {
-  caption: string;
-  ticks: LegendTick[];
-}
-
-/** "Nice" step (1,2,5,10,…) for `count` camera-count ticks yielding ~5–9 labels. */
-function niceCameraStep(count: number): number {
-  const rawStep = count / 8; // aim for at most ~8 intervals
-  const nice = [1, 2, 5, 10, 20, 25, 50, 100];
-  for (const s of nice) if (s >= rawStep) return s;
-  return nice[nice.length - 1];
-}
-
-const FRACTION_TICKS = [0, 0.25, 0.5, 0.75, 1];
-
 /**
- * Legend caption + tick labels for the section colorbar (spec §13.6). Camera-count
- * and blind scales require a section selected (`aggregation != null`) *and* a
- * completed run (`cameraCount != null && > 0`); otherwise the scale falls back to
- * the plain coverage fraction `0..1`.
+ * Whether the floating section-heatmap legend is shown (spec §2.2, §13.6): the
+ * master **Section** layer is visible *and* `clipSectionId` references an existing,
+ * **enabled** section that is currently clipping the scene (§13.9). The `enabled`
+ * check ties the legend to a heatmap that is actually drawn — a section's heatmap
+ * plane renders only when the master toggle is on and that section is enabled
+ * (§13.5) — and the existence check guarantees `sections` is non-empty. Purely
+ * presentational — it never affects `compute()` or the heatmaps themselves.
  */
-export function sectionLegendScale(
-  aggregation: SectionAggregation | null,
-  cameraCount: number | null,
-): LegendScale {
-  if (aggregation != null && cameraCount != null && cameraCount > 0) {
-    if (aggregation === 'blind') {
-      return {
-        caption: 'Blind-voxel share',
-        ticks: [0, 0.5, 1].map((f) => ({ label: `${Math.round(f * 100)}%`, pos: f })),
-      };
-    }
-    // mean / max / min — camera count 0..N at an adaptive integer step. Coverage
-    // fraction maps linearly to color, so count k sits at position k / N.
-    const n = cameraCount;
-    const step = niceCameraStep(n);
-    const counts: number[] = [];
-    for (let k = 0; k <= n; k += step) counts.push(k);
-    const last = counts[counts.length - 1];
-    if (last !== n) {
-      // Ensure N is the final label; drop the penultimate tick if it would crowd it.
-      if (n - last < step) counts.pop();
-      counts.push(n);
-    }
-    return {
-      caption: 'Cameras seeing voxel',
-      ticks: counts.map((k) => ({ label: String(k), pos: k / n })),
-    };
-  }
-  return {
-    caption: 'Coverage fraction',
-    ticks: FRACTION_TICKS.map((f) => ({ label: String(f), pos: f })),
-  };
-}
-
-/** Turbo-style colormap: value 0..1 -> RGB components 0..1 (spec §13.5). */
-export function turboColormap(t: number): [number, number, number] {
-  const x = clamp01(t) * (TURBO_STOPS.length - 1);
-  const i0 = Math.min(TURBO_STOPS.length - 2, Math.floor(x));
-  const i1 = i0 + 1;
-  const f = x - i0;
-  const a = TURBO_STOPS[i0];
-  const b = TURBO_STOPS[i1];
-  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+export function sectionLegendVisible(
+  sectionsVisible: boolean,
+  sections: readonly Pick<Section, 'id' | 'enabled'>[],
+  clipSectionId: string | null,
+): boolean {
+  return sectionsVisible && clipSectionId !== null && sections.some((s) => s.id === clipSectionId && s.enabled);
 }
 
 /**

@@ -352,38 +352,63 @@ structural. A dangling id (deleted section / stale import) resolves to no clip
 (`sceneFile.ts`/`handleDeleteSection` coerce to `null`). Independent of heatmap visibility;
 never triggers `compute()`.
 
-## Section legend floats over the viewport, gated on layer + section presence
+## Bottom-right legend is dual-purpose: section legend, else coverage-overlay legend
 
-Behavior in [`../specs/spec.md`](../specs/spec.md) §2.2/§13.6. `SectionHeatmapControls`
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.2/§13.6/§9. `HeatmapLegend`
 renders as a floating `.viewport-legend` overlay at the viewport bottom-right (a third
-overlay beside the two top toolbars, §2.4) rather than as a right-sidebar panel, and is
-shown only when `sectionsVisible && sections.length > 0`. **Why:** the legend describes
-the on-scene heatmaps, so it reads better docked to the viewport than buried in the
-sidebar's scroll; gating on the master toggle keeps the legend and the heatmap layer
-appearing/disappearing together, and the extra `sections.length > 0` guard stops a
-meaningless `0..1` fallback legend from floating over the **default empty scene**
-(which starts with `sectionsVisible = true` but no sections). It stays an opaque
-`.panel` card (plus a drop shadow to lift it off the 3D scene) rather than a translucent
-HUD, for consistency with every other panel and guaranteed readability over bright cells.
+overlay beside the two top toolbars, §2.4) rather than as a right-sidebar panel, and
+shows **one of two legends, or nothing**:
+- **Section legend** when `sectionLegendVisible(sectionsVisible, sections, clipSectionId)`
+  holds — the master toggle is on **and** `clipSectionId` references an existing,
+  **enabled** section (§13.9). Turbo bar; scale is selection-driven (§13.6).
+- **Coverage-overlay legend** when the section legend is *not* shown **and** the coverage
+  overlay is visible (`overlayOptions.visible`, §9) — the overlay's hue-intensity ramp
+  (coverage mode) or solid swatch (blind-spots mode) via `overlayLegendScale(hue, mode)`.
+
+**Why:** the widget always describes whatever coverage visualization is actually on
+screen — the clipped section heatmap when you're inspecting a slice, otherwise the voxel
+overlay — and docks to the viewport (not the sidebar scroll) since it annotates the 3D
+scene. The section gate depends on the **global `clipSectionId` state, not on the clip
+UI** (the `SectionPanel` need not be open — the state persists across selection), and its
+**`enabled`** check aligns the section legend with what is drawn: a section's heatmap
+plane renders only when the master toggle is on **and** that section is enabled
+(`sectionGizmos.ts`), so a disabled clip section shows no section legend (the coverage
+legend may still take over). Resolving the id to a **real** section (rather than merely
+`clipSectionId != null`) guards a dangling clip id from a malformed scene import. The
+coverage legend must reflect the overlay's **hue-intensity** appearance (§9.2), not the
+Turbo colormap — which is why the gradient rides on `LegendScale` and `HeatmapLegend`
+is a dumb renderer; in blind-spots mode intensity is fixed, so it shows a solid swatch
+with no fraction scale rather than lying with a `0..1` ramp. Content is otherwise
+presentational — the gates never touch `compute()`. It stays an opaque `.panel` card
+(plus a drop shadow to lift it off the 3D scene) rather than a translucent HUD, for
+consistency with every other panel and guaranteed readability over bright cells.
 
 ## Section legend labels track the selected section's aggregation
 
-Behavior in [`../specs/spec.md`](../specs/spec.md) §13.5/§13.6. The section colorbar
-is a fixed Turbo gradient (value→color is always the linear `0..1` mapping), but its
-tick labels and caption are derived at render time from the *selected* section:
-`sectionLegendScale(aggregation, cameraCount)` in `sectionHeatmap.ts` returns
-`{caption, ticks:[{label, pos}]}` — a **camera count** `0..N` for `mean`/`max`/`min`
-(N = the retained run's enabled-camera count, i.e. the coverage-fraction denominator;
-count `k` sits at position `k/N` because the mapping is linear), a **percentage** for
-`blind`, or the plain coverage **fraction** as a fallback when no section is selected
-or no run has completed. Camera-count ticks use an adaptive "nice" step (1/2/5/10/…)
-targeting ~5–9 labels, always including 0 and N. **Why:** users read the heatmap as
-"how many cameras see this," not an abstract 0..1 — but only the coverage aggregations
-map to a count, so the scale is aggregation-aware rather than a single global relabel.
-The tick math is a pure function (no React) so it is unit-tested directly
-(`test/sectionHeatmap.test.ts`); the component only positions the returned ticks.
-Labels are positioned absolutely along the bar (not flex `space-between`) since an
-adaptive step can leave the final gap uneven.
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.5/§13.6. The colorbar is a
+fixed Turbo gradient (value→color is always the linear `0..1` mapping), but its tick
+labels and caption are derived at render time in **one of two modes**, split into two
+pure builders that both return `{caption, ticks:[{label, pos}]}`:
+- `sectionLegendScale(aggregation, cameraCount)` — **section mode**: a **camera count**
+  `0..N` for `mean`/`max`/`min` (N = the retained run's enabled-camera count, i.e. the
+  coverage-fraction denominator; count `k` sits at position `k/N` because the mapping is
+  linear), or a **percentage** for `blind`. It delegates to `coverageLegendScale()` when
+  `N` is unknown (no aggregation / no run yet).
+- `coverageLegendScale()` — **coverage mode**: the plain coverage **fraction** `0..1`.
+
+Both live in **`heatmapLegend.ts`** (not `sectionHeatmap.ts`), and the caller (App)
+picks the mode — section scale when a section is selected, coverage scale otherwise.
+**Why the split & the module:** the widget serves two conceptually different scales
+("how many cameras see this" vs. an abstract `0..1` coverage fraction); folding both
+into a section-named function/module read as section-only and hid the coverage case, so
+the generic colorbar (`turboColormap`, the scale builders, `LegendScale`) now lives in a
+neutrally-named module and the component (`HeatmapLegend`) is a dumb renderer. Only the
+coverage aggregations map to a count, so section mode is aggregation-aware rather than a
+single global relabel. Camera-count ticks use an adaptive "nice" step (1/2/5/10/…)
+targeting ~5–9 labels, always including 0 and N. The tick math is pure (no React) so it
+is unit-tested directly (`test/heatmapLegend.test.ts`); the component only positions the
+returned ticks. Labels are positioned absolutely along the bar (not flex
+`space-between`) since an adaptive step can leave the final gap uneven.
 
 ## "% of full" denominator comes from full-volume sampling, not the run
 
@@ -563,14 +588,14 @@ cached per chunk id within a store (`chunkLocalForGlobalIndex`, shared with
 
 ## Turbo-style colormap: control points, not a fitted polynomial
 
-**Decision:** `turboColormap` (`sectionHeatmap.ts`) is a piecewise-linear
+**Decision:** `turboColormap` (`heatmapLegend.ts`) is a piecewise-linear
 interpolation over 8 hand-picked RGB control points (dark blue → cyan → green →
 yellow → orange → dark red), not Google's published degree-5 polynomial
 approximation of the real Turbo colormap. **Why:** the polynomial's exact
 coefficients weren't reliably reproducible from memory, and shipping wrong
 constants under the "Turbo" name risked a colormap that silently didn't match
 its own description (dark blue at 0, red at 1) at the endpoints. The control-point
-version is exact-by-construction and cheap to verify (`test/sectionHeatmap.test.ts`
+version is exact-by-construction and cheap to verify (`test/heatmapLegend.test.ts`
 checks the exact endpoint colors). **Trade-off:** not pixel-identical to Google's
 Turbo, but satisfies the spec's requirement (a single global perceptual colormap,
 dark blue → red, visually distinct from the black used for invalid cells).

@@ -17,10 +17,12 @@ import {
   axisMapping,
   defaultSection,
   sectionClipBand,
+  sectionLegendVisible,
   SectionHeatmapStore,
   type Section,
   type SectionCellGrid,
 } from './scene/sectionHeatmap.ts';
+import { coverageLegendScale, overlayLegendScale, sectionLegendScale } from './scene/heatmapLegend.ts';
 import { CoverageOverlay, DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
 import { SamplingVolumeGizmoSet } from './scene/samplingVolumeGizmos.ts';
 import {
@@ -82,7 +84,7 @@ import { OverlayControls } from './ui/OverlayControls.tsx';
 import { ViewportLayerMenu } from './ui/ViewportLayerMenu.tsx';
 import { ViewSelector } from './ui/ViewSelector.tsx';
 import { DEFAULT_VIEW, type ViewId } from './scene/viewCameras.ts';
-import { SectionHeatmapControls } from './ui/SectionHeatmapControls.tsx';
+import { HeatmapLegend } from './ui/HeatmapLegend.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
 import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
 import { RunBar } from './ui/RunBar.tsx';
@@ -1372,14 +1374,27 @@ export function App() {
               onToggleZones={() => setZonesVisible((v) => !v)}
             />
           </div>
-          {sectionsVisible && sections.length > 0 && (
-            <div className="viewport-legend">
-              <SectionHeatmapControls
-                aggregation={selectedSection?.aggregation ?? null}
-                cameraCount={selectedSection ? (sectionCellGrids.get(selectedSection.id)?.cameraIds.length ?? null) : null}
-              />
-            </div>
-          )}
+          {(() => {
+            // The bottom-right legend shows the section legend when an enabled section
+            // is clipping (§13.6), else the coverage-overlay legend when the overlay is
+            // visible (§9); hidden when neither applies.
+            const sectionLegend = sectionLegendVisible(sectionsVisible, sections, clipSectionId);
+            const coverageLegend = !sectionLegend && overlayOptions.visible;
+            if (!sectionLegend && !coverageLegend) return null;
+            const scale = sectionLegend
+              ? selectedSection
+                ? sectionLegendScale(
+                    selectedSection.aggregation,
+                    sectionCellGrids.get(selectedSection.id)?.cameraIds.length ?? null,
+                  )
+                : coverageLegendScale()
+              : overlayLegendScale(overlayOptions.overlayHue, overlayOptions.mode);
+            return (
+              <div className="viewport-legend">
+                <HeatmapLegend scale={scale} />
+              </div>
+            );
+          })()}
         </div>
       </div>
       <div className="sidebar">

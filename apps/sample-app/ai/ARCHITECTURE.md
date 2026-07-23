@@ -139,12 +139,22 @@ default" — see DECISIONS.md).
 - `coverageOverlay.ts` — maps `ChunkResult` leaves → volumetric voxels per mode;
   hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`).
 - `sectionHeatmap.ts` — `Section` model, retained-chunk store, cross-chunk column
-  aggregation, Turbo-style colormap, texture-data + stats generation, aggregation-aware
-  legend scale (`sectionLegendScale`, §13.6), plus
+  aggregation, texture-data + stats generation, the section-legend visibility
+  predicate (`sectionLegendVisible`, §13.6/§13.9), plus
   `sectionPlaneRotation`/`collapseAxisNormalSign` (the plane-orientation math
   `sectionGizmos.ts` renders with — kept here, not there, so it's unit-tested;
   see DECISIONS.md's "mirrored along its in-plane Z axis" entry for why that
-  mattered). Pure data layer — no Three.js.
+  mattered). Imports `turboColormap` from `heatmapLegend.ts` for the texture. Pure
+  data layer — no Three.js.
+- `heatmapLegend.ts` — the **generic** colorbar/legend layer: the shared Turbo
+  colormap (`turboColormap`/`turboCssGradient`) and three pure legend-scale builders,
+  each returning a `LegendScale` (`{caption, ticks, gradient}`): `sectionLegendScale`
+  (section mode: camera-count / blind-share, Turbo), `coverageLegendScale` (Turbo plain
+  fraction — the section legend's fallback), and `overlayLegendScale(hue, mode)` (the
+  coverage overlay's **hue-intensity ramp** / solid blind-spots swatch, §9.1/§9.2). The
+  gradient rides on `LegendScale` so the component stays dumb. Imports only the
+  `SectionAggregation` and `OverlayMode` *types*, so runtime deps stay one-way. Pure —
+  no React, no Three.js.
 - `sectionGizmos.ts` — per-section heatmap plane (`DataTexture`) + min/max bound
   outlines + axis-constrained TransformControls target; consumes
   `sectionHeatmap.ts`'s output (including its rotation/sign math), owns no
@@ -201,11 +211,18 @@ default" — see DECISIONS.md).
   own popover open/close (outside-click + Escape) and layer glyphs; App wires each
   checkbox to the backing visibility state. "Zones" drives the sampling-volume
   gizmos' `group.visible` — purely visual, independent of `useZones`.
-- `SectionHeatmapControls.tsx` — the shared Turbo legend/colorbar; its caption +
-  tick labels adapt to the selected section's aggregation (camera count / percent /
-  fraction) via `sectionLegendScale` (§13.6). Rendered as a **floating `.viewport-legend`
-  overlay at the viewport bottom-right** (not in the sidebar), gated on
-  `sectionsVisible && sections.length > 0` (§2.2).
+- `HeatmapLegend.tsx` — the **presentational** legend/colorbar: it renders whatever
+  `LegendScale` it is handed (caption + `scale.gradient` + ticks), owning no mode
+  logic. Rendered as a **floating `.viewport-legend` overlay at the viewport
+  bottom-right** (not in the sidebar). App drives it as a **dual-purpose** widget:
+  - **section legend** when `sectionLegendVisible(sectionsVisible, sections,
+    clipSectionId)` — layer visible *and* `clipSectionId` references an existing,
+    **enabled** clipping section (§13.6, §13.9), i.e. that section's heatmap is drawn;
+    scale is `sectionLegendScale(...)` (or `coverageLegendScale()` when nothing is
+    selected);
+  - else the **coverage-overlay legend** when the overlay is visible
+    (`overlayOptions.visible`, §9) — scale is `overlayLegendScale(hue, mode)`;
+  - hidden when neither applies.
 - `SamplingVolumeControls.tsx` — the zone tool block (useZones toggle, Generate,
   zone/box level sliders, marked-voxels readout), above StatsPanel.
 - `StatsPanel.tsx` — coverage summary + compute/render backend readout (reflects

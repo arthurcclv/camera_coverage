@@ -98,9 +98,9 @@ body {
   z-index: 1;
 }
 
-/* Floating section-heatmap legend (spec §2.2, §13.6): the SectionHeatmapControls
-   .panel card pinned to the viewport bottom-right, lifted off the 3D scene with a
-   drop shadow. Shown only when the section layer is visible and a section exists. */
+/* Floating section-heatmap legend (spec §2.2, §13.6): the HeatmapLegend .panel
+   card pinned to the viewport bottom-right, lifted off the 3D scene with a drop
+   shadow. Shown only when the section layer is visible and an enabled section clips. */
 .viewport-legend {
   position: absolute;
   bottom: 12px;

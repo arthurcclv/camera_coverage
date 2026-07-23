@@ -73,6 +73,7 @@ apps/sample-app/
       volumetric.ts        voxel volumetric renderer (§2.3, volumetric_rendering.md)
       coverageOverlay.ts   maps ChunkResult coverage → volumetric voxels (§9)
       sectionHeatmap.ts    retained ChunkResults → per-section column aggregate + heatmap texture + stats (§13)
+      heatmapLegend.ts     Turbo colormap + hue ramp + legend-scale builders (section camera-count/blind + coverage-fraction + coverage-overlay hue modes) (§13.5, §13.6, §9)
       sectionGizmos.ts     per-section heatmap plane + faint bound outlines + transform target (§13.5, §13.8)
       sceneTree.ts         scene hierarchy node model + derivation (camera + probe + section + zone/volume) (§5.5)
       samplingVolumes.ts   zone/volume model + OBB math + BVH seeding + marked filter + per-zone aggregation (sampling_volumes.md)
@@ -90,7 +91,7 @@ apps/sample-app/
       OverlayControls.tsx  overlay mode + intensity scale + resolution slider
       ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones visibility checkboxes (§2.4)
       ViewSelector.tsx     top-middle View dropdown: Perspective/Top/Front/Right camera selection (§2.4)
-      SectionHeatmapControls.tsx  global section colormap + legend (§13.6)
+      HeatmapLegend.tsx    legend renderer (caption + gradient + ticks); caller picks section (Turbo) vs coverage-overlay (hue) scale (§13.6, §9)
       SamplingVolumeControls.tsx  zone tool: useZones toggle, generate, levels, marked readout (sampling_volumes.md §6.3)
       StatsPanel.tsx       coverage summary readout
       SectionStatsPanel.tsx  selected-section coverage stats (§13.7)
@@ -115,13 +116,14 @@ The app is a **three-column** flex layout (desktop only, §1):
   chosen split is remembered across reloads (localStorage).
 - **Center** — the 3D viewport with its overlaid toolbars and top-middle **View
   selector** (§2.4); a passive **orientation-axis triad** at its **bottom-left**;
-  and, at the **bottom-right**, the floating **section-heatmap legend**
-  (`SectionHeatmapControls`), shown only when the section layer is visible and at
-  least one section exists (§13.6).
+  and, at the **bottom-right**, the floating **heatmap legend** (rendered by
+  `HeatmapLegend`) — the **section-heatmap legend** when the section layer is visible
+  and an enabled section is clipping, otherwise the **coverage-overlay legend** when
+  the coverage overlay is visible; hidden when neither applies (§13.6, §13.9, §9).
 - **Right sidebar** — the run/results controls: `RunBar`, `OverlayControls`,
   `SamplingVolumeControls` (the zone tool, above the stats since it governs the
   coverage denominator), `StatsPanel`, and (when a section is selected)
-  `SectionStatsPanel` (§13.7). The section-heatmap legend is **not** here — it floats
+  `SectionStatsPanel` (§13.7). The heatmap legend is **not** here — it floats
   over the viewport (see Center, §13.6).
 
 Both side columns share the same fixed width and are not collapsible; only the
@@ -151,7 +153,7 @@ Overlays sit over the 3D viewport itself (independent of the side panels): a
 **top-left** transform toolbar, a **top-middle** View selector, and a
 **top-right** layer-visibility dropdown. The viewport also carries a passive
 **orientation-axis indicator** at its bottom-left and the floating
-section-heatmap legend at its bottom-right (§13.6):
+heatmap legend at its bottom-right (§13.6):
 
 - **Top-left** — transform controls for the selected entity (§5.2):
   - Transform **mode** toggle: **Move** / **Rotate** / **Scale** icon buttons,
@@ -605,6 +607,10 @@ chord-length math, compositing, tests) lives in
 visualization**: which voxels are fed to the renderer and how coverage data maps to
 each voxel's `intensity` and `color`. Domain terms are defined in §16. A separate,
 flat per-slab coverage visualization — the **section heatmap** — is described in §13.
+The overlay's own **legend** — a hue-intensity ramp (coverage mode) or a solid swatch
+(blind-spots mode), reflecting §9.1/§9.2 rather than the Turbo colormap — is the
+coverage-overlay mode of the shared bottom-right legend widget (§13.6); it shows when
+no section legend is up and the overlay is visible.
 
 Voxels are extracted from streamed `ChunkResult`s using
 `accessor(result).forEachLeaf((min, size, mask, valid) => …)` and fed into the
@@ -995,37 +1001,58 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
   The button is **highlighted** while this section is the one clipping (§14.1
   `clipSectionId`); the reveal-range slider is **always shown** (it has no visible effect
   unless this section is the clipping one).
-- **Global controls** — the section-heatmap **legend / colorbar**
-  (`SectionHeatmapControls`) holds the shared **colormap** (a fixed Turbo gradient).
-  It is a **floating overlay pinned to the bottom-right of the viewport** (§2.2) — a
-  third viewport overlay alongside the two top toolbars (§2.4), an **opaque card with
-  a drop shadow** so it reads over the 3D scene. To stay compact over the scene it
-  shows **only** the adaptive caption, the colorbar, and its numeric ticks — **no
-  block title and no "Colormap: Turbo" label** (the colormap is fixed, so it needs no
-  on-screen name). It is shown **only when the section layer is visible *and* at least
-  one section exists** (the master **Section** toggle, §2.4, is on **and** `sections`
-  is non-empty); otherwise it is hidden, so it never floats over an empty scene. Its
-  visibility is purely presentational and never affects `compute()` or the heatmaps
-  themselves. The colorbar's **numeric scale and caption adapt to the
-  currently-selected section's aggregation** so the numbers read in the units the
-  heatmap actually encodes (§13.5):
-  - `mean` / `max` / `min` — the scale is a **camera count**, `0` to `N`, where `N`
-    is the enabled-camera count of the **retained run** the selected section's
-    heatmap reflects (the coverage-fraction denominator, §13.3; the same count the
-    per-camera stats decode against). Because coverage fraction maps **linearly** to
-    color, a count `k` sits at colorbar position `k / N`. Labels are **whole camera
-    counts** at an **adaptive step** (a "nice" step — 1, 2, 5, 10, 20, 25, 50, … —
-    chosen to yield ~5–9 roughly evenly-spaced ticks), always including `0` and `N`.
-    Caption: **"Cameras seeing voxel"**.
-  - `blind` — the scale is the **blind-voxel share** as a **percentage**, `0%` to
-    `100%` (ticks `0/50/100` only); camera counts are meaningless here (§13.5).
-    Caption: **"Blind-voxel share"**.
-  - **No section selected, or no `compute()` completed yet** (so `N` is unknown) —
-    the scale falls back to the plain **coverage fraction** `0`..`1`
-    (ticks `0/0.25/0.5/0.75/1`). Caption: **"Coverage fraction"**.
-  The colorbar itself (the Turbo gradient) never changes — only its tick labels and
-  caption do; the recompute/enable rules of §13.4 are unaffected (relabeling is
-  instant and never triggers `compute()`).
+- **Global controls** — the floating bottom-right **legend / colorbar** (rendered by
+  the generic `HeatmapLegend`, which draws whatever caption, gradient, and ticks it is
+  handed). It is a **floating overlay pinned to the bottom-right of the viewport**
+  (§2.2) — a third viewport overlay alongside the two top toolbars (§2.4), an **opaque
+  card with a drop shadow** so it reads over the 3D scene. To stay compact it shows
+  **only** the caption, the colorbar, and its numeric ticks — **no block title and no
+  colormap name**. It is **purely presentational**: it never affects `compute()` or the
+  heatmaps/overlay themselves. The widget shows **one of two legends** (or nothing), all
+  built by the pure builders in `heatmapLegend.ts`:
+
+  - **Section legend** — shown **when the section layer is visible *and* an enabled
+    section is currently clipping the scene** (the master **Section** toggle, §2.4, is
+    on **and** `clipSectionId` (§13.9, §14.1) references an existing section whose
+    **`enabled`** flag is set — which also guarantees `sections` is non-empty). The
+    `enabled` requirement ties the legend to a heatmap that is actually drawn: the
+    clipping section's heatmap plane renders only when the master toggle is on **and**
+    that section is enabled (§13.5), so a disabled clip section shows no legend. Its
+    colorbar is the **fixed Turbo gradient** (§13.5); its **numeric scale and caption
+    adapt to the currently-selected section's aggregation** (built by
+    `sectionLegendScale`) so the numbers read in the units the heatmap encodes:
+    - `mean` / `max` / `min` — the scale is a **camera count**, `0` to `N`, where `N`
+      is the enabled-camera count of the **retained run** the selected section's
+      heatmap reflects (the coverage-fraction denominator, §13.3; the same count the
+      per-camera stats decode against). Because coverage fraction maps **linearly** to
+      color, a count `k` sits at colorbar position `k / N`. Labels are **whole camera
+      counts** at an **adaptive step** (a "nice" step — 1, 2, 5, 10, 20, 25, 50, … —
+      chosen to yield ~5–9 roughly evenly-spaced ticks), always including `0` and `N`.
+      Caption: **"Cameras seeing voxel"**.
+    - `blind` — the scale is the **blind-voxel share** as a **percentage**, `0%` to
+      `100%` (ticks `0/50/100` only); camera counts are meaningless here (§13.5).
+      Caption: **"Blind-voxel share"**.
+    - **No section selected, or no `compute()` completed yet** (so `N` is unknown) —
+      the scale falls back to the plain **coverage fraction** `0`..`1`
+      (ticks `0/0.25/0.5/0.75/1`, still over the Turbo gradient; built by
+      `coverageLegendScale`). Caption: **"Coverage fraction"**.
+    For the section legend the Turbo gradient never changes — only its tick labels and
+    caption do.
+
+  - **Coverage-overlay legend** — shown **when the section legend is *not* shown *and*
+    the coverage overlay is visible** (`overlayOptions.visible`, §9). Instead of the
+    Turbo colormap it reflects the overlay's **own appearance** (§9.1, §9.2), built by
+    `overlayLegendScale(overlayHue, mode)`:
+    - **Coverage** mode — a **transparent → full-hue intensity ramp** in the current
+      overlay hue (intensity = coverage fraction, §9.1). Caption: **"Coverage
+      fraction"**; ticks `0/0.25/0.5/0.75/1`.
+    - **Blind spots** mode — a **solid full-hue swatch** (blind voxels draw at fixed
+      full intensity, so there is no fraction scale, §9.1). Caption: **"Blind spots"**;
+      no numeric ticks.
+
+  When neither applies (no section legend **and** the overlay hidden) the widget is
+  hidden, so it never floats over a scene with nothing to describe. Switching or
+  relabeling between the two is instant and never triggers `compute()` (§13.4).
 - **Enabled.** Each section's hierarchy row has an **enabled checkbox**
   ("Enable/Disable section") toggling that one heatmap on/off (the section analog of
   the camera enable checkbox, §5.4, and the unified `onToggleEnabled` handler, but
