@@ -4,17 +4,12 @@
  * CameraConfig[] / Probe[] / overlay-option state and pushes it into the scene.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import * as THREE from 'three';
 import { WorkspaceGrid, type CameraConfig, type CoverageSummary, type Vec3 } from '@linkervision/camera-coverage-sdk';
 
-import { createViewport, type RenderBackend, type Viewport } from './scene/viewport.ts';
-import { CameraGizmoSet } from './scene/cameraGizmos.ts';
-import { ProbeGizmoSet } from './scene/probeGizmos.ts';
+import { type RenderBackend } from './scene/viewport.ts';
 import { cameraLabel, toCameraConfig, type SceneCamera } from './cameras/camera.ts';
 import { ProbeVisibility, type Probe, type ProbeVisibilityResult } from './scene/probeVisibility.ts';
-import { SectionGizmoSet } from './scene/sectionGizmos.ts';
 import {
-  axisMapping,
   defaultSection,
   sectionClipBand,
   sectionLegendVisible,
@@ -23,8 +18,7 @@ import {
   type SectionCellGrid,
 } from './scene/sectionHeatmap.ts';
 import { coverageLegendScale, overlayLegendScale, sectionLegendScale } from './scene/heatmapLegend.ts';
-import { CoverageOverlay, DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
-import { SamplingVolumeGizmoSet } from './scene/samplingVolumeGizmos.ts';
+import { DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
 import {
   buildSceneBvh,
   DEFAULT_BOX_LEVEL,
@@ -32,7 +26,6 @@ import {
   defaultZoneName,
   extractZonesAndVolumes,
   makeMarkedFilter,
-  minVolumeSize,
   regionsFromVolumes,
   ZoneCoverageStore,
   type SamplingVolume,
@@ -42,7 +35,6 @@ import {
   DEFAULT_TRANSFORM_SPACE,
   spaceIconKind,
   spaceTooltip,
-  threeSpace,
   toggleSpace,
   type TransformSpace,
 } from './scene/transformSpace.ts';
@@ -55,18 +47,17 @@ import {
   duplicateZone,
   nextFreeId,
 } from './scene/entityDuplication.ts';
-import { selectionAfterClick, type PointerPos, type Selection } from './scene/viewportSelection.ts';
+import { type Selection } from './scene/viewportSelection.ts';
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
 import type { GeometryObject } from './scene/geometryModel.ts';
 import {
   buildStaticGeometrySync,
-  clipBandPlanes,
   disposeGeometryBuild,
-  setGeometryClippingPlanes,
   type GeometryBuild,
 } from './scene/sceneGeometryBuild.ts';
 import { exportSceneToDirectory, importSceneFromDirectory } from './scene/sceneIO.ts';
+import { SceneView, type SceneViewState, type TransformChange } from './scene/sceneView/sceneView.ts';
 import { useEngine } from './engine/useEngine.ts';
 
 import {
@@ -327,12 +318,7 @@ export function App() {
   }, []);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const viewportRef = useRef<Viewport | null>(null);
-  const gizmosRef = useRef<CameraGizmoSet | null>(null);
-  const probeGizmosRef = useRef<ProbeGizmoSet | null>(null);
-  const sectionGizmosRef = useRef<SectionGizmoSet | null>(null);
-  const volumeGizmosRef = useRef<SamplingVolumeGizmoSet | null>(null);
-  const overlayRef = useRef<CoverageOverlay | null>(null);
+  const viewRef = useRef<SceneView | null>(null);
   // Mirrors `room` for the mount effect's async IIFE (spec §2.3), which reads
   // whatever geometry is current by the time the viewport finishes setting up,
   // and for `applyScene`, which disposes the outgoing build.
@@ -357,14 +343,8 @@ export function App() {
   volumesRef.current = volumes;
   const zonesRef = useRef(zones);
   zonesRef.current = zones;
-  const enabledZoneIdsRef = useRef(enabledZoneIds);
-  enabledZoneIdsRef.current = enabledZoneIds;
   const samplingActiveRef = useRef(samplingActive);
   samplingActiveRef.current = samplingActive;
-  const voxelSizeRef = useRef(voxelSize);
-  voxelSizeRef.current = voxelSize;
-  const markedFilterRef = useRef(markedFilter);
-  markedFilterRef.current = markedFilter;
   // Set whenever the sampled region set changes (volume add/delete/transform,
   // `zoneId`, non-empty zone deletion, `useZones`), so the next run re-applies
   // `setSampling` (`sampling_volumes.md` §8). Cleared inside `handleRun`.
@@ -374,18 +354,6 @@ export function App() {
   const bvhRef = useRef<{ room: GeometryBuild; bvh: Bvh } | null>(null);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
-  const overlayOptionsRef = useRef(overlayOptions);
-  overlayOptionsRef.current = overlayOptions;
-  const gizmosVisibleRef = useRef(gizmosVisible);
-  gizmosVisibleRef.current = gizmosVisible;
-  const zonesVisibleRef = useRef(zonesVisible);
-  zonesVisibleRef.current = zonesVisible;
-  const sectionsVisibleRef = useRef(sectionsVisible);
-  sectionsVisibleRef.current = sectionsVisible;
-  const transformSpaceRef = useRef(transformSpace);
-  transformSpaceRef.current = transformSpace;
-  const engineFlaggedRef = useRef(engine.state.flaggedCameras);
-  engineFlaggedRef.current = engine.state.flaggedCameras;
 
   const estimatedVoxelCount = useMemo(() => {
     const [x0, y0, z0] = room.worldMin;
@@ -419,276 +387,74 @@ export function App() {
   );
   const enabledUnionSummary = zoneCoverage?.enabledUnion ?? null;
 
-  // --- Three.js scene: created once, torn down on unmount ------------------
-  // WebGPURenderer.init() is async (spec §2.3), so setup runs in an async IIFE
-  // and teardown is deferred until (or cancels) that setup.
+  // Apply a resolved transform edit emitted by SceneView after a drag (spec
+  // §12.4, §13.8). Mirrors the old per-kind `onObjectChange` setters; whether an
+  // edit marks the result stale is governed by which state it touches (a probe or
+  // section never does — spec §12.5, §13.4 — via the stale effects below).
+  const applyTransformChange = useCallback((change: TransformChange) => {
+    switch (change.kind) {
+      case 'camera':
+        setCameras((prev) => prev.map((c) => (c.id === change.id ? { ...c, position: change.position, rotation: change.rotation } : c)));
+        break;
+      case 'probe':
+        setProbes((prev) => prev.map((p) => (p.id === change.id ? { ...p, position: change.position } : p)));
+        break;
+      case 'volume':
+        setVolumes((prev) => prev.map((v) => (v.id === change.id ? { ...v, position: change.position, rotation: change.rotation, size: change.size } : v)));
+        break;
+      case 'section':
+        setSections((prev) =>
+          prev.map((s) =>
+            s.id === change.id
+              ? { ...s, min: change.min, max: change.max, minA: change.minA, maxA: change.maxA, minB: change.minB, maxB: change.maxB }
+              : s,
+          ),
+        );
+        break;
+    }
+  }, []);
+
+  // --- SceneView: the imperative Three.js bridge, created once (spec §2.3).
+  // `WebGPURenderer.init()` is async, so creation runs in an async IIFE with a
+  // cancel guard. App pushes state in through one `sync()` effect below and gets
+  // resolved selection/transform events back via the registered callbacks; the
+  // ~21 mirror refs and the fan-out effects this replaced now live in SceneView.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     let cancelled = false;
-    let teardown: (() => void) | null = null;
-
     (async () => {
-      const viewport = await createViewport(container);
+      const view = await SceneView.create(container);
       if (cancelled) {
-        viewport.dispose();
+        view.dispose();
         return;
       }
-      const gizmos = new CameraGizmoSet();
-      const probeGizmos = new ProbeGizmoSet();
-      const sectionGizmos = new SectionGizmoSet();
-      const volumeGizmos = new SamplingVolumeGizmoSet();
-      const overlay = new CoverageOverlay();
-      // The geometry group itself is added by the dedicated sync effect below
-      // (keyed on `[room, viewportReady]`) once this flips true, so the initial
-      // add and every later import/reset swap go through one code path.
-      viewport.scene.add(gizmos.group);
-      viewport.scene.add(probeGizmos.group);
-      viewport.scene.add(sectionGizmos.group);
-      viewport.scene.add(volumeGizmos.group);
-      viewport.scene.add(overlay.object);
-
-      viewportRef.current = viewport;
-      gizmosRef.current = gizmos;
-      probeGizmosRef.current = probeGizmos;
-      sectionGizmosRef.current = sectionGizmos;
-      volumeGizmosRef.current = volumeGizmos;
-      overlayRef.current = overlay;
-      setRenderBackend(viewport.renderBackend);
+      view.onSelect((next) => setSelection(next));
+      view.onTransform(applyTransformChange);
+      viewRef.current = view;
+      setRenderBackend(view.renderBackend);
       setViewportReady(true);
-
-      // Apply any option/camera/probe/section state that changed before setup completed.
-      overlay.setOptions(overlayOptionsRef.current);
-      overlay.setMarkedFilter(markedFilterRef.current);
-      const sel = selectionRef.current;
-      gizmos.update(camerasRef.current, sel?.kind === 'camera' ? sel.id : null, engineFlaggedRef.current);
-      gizmos.group.visible = gizmosVisibleRef.current;
-      probeGizmos.update(probesRef.current, sel?.kind === 'probe' ? sel.id : null);
-      volumeGizmos.update(
-        volumesRef.current,
-        sel?.kind === 'volume' ? sel.id : null,
-        enabledZoneIdsRef.current,
-      );
-      volumeGizmos.group.visible = zonesVisibleRef.current;
-      sectionGizmos.update(sectionsRef.current, new Map(), sectionsVisibleRef.current, false);
-      viewport.transformControls.setSpace(threeSpace(transformSpaceRef.current));
-      attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, volumeGizmos, sel);
-
-      const raycaster = new THREE.Raycaster();
-      const pointer = new THREE.Vector2();
-      // A genuine click selects the picked gizmo (or deselects on a miss); the
-      // click that fires at the end of an orbit/TransformControls drag leaves
-      // the selection unchanged (spec §5.2, see scene/viewportSelection.ts).
-      const down: PointerPos = { x: 0, y: 0 };
-      const onPointerDown = (ev: PointerEvent) => {
-        down.x = ev.clientX;
-        down.y = ev.clientY;
-      };
-      const onClick = (ev: MouseEvent) => {
-        const rect = viewport.renderer.domElement.getBoundingClientRect();
-        pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-        pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-        raycaster.setFromCamera(pointer, viewport.activeCamera);
-        // Nearest hit across cameras, probes, and volumes (spec §5.2, §12.4;
-        // `sampling_volumes.md` §5). Hidden camera gizmos are not clickable (spec
-        // §2.4). Zones/sections have no viewport body.
-        const candidates: { sel: Selection; distance: number }[] = [];
-        const camHit = gizmosVisibleRef.current ? gizmos.pickHit(raycaster) : null;
-        if (camHit) candidates.push({ sel: { kind: 'camera', id: camHit.id }, distance: camHit.distance });
-        const probeHit = probeGizmos.pickHit(raycaster);
-        if (probeHit) candidates.push({ sel: { kind: 'probe', id: probeHit.id }, distance: probeHit.distance });
-        const volumeHit = volumeGizmos.pickHit(raycaster);
-        if (volumeHit) candidates.push({ sel: { kind: 'volume', id: volumeHit.id }, distance: volumeHit.distance });
-        const hit: Selection = candidates.length
-          ? candidates.reduce((best, c) => (c.distance < best.distance ? c : best)).sel
-          : null;
-        setSelection((prev) => selectionAfterClick(prev, hit, down, { x: ev.clientX, y: ev.clientY }));
-      };
-      viewport.renderer.domElement.addEventListener('pointerdown', onPointerDown);
-      viewport.renderer.domElement.addEventListener('click', onClick);
-
-      const onObjectChange = () => {
-        const sel = selectionRef.current;
-        if (!sel) return;
-        if (sel.kind === 'camera') {
-          const readback = gizmos.readTransform(sel.id);
-          if (!readback) return;
-          gizmos.syncHelper(sel.id);
-          setCameras((prev) =>
-            prev.map((c) => (c.id === sel.id ? { ...c, position: readback.position, rotation: readback.rotation } : c)),
-          );
-        } else if (sel.kind === 'probe') {
-          // Moving a probe never marks results stale (spec §12.5).
-          const position = probeGizmos.readPosition(sel.id);
-          if (!position) return;
-          setProbes((prev) => prev.map((p) => (p.id === sel.id ? { ...p, position } : p)));
-        } else if (sel.kind === 'volume') {
-          // Translate/rotate/scale a volume; scale is floored per axis (≥ a voxel)
-          // so a box never degenerates (`sampling_volumes.md` §5). Marks stale
-          // (§4.2) via the volumes effect below.
-          const t = volumeGizmos.readTransform(sel.id);
-          if (!t) return;
-          const minSize = minVolumeSize(voxelSizeRef.current);
-          const size: Vec3 = [
-            Math.max(minSize, t.size[0]),
-            Math.max(minSize, t.size[1]),
-            Math.max(minSize, t.size[2]),
-          ];
-          setVolumes((prev) => prev.map((v) => (v.id === sel.id ? { ...v, position: t.position, rotation: t.rotation, size } : v)));
-        } else if (sel.kind === 'section') {
-          // Free 3-axis translate (spec §13.8): the target's position is the box's
-          // new center; thickness/width/height stay fixed (each bound-pair moves as
-          // a unit). Never marks results stale (spec §13.4).
-          const current = sectionsRef.current.find((s) => s.id === sel.id);
-          if (!current) return;
-          const { collapseAxis, axisA, axisB } = axisMapping(current.orientation);
-          const mid = sectionGizmos.readAxisPosition(sel.id, collapseAxis);
-          const centerA = sectionGizmos.readAxisPosition(sel.id, axisA);
-          const centerB = sectionGizmos.readAxisPosition(sel.id, axisB);
-          if (mid === undefined || centerA === undefined || centerB === undefined) return;
-          const halfThickness = (current.max - current.min) / 2;
-          const halfA = (current.maxA - current.minA) / 2;
-          const halfB = (current.maxB - current.minB) / 2;
-          setSections((prev) =>
-            prev.map((s) =>
-              s.id === sel.id
-                ? {
-                    ...s,
-                    min: mid - halfThickness,
-                    max: mid + halfThickness,
-                    minA: centerA - halfA,
-                    maxA: centerA + halfA,
-                    minB: centerB - halfB,
-                    maxB: centerB + halfB,
-                  }
-                : s,
-            ),
-          );
-        }
-      };
-      viewport.transformControls.addEventListener('objectChange', onObjectChange);
-
-      teardown = () => {
-        viewport.renderer.domElement.removeEventListener('pointerdown', onPointerDown);
-        viewport.renderer.domElement.removeEventListener('click', onClick);
-        viewport.transformControls.removeEventListener('objectChange', onObjectChange);
-        overlay.dispose();
-        gizmos.dispose();
-        probeGizmos.dispose();
-        sectionGizmos.dispose();
-        volumeGizmos.dispose();
-        viewport.dispose();
-        viewportRef.current = null;
-        gizmosRef.current = null;
-        probeGizmosRef.current = null;
-        sectionGizmosRef.current = null;
-        volumeGizmosRef.current = null;
-        overlayRef.current = null;
-        setViewportReady(false);
-      };
     })();
 
     return () => {
       cancelled = true;
-      teardown?.();
+      viewRef.current?.dispose();
+      viewRef.current = null;
+      setViewportReady(false);
     };
-    // Created once (spec §2.3); geometry/camera/probe/section state changes are
-    // pushed into the running viewport by the effects below instead of re-running
-    // this setup.
-  }, []);
+    // Created once (spec §2.3); state changes are pushed into the running view by
+    // the sync effect below instead of re-running this setup.
+  }, [applyTransformChange]);
 
-  // --- keep the geometry group in sync with `room` (import/reset, spec §14.4):
-  // owns adding/removing it from the scene so a geometry swap never tears down
-  // the viewport itself, only the geometry within it. ------------------------
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-    viewport.scene.add(room.group);
-    return () => {
-      viewport.scene.remove(room.group);
-    };
-  }, [room, viewportReady]);
-
-  // --- clip cross-section (spec §13.9): clip scene geometry to the band of the
-  // section named by `clipSectionId` (at most one; independent of selection).
-  // Never triggers compute(). Re-runs on drag (`sections`) and on geometry swap
-  // (`room`), which rebuilds the ClippingGroup the planes attach to. -----------
-  useEffect(() => {
+  // --- clip band along the clipping section's normal (spec §13.9), or null.
+  // Pure and derived: recomputed on clip selection, section drag, or geometry
+  // swap, then applied to the geometry by SceneView.sync (which rebuilds the
+  // ClippingGroup on a room swap). Never triggers compute(). -------------------
+  const clipBand = useMemo(() => {
     const clipped = clipSectionId ? sections.find((s) => s.id === clipSectionId) : undefined;
-    const band = clipped ? sectionClipBand(clipped, room.worldMin, room.worldMax) : null;
-    setGeometryClippingPlanes(room, band ? clipBandPlanes(band) : []);
+    return clipped ? sectionClipBand(clipped, room.worldMin, room.worldMax) : null;
   }, [clipSectionId, sections, room]);
-
-  // --- push camera/probe state into gizmos ---------------------------------
-  useEffect(() => {
-    gizmosRef.current?.update(cameras, selectedCameraId, engine.state.flaggedCameras);
-  }, [cameras, selectedCameraId, engine.state.flaggedCameras]);
-
-  useEffect(() => {
-    probeGizmosRef.current?.update(probes, selectedProbeId);
-  }, [probes, selectedProbeId]);
-
-  useEffect(() => {
-    sectionGizmosRef.current?.update(sections, sectionCellGrids, sectionsVisible, stale);
-  }, [sections, sectionCellGrids, sectionsVisible, stale]);
-
-  // --- push volume state into gizmos; dim volumes of disabled zones (spec §5) --
-  useEffect(() => {
-    volumeGizmosRef.current?.update(volumes, selectedVolumeId, enabledZoneIds);
-  }, [volumes, selectedVolumeId, enabledZoneIds]);
-
-  // --- push the marked-set filter into the overlay (spec §7.3): a pure
-  // client-side re-filter of the retained leaves, no recompute -----------------
-  useEffect(() => {
-    overlayRef.current?.setMarkedFilter(markedFilter);
-  }, [markedFilter]);
-
-  // --- TransformControls attachment + mode per selection kind (spec §12.4, §13.8) ---
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    const gizmos = gizmosRef.current;
-    const probeGizmos = probeGizmosRef.current;
-    const sectionGizmos = sectionGizmosRef.current;
-    const volumeGizmos = volumeGizmosRef.current;
-    if (!viewport || !gizmos || !probeGizmos || !sectionGizmos || !volumeGizmos) return;
-    attachForSelection(viewport, gizmos, probeGizmos, sectionGizmos, volumeGizmos, selection);
-  }, [selection]);
-
-  useEffect(() => {
-    // A probe is a point and a section slides along one axis — both translate
-    // only (spec §12.4, §13.8). Scale is a volume-only mode (`sampling_volumes.md`
-    // §5); on a non-volume selection it falls back to translate.
-    let mode: 'translate' | 'rotate' | 'scale' = transformMode;
-    if (selection?.kind === 'probe' || selection?.kind === 'section') mode = 'translate';
-    else if (transformMode === 'scale' && selection?.kind !== 'volume') mode = 'translate';
-    viewportRef.current?.transformControls.setMode(mode);
-  }, [transformMode, selection]);
-
-  useEffect(() => {
-    viewportRef.current?.transformControls.setSpace(threeSpace(transformSpace));
-  }, [transformSpace]);
-
-  // --- push overlay option state into the overlay ---------------------------
-  useEffect(() => {
-    overlayRef.current?.setOptions(overlayOptions);
-  }, [overlayOptions]);
-
-  // --- gizmos visibility toggle (viewport top-right toolbar, spec §2.4) ------
-  useEffect(() => {
-    if (gizmosRef.current) gizmosRef.current.group.visible = gizmosVisible;
-  }, [gizmosVisible]);
-
-  // --- active view (top-middle View selector, spec §2.4). Transient viewport
-  // state: defaults to Perspective and is never persisted to the scene file. ---
-  useEffect(() => {
-    viewportRef.current?.setActiveView(activeView);
-  }, [activeView, viewportReady]);
-
-  // --- zones (sampling-volume gizmos) visibility toggle (spec §2.4) ----------
-  useEffect(() => {
-    if (volumeGizmosRef.current) volumeGizmosRef.current.group.visible = zonesVisible;
-  }, [zonesVisible]);
 
   const enabledCameraCount = cameras.filter((c) => c.enabled).length;
 
@@ -721,28 +487,62 @@ export function App() {
     setProbeQueries(map);
   }, [probes, masksVersion, probeVisibility]);
 
-  // --- sightlines from the selected probe to each camera that sees it (§12.4) -
-  useEffect(() => {
-    const probeGizmos = probeGizmosRef.current;
-    if (!probeGizmos) return;
-    if (selection?.kind !== 'probe') {
-      probeGizmos.setSightlines(null);
-      return;
-    }
+  // --- sightlines from the selected probe to each camera that sees it (§12.4).
+  // Derived (recomputed on probe selection, its query, or a camera move) and
+  // applied by SceneView.sync; a null result clears them. ---------------------
+  const sightlines = useMemo<{ from: Vec3; targets: Vec3[] } | null>(() => {
+    if (selection?.kind !== 'probe') return null;
     const probe = probes.find((p) => p.id === selection.id);
     const query = probeQueries.get(selection.id);
-    if (!probe || !query || query.status !== 'ok') {
-      probeGizmos.setSightlines(null);
-      return;
-    }
+    if (!probe || !query || query.status !== 'ok') return null;
     const targets: Vec3[] = [];
     query.cameraIds.forEach((id, n) => {
       if (!query.visible[n]) return;
       const cam = cameras.find((c) => c.id === id);
       if (cam) targets.push(cam.position);
     });
-    probeGizmos.setSightlines(probe.position, targets);
+    return { from: probe.position, targets };
   }, [selection, probeQueries, probes, cameras]);
+
+  // --- the SceneView snapshot (spec §2.4, §5, §9, §12.4, §13): one immutable
+  // bundle of everything the scene reflects. Every field is stable React state or
+  // useMemo output, so SceneView's per-field diff runs each imperative op on
+  // exactly the input it used to key its own effect on. -----------------------
+  const sceneViewState = useMemo<SceneViewState>(
+    () => ({
+      room,
+      cameras,
+      probes,
+      sections,
+      volumes,
+      selection,
+      flaggedCameras: engine.state.flaggedCameras,
+      sectionCellGrids,
+      enabledZoneIds,
+      markedFilter,
+      overlayOptions,
+      transformMode,
+      transformSpace,
+      activeView,
+      gizmosVisible,
+      zonesVisible,
+      sectionsVisible,
+      stale,
+      voxelSize,
+      clipBand,
+      sightlines,
+    }),
+    [
+      room, cameras, probes, sections, volumes, selection, engine.state.flaggedCameras,
+      sectionCellGrids, enabledZoneIds, markedFilter, overlayOptions, transformMode,
+      transformSpace, activeView, gizmosVisible, zonesVisible, sectionsVisible, stale,
+      voxelSize, clipBand, sightlines,
+    ],
+  );
+
+  useEffect(() => {
+    viewRef.current?.sync(sceneViewState);
+  }, [sceneViewState, viewportReady]);
 
   // Unified enable/disable for the hierarchy row checkboxes (spec §5.4, §13, §7.3):
   // a camera (compute participation), a section (heatmap on/off), or a zone
@@ -1015,7 +815,7 @@ export function App() {
       setStale(false);
       setInitializedVoxelSize(null);
       initializedRoomRef.current = null;
-      overlayRef.current?.reset();
+      viewRef.current?.resetCoverage();
       probeVisibility.clear();
       sectionHeatmapStore.clear();
       zoneCoverageStore.clear();
@@ -1124,14 +924,14 @@ export function App() {
     probeVisibility.reset(grid, enabledCameras.map((c) => c.id));
     sectionHeatmapStore.reset(grid, enabledCameras.map((c) => c.id));
     zoneCoverageStore.reset(enabledCameras.map((c) => c.id));
-    overlayRef.current?.reset();
+    viewRef.current?.resetCoverage();
     const result = await engine.compute({
       mode: 1,
       onChunkDone: (_chunkId, chunkResult) => {
         // A newer scene may have replaced (and cleared) these stores mid-stream;
         // don't let a stale chunk repopulate them (spec §14.4).
         if (gen !== runGenerationRef.current) return;
-        overlayRef.current?.addChunk(chunkResult);
+        viewRef.current?.addCoverageChunk(chunkResult);
         probeVisibility.addChunk(chunkResult);
         sectionHeatmapStore.addChunk(chunkResult);
         zoneCoverageStore.addChunk(chunkResult);
@@ -1443,31 +1243,4 @@ export function App() {
       </div>
     </div>
   );
-}
-
-/**
- * Attach TransformControls to the selected entity's target, or detach (spec
- * §12.4, §13.8; `sampling_volumes.md` §5). A zone is a container with no viewport
- * body, so selecting one detaches.
- */
-function attachForSelection(
-  viewport: Viewport,
-  gizmos: CameraGizmoSet,
-  probeGizmos: ProbeGizmoSet,
-  sectionGizmos: SectionGizmoSet,
-  volumeGizmos: SamplingVolumeGizmoSet,
-  selection: Selection,
-): void {
-  const target =
-    selection?.kind === 'camera'
-      ? gizmos.getAttachTarget(selection.id)
-      : selection?.kind === 'probe'
-        ? probeGizmos.getAttachTarget(selection.id)
-        : selection?.kind === 'section'
-          ? sectionGizmos.getAttachTarget(selection.id)
-          : selection?.kind === 'volume'
-            ? volumeGizmos.getAttachTarget(selection.id)
-            : undefined;
-  if (target) viewport.transformControls.attach(target);
-  else viewport.transformControls.detach();
 }
