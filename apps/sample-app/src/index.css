@@ -596,6 +596,49 @@ button.tree-caret:focus-visible {
   color: #fff;
 }
 
+/* Viewport top-middle View selector (spec §2.4): Perspective/Top/Front/Right. */
+.viewport-toolbar-center {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+}
+.view-menu-anchor {
+  position: relative;
+}
+.view-menu-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.view-menu-label {
+  font-variant-numeric: tabular-nums;
+}
+.view-menu {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 4px;
+  min-width: 140px;
+}
+.view-menu .view-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.view-menu-check {
+  display: inline-flex;
+  justify-content: center;
+  width: 12px;
+  color: #4d9dff;
+  font-weight: 700;
+}
+.view-menu-row.selected {
+  color: #fff;
+}
+
 /* Probe rows + panel (spec §5.5, §12.3). */
 .tree-row .dot.probe-dot {
   background: #ff9d3f;

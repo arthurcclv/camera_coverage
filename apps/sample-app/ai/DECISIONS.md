@@ -6,6 +6,50 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Viewport View selector: four persistent cameras, ortho views locked, framing fit-once, state transient
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4. The viewport gained a
+top-middle **View selector** (Perspective / Top / Front / Right) alongside the
+existing single perspective camera.
+
+**Resolution:** the top/front/right views are **true `OrthographicCamera`s**
+(parallel projection — the CAD/DCC convention), not the perspective camera
+snapped to an axis. `viewport.ts` holds all four as **persistent camera
+objects**; `setActiveView` re-points the OrbitControls (`.object`),
+`TransformControls.camera`, and — via a new `activeCamera` getter — the picking
+raycaster in `App.tsx`. Ortho views are **locked axis-aligned**: orbit disabled,
+left-drag remapped to pan, wheel dollies `camera.zoom`. Each view **auto-fits the
+scene bounds once** on first activation, then keeps its own pan/zoom (persistent
+objects make this free); a resize re-derives each ortho frustum's left/right from
+a stored base half-height so remembered framing keeps its scale. Editing stays
+enabled in every view. The auto-fit unions only the **finite, non-empty**
+top-level scene objects and skips the TransformControls helper — otherwise the
+coverage overlay's InstancedMesh (a non-finite box while it holds no instances,
+pre-run) or the gizmo's huge guide-line geometry would poison the ortho frustum
+and render the scene as an invisible speck; the grid keeps a sane frame when no
+other geometry is present. A passive **orientation gizmo** — the Three.js
+`ViewHelper` (labeled X/Y/Z axis balls, with the negative-axis sprites swapped
+for hollow colored rings) — is pinned bottom-left with `.camera` reassigned to
+the active view each frame; its `handleClick` is intentionally never wired, so it
+stays read-only (no click-to-snap that would fight the locked-ortho design).
+`ViewHelper.render` handles the WebGPU viewport y-origin itself. The bundled
+addon types lag the r16x runtime (reassignable `camera`, `location` corner,
+WebGPU `render`), so the instance is cast to the members used.
+
+**Why a pure `viewCameras.ts` split.** The fitting geometry (axis conventions,
+frustum-from-bounds, aspect re-derivation) lives in `scene/viewCameras.ts`,
+importing core `three` so it unit-tests under `node --test`
+(`test/viewCameras.test.ts`), while `viewport.ts` keeps the `three/webgpu`
+renderer/DOM/controls glue — mirroring the `transformSpace.ts` / `viewport.ts`
+split. **Why transient.** The selected view is viewport UI state, like the layer
+toggles — it is **not** written to `scene.json` and resets to Perspective on
+load, so the scene-file schema stays focused on scene data (no format bump).
+Keyboard shortcuts and an interactive view-cube were considered and deferred
+(the dropdown + a passive triad cover the request without a keymap or a control
+that fights the locked-ortho design).
+
+---
+
 ## Camera enabled state moved onto the entity (from a side `disabledIds` set) so it persists
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.4, §14.1, §14.3. Camera

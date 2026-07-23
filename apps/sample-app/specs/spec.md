@@ -66,7 +66,7 @@ apps/sample-app/
       useEngine.ts         WorkerClient lifecycle + init/loadScene/compute wrappers
     scene/
       buildRoom.ts         room + boxes → { positions, indices } + Three.js meshes
-      viewport.ts          WebGPURenderer (async init) + orbit/transform controls, render loop
+      viewport.ts          WebGPURenderer (async init) + orbit/transform controls, render loop; four view cameras (perspective + top/front/right ortho) + bottom-left orientation-axis triad (§2.4)
       cameraGizmos.ts      per-camera frustum gizmos
       probeGizmos.ts       per-probe markers + selected-probe sightlines (§12.4)
       probeVisibility.ts   retained ChunkResults + world-point → camera-mask lookup (§12.2)
@@ -89,6 +89,7 @@ apps/sample-app/
       SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones umbrella, enable/visibility toggle, add "+" menu, duplicate/delete context menu) (§5.5)
       OverlayControls.tsx  overlay mode + intensity scale + resolution slider
       ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones visibility checkboxes (§2.4)
+      ViewSelector.tsx     top-middle View dropdown: Perspective/Top/Front/Right camera selection (§2.4)
       SectionHeatmapControls.tsx  global section colormap + legend (§13.6)
       SamplingVolumeControls.tsx  zone tool: useZones toggle, generate, levels, marked readout (sampling_volumes.md §6.3)
       StatsPanel.tsx       coverage summary readout
@@ -112,9 +113,11 @@ The app is a **three-column** flex layout (desktop only, §1):
   never shows a nested second scrollbar. Both sides keep a minimum height. Until
   first dragged the detail panel uses its natural height; once dragged, the
   chosen split is remembered across reloads (localStorage).
-- **Center** — the 3D viewport with its overlaid toolbars (§2.4) and, at the
-  **bottom-right**, the floating **section-heatmap legend** (`SectionHeatmapControls`),
-  shown only when the section layer is visible and at least one section exists (§13.6).
+- **Center** — the 3D viewport with its overlaid toolbars and top-middle **View
+  selector** (§2.4); a passive **orientation-axis triad** at its **bottom-left**;
+  and, at the **bottom-right**, the floating **section-heatmap legend**
+  (`SectionHeatmapControls`), shown only when the section layer is visible and at
+  least one section exists (§13.6).
 - **Right sidebar** — the run/results controls: `RunBar`, `OverlayControls`,
   `SamplingVolumeControls` (the zone tool, above the stats since it governs the
   coverage denominator), `StatsPanel`, and (when a section is selected)
@@ -144,8 +147,11 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
 
 ### 2.4 Viewport toolbar
 
-Two toolbars overlay the 3D viewport itself (independent of the side panels; the
-viewport also carries the floating section-heatmap legend at its bottom-right, §13.6):
+Overlays sit over the 3D viewport itself (independent of the side panels): a
+**top-left** transform toolbar, a **top-middle** View selector, and a
+**top-right** layer-visibility dropdown. The viewport also carries a passive
+**orientation-axis indicator** at its bottom-left and the floating
+section-heatmap legend at its bottom-right (§13.6):
 
 - **Top-left** — transform controls for the selected entity (§5.2):
   - Transform **mode** toggle: **Move** / **Rotate** / **Scale** icon buttons,
@@ -162,6 +168,33 @@ viewport also carries the floating section-heatmap legend at its bottom-right, �
     glyph for Global) and the tooltip names the current space and the action
     (e.g. "Local space — click for global"). Defaults to **Local**. Always
     enabled, independent of selection, and shared by both Move and Rotate.
+- **Top-middle** — a **View selector** dropdown that chooses which camera the
+  viewport renders through. The button shows the current view's name and a
+  chevron and opens a menu (same interaction model as the layer dropdown below —
+  it closes on an outside click, **Escape**, or re-clicking the button) listing
+  the four views with a checkmark on the active one. Labeled **View** (not
+  "Camera", which is reserved for the coverage cameras of §5 and the **Cameras**
+  layer toggle below):
+  - **Perspective** — the default `PerspectiveCamera` (a 3/4 orbit view) with
+    full orbit + pan + zoom. Selected on load.
+  - **Top / Front / Right** — three **orthographic** cameras (true parallel
+    projection) fixed to the world axes: **Top** looks down −Y (screen-up −Z),
+    **Front** looks along −Z from +Z (up +Y), **Right** looks along −X from +X
+    (up +Y). In an orthographic view orbit/rotation is **locked** — the view
+    stays a true axis-aligned elevation — and only **pan** (drag) and **zoom**
+    (wheel, dollying the ortho frustum) are available.
+
+  Each view is a persistent camera with its **own remembered framing**: the
+  first time a view is selected its frustum/position is auto-fit to the scene
+  bounds and centered; afterward it keeps whatever pan/zoom the user left it at,
+  so returning to a view restores its last framing (the auto-fit does not re-run,
+  and is not re-applied when scene geometry later changes). Selection and the
+  transform gizmos (§5.2) stay fully **enabled in every view** — switching
+  re-points the orbit controls, `TransformControls`, and the picking raycaster
+  at the active camera — so the orthographic views can be used for precise
+  axis-aligned placement. The selected view is **transient viewport state**, like
+  the layer toggles: it is **not** written to the scene file (§14) and resets to
+  Perspective on every load.
 - **Top-right** — a single **eye icon button** that opens a **layer-visibility
   dropdown**: a checklist of the viewport-only layers that can clutter or obscure
   the scene. Each row is a checkbox (checked = layer visible) beside the layer's
@@ -189,6 +222,13 @@ viewport also carries the floating section-heatmap legend at its bottom-right, �
 
 The eye button renders as an icon button in a top-right toolbar strip and is
 highlighted ("active") while the dropdown is open.
+
+A passive **orientation gizmo** is pinned to the viewport's **bottom-left** and
+continuously reflects the active camera's orientation. It is the Three.js
+`ViewHelper` — labeled **X / Y / Z** axis balls (filled colored balls with a
+letter on the positive axes, hollow colored rings on the negative axes) over the
+scene. It is **read-only**: view changes happen only through the top-middle View
+selector, so the helper's click-to-snap is intentionally left unwired.
 
 **Two independent "WebGPU"s.** This render backend is distinct from the SDK's WebGPU
 **compute** backend (§3.2): the renderer draws on the main thread, the compute backend

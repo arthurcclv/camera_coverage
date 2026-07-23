@@ -80,6 +80,8 @@ import { ProbePanel } from './ui/ProbePanel.tsx';
 import { SectionPanel } from './ui/SectionPanel.tsx';
 import { OverlayControls } from './ui/OverlayControls.tsx';
 import { ViewportLayerMenu } from './ui/ViewportLayerMenu.tsx';
+import { ViewSelector } from './ui/ViewSelector.tsx';
+import { DEFAULT_VIEW, type ViewId } from './scene/viewCameras.ts';
 import { SectionHeatmapControls } from './ui/SectionHeatmapControls.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
 import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
@@ -265,6 +267,9 @@ export function App() {
   // group-sync effect below can add the initial geometry once the viewport
   // actually exists (see the mount effect further down).
   const [viewportReady, setViewportReady] = useState(false);
+  // Active viewport view (top-middle View selector, spec §2.4). Transient UI
+  // state — not persisted to the scene file; resets to Perspective on load.
+  const [activeView, setActiveView] = useState<ViewId>(DEFAULT_VIEW);
   // Scene-file import/export state (spec §14.7, §14.8).
   const [sceneError, setSceneError] = useState<string | null>(null);
   const [sceneIOBusy, setSceneIOBusy] = useState(false);
@@ -494,7 +499,7 @@ export function App() {
         const rect = viewport.renderer.domElement.getBoundingClientRect();
         pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
         pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-        raycaster.setFromCamera(pointer, viewport.camera);
+        raycaster.setFromCamera(pointer, viewport.activeCamera);
         // Nearest hit across cameras, probes, and volumes (spec §5.2, §12.4;
         // `sampling_volumes.md` §5). Hidden camera gizmos are not clickable (spec
         // §2.4). Zones/sections have no viewport body.
@@ -680,6 +685,12 @@ export function App() {
   useEffect(() => {
     if (gizmosRef.current) gizmosRef.current.group.visible = gizmosVisible;
   }, [gizmosVisible]);
+
+  // --- active view (top-middle View selector, spec §2.4). Transient viewport
+  // state: defaults to Perspective and is never persisted to the scene file. ---
+  useEffect(() => {
+    viewportRef.current?.setActiveView(activeView);
+  }, [activeView, viewportReady]);
 
   // --- zones (sampling-volume gizmos) visibility toggle (spec §2.4) ----------
   useEffect(() => {
@@ -1354,6 +1365,9 @@ export function App() {
             >
               {spaceIconKind(transformSpace) === 'box' ? <BoxIcon /> : <GlobeIcon />}
             </button>
+          </div>
+          <div className="viewport-toolbar-center">
+            <ViewSelector activeView={activeView} onSelect={setActiveView} />
           </div>
           <div className="viewport-toolbar-right">
             <ViewportLayerMenu
