@@ -210,9 +210,10 @@ section-heatmap legend at its bottom-right (§13.6):
     off hides every section's heatmap; on shows each **enabled** section per its own
     per-section enabled checkbox (§13.6), parallel to how **Cameras** relates
     to per-camera state. Defaults to visible.
-  - **Cameras** — shows/hides all camera frustum gizmos (§5.3) at once.
+  - **Cameras** — shows/hides the whole camera layer (§5.3) at once: every
+    camera body plus the selected camera's frustum wireframe.
     Independent of per-camera enable/disable (§5.4): a camera stays
-    enabled/selectable from the camera list while its gizmo is hidden — it's
+    enabled/selectable from the camera list while the layer is hidden — it's
     just not drawn or clickable in the viewport. Defaults to visible.
   - **Zones** — shows/hides all sampling-volume gizmos (`sampling_volumes.md` §5)
     at once. Purely visual and independent of the `useZones` compute setting
@@ -358,17 +359,22 @@ for **both**:
 
 ### 5.3 Frustum gizmos
 
-Each camera renders as a frustum wireframe reflecting its `fov`/`aspect`/`far`, so
-aim and coverage volume are visible. The selected camera's gizmo is highlighted.
-A disabled camera's gizmo is dimmed and its frustum wireframe hidden (§5.4). A
-viewport-level toggle can hide/show all gizmos at once (§2.4).
+Every camera renders as a clickable body (its selection target and TransformControls
+attach point, §5.2), colored to signal its state. **Only the selected camera also
+renders a frustum wireframe** reflecting its `fov`/`aspect`/`far`, so that camera's
+aim and coverage volume are visible; the frustum is highlighted and follows selection
+alone — it is drawn whenever the camera is selected, including a selected *disabled*
+camera (§5.4). A non-selected camera shows only its body, never a frustum, regardless
+of enabled or flagged (`CAMERA_INSIDE_GEOMETRY`) state. A disabled camera's body is
+dimmed (§5.4). A viewport-level toggle can hide/show the whole camera layer at once
+(§2.4).
 
 ### 5.4 Enable / disable
 
 - Each **camera node** in the scene hierarchy (§5.5) has a **checkbox toggle** to
   enable/disable that camera, independent of selection. Toggling doesn't change the
   current selection.
-- Disabled cameras stay in the scene (dimmed gizmo, no frustum wireframe) and keep
+- Disabled cameras stay in the scene (dimmed body) and keep
   their position/rotation/FOV editable, but are **excluded from `setCameras()`**
   passed to the engine, so they don't participate in `compute()` — no coverage
   rate is reported for them and they can't be flagged as `CAMERA_INSIDE_GEOMETRY`.

@@ -55,7 +55,10 @@ export class CameraGizmoSet {
       (body.material as THREE.MeshBasicMaterial).color.setHex(bodyColor);
       body.scale.setScalar(selected ? 1.4 : 1);
       (helper.material as THREE.LineBasicMaterial).color.setHex(helperColor);
-      helper.visible = !disabled;
+      // Frustum wireframe follows selection alone (spec §5.3): only the selected
+      // camera draws one — including a selected *disabled* camera — while every
+      // other camera shows just its (state-colored) body.
+      helper.visible = selected;
       (body.material as THREE.MeshBasicMaterial).opacity = disabled ? 0.3 : 1;
       (body.material as THREE.MeshBasicMaterial).transparent = disabled;
     }

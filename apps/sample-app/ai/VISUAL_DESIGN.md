@@ -54,13 +54,18 @@ status chip.
 | Camera frustum helper (default) | `0x7fb8e6`, opacity 0.85 | |
 | Camera selected (body + helper) | `0xffd23f` (yellow), body scaled ×1.4 | |
 | Camera flagged "inside geometry" | `0xe0524f` (red) | |
-| Camera disabled | body opacity 0.3, helper hidden | |
+| Camera disabled | body opacity 0.3 (frustum still follows selection) | |
 | Probe marker | `0xff9d3f` (amber diamond) | `scene/probeGizmos.ts` |
 | Probe selected | `0xffd23f` | |
 | Sightline (probe → visible camera) | `0x4de08a` (green), opacity 0.9 | spec §12.4 |
 | Sampling-volume box (edges + faint fill) | `0x8bd0c0` (teal) | `scene/samplingVolumeGizmos.ts` |
 | Volume selected / disabled-zone volume | edges `0xffd23f` (yellow) / dimmed to opacity 0.25 | |
 | Coverage overlay fog | user hue, default **red** (hue 0), `hsl(h,100%,50%)` | `scene/coverageOverlay.ts` |
+
+The **frustum wireframe renders for the selected camera only** (spec §5.3); every
+other camera shows just its body dot. So the default (blue `0x7fb8e6`) frustum
+color above is effectively only a fallback — a visible frustum is always the
+selected camera's (yellow, or red if that camera is also flagged).
 
 The overlay is intensity-modulated volumetric fog (a single instanced-cube TSL
 pass), not opaque voxels — see [DECISIONS.md](./DECISIONS.md). Hue is

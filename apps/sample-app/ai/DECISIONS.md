@@ -6,6 +6,28 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Frustum wireframe renders for the selected camera only
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3. Previously every enabled
+camera drew its `CameraHelper` frustum wireframe; with more than a couple of
+cameras the viewport became a thicket of overlapping frustums that obscured the
+scene and the coverage overlay.
+
+**Resolution:** a camera's frustum is visible **iff that camera is selected**. All
+cameras still draw their clickable body sphere (unchanged selection target and
+TransformControls attach point), so viewport click-selection is untouched. The
+whole rule is one predicate — `helper.visible = selected` in
+`scene/cameraGizmos.ts` — replacing the old `helper.visible = !disabled`.
+
+**Why selection alone, not selection-plus-exceptions.** We considered keeping the
+frustum for *disabled* cameras hidden even when selected (old §5.4) and keeping
+*flagged* (`CAMERA_INSIDE_GEOMETRY`) cameras' red frustum always on as a warning.
+Both were rejected in favor of a single rule: selecting a disabled camera *reveals*
+its frustum (you select it precisely to inspect/re-aim it — its body stays dimmed
+so you can still tell it's disabled), and a flagged camera's **red body** carries
+the warning while its frustum, like every other camera's, appears only on
+selection. Fewer exceptions, less clutter, one thing to reason about.
+
 ## Viewport View selector: four persistent cameras, ortho views locked, framing fit-once, state transient
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4. The viewport gained a
