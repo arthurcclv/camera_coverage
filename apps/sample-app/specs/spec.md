@@ -548,7 +548,7 @@ at the `setCameras()` boundary (§8). Rules:
   region-of-interest tool: user-editable oriented boxes grouped into **zones**,
   seeded from the scene BVH, each zone reporting its own coverage results.
 
-> **Companion spec.** The full behavior of sampling volumes & zones — the model,
+> **Companion spec.** The full behavior of sampling zones — the model,
 > BVH seeding, per-zone aggregation, the enabled-zones marked set, and hierarchy/panel
 > integration — lives in [`sampling_volumes.md`](./sampling_volumes.md), which is
 > the source of truth for that feature. The edits it made to this document (this
@@ -1353,7 +1353,7 @@ Sketch:
 
 - Mode 2 (coverage-count thresholding), per-camera coverage isolation view.
 - Height-band sampling regions as a live control. (Box/oriented-box sampling
-  regions grouped into zones **shipped** as sampling volumes & zones —
+  regions grouped into zones **shipped** as sampling zones —
   [`sampling_volumes.md`](./sampling_volumes.md); its §13 lists that feature's own
   out-of-scope items — subtractive volumes, an OBB SDK region, multi-zone
   membership, simultaneous multi-zone overlays, per-zone colors.)

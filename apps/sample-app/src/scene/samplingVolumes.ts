@@ -1,5 +1,5 @@
 /**
- * Sampling volumes & zones (region-of-interest analysis) — `sampling_volumes.md`.
+ * Sampling zones (region-of-interest analysis) — `sampling_volumes.md`.
  *
  * Pure data layer, no Three.js (gizmos live in `samplingVolumeGizmos.ts`). Owns:
  *  - the {@link Zone} / {@link SamplingVolume} entities (§2.1);

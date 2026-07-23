@@ -759,7 +759,7 @@ button.tree-caret:focus-visible {
   }
 }
 
-/* --- Sampling volumes & zones (sampling_volumes.md §4, §5, §6) ------------- */
+/* --- Sampling zones (sampling_volumes.md §4, §5, §6) ------------------------ */
 
 /* Neutral badge (zone reference on the VolumePanel header). */
 .badge.zone {

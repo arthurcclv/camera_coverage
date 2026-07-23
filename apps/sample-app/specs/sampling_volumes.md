@@ -1,4 +1,4 @@
-# Sample App — Sampling Volumes & Zones (BVH-seeded region-of-interest analysis)
+# Sample App — Sampling Zones (BVH-seeded region-of-interest analysis)
 
 The feature spec for the sample app's region-of-interest tool, now **implemented**.
 Companion to [`spec.md`](./spec.md); this document owns the full behavior of the
@@ -222,7 +222,7 @@ overlap — fine, the marked set is a union.
 
 ## 4. Scene hierarchy integration (`spec.md` §5.5)
 
-The "Sampling Volumes" area introduces the first **user-created, selectable
+The "Sampling Zones" area introduces the first **user-created, selectable
 sub-groups** (zones), a small extension to today's auto-derived, passive type
 groups.
 
@@ -351,7 +351,7 @@ The zone's **coverage stats** — the per-zone analog of the §10 stats panel, o
 
 ### 6.3 Global tool controls — `SamplingVolumeControls.tsx` (right sidebar)
 
-A **"Sampling Volumes"** block (above `StatsPanel`, since it governs the coverage
+A **"Sampling Zones"** block (above `StatsPanel`, since it governs the coverage
 denominator):
 
 - **Restrict coverage to zones** — the `useZones` toggle (§2.2), default off.

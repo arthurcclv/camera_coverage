@@ -1,6 +1,6 @@
 /**
  * Global sampling-volume tool controls (`sampling_volumes.md` §6.3): a "Sampling
- * Volumes" block above the StatsPanel (it governs the coverage denominator).
+ * Zones" block above the StatsPanel (it governs the coverage denominator).
  *
  * - **Restrict coverage to zones** — the `useZones` toggle (§2.2), default off.
  * - **Generate from geometry** — re-seeds the whole zone+volume set from the BVH
@@ -33,7 +33,7 @@ export function SamplingVolumeControls(props: SamplingVolumeControlsProps) {
 
   return (
     <div className="panel">
-      <p className="panel-title">Sampling volumes</p>
+      <p className="panel-title">Sampling zones</p>
 
       <label className="checkbox-row">
         <input type="checkbox" checked={useZones} onChange={(e) => props.onUseZonesChange(e.target.checked)} />

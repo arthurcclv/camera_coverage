@@ -424,7 +424,7 @@ enabled-union summaries) and no longer a workspace-full count. **Why:** re-init 
 exactly when the workspace valid count can change (`voxelSize` or geometry), so the
 snapshot is always current, and no separate full-workspace pass is needed.
 
-## Sampling volumes & zones with zero SDK changes
+## Sampling zones with zero SDK changes
 
 Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md). The
 region-of-interest tool (editable oriented boxes grouped into zones, each with its
