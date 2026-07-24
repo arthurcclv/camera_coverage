@@ -786,7 +786,7 @@ export function App() {
     });
     probeVisibility.reset(grid, enabledCameras.map((c) => c.id));
     sectionHeatmapStore.reset(grid, enabledCameras.map((c) => c.id));
-    zoneCoverageStore.reset(enabledCameras.map((c) => c.id));
+    zoneCoverageStore.reset(grid, enabledCameras.map((c) => c.id));
     viewRef.current?.resetCoverage();
     const result = await engine.compute({
       mode: 1,

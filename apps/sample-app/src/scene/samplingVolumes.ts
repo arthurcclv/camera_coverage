@@ -23,6 +23,7 @@ import {
   type SamplingRegion,
   type SceneMesh,
   type Vec3,
+  type WorkspaceGrid,
 } from '@linkervision/camera-coverage-sdk';
 
 // --- Entities (§2.1) ---------------------------------------------------------
@@ -418,8 +419,13 @@ export class ZoneCoverageStore {
   private cameraIds: string[] = [];
   private hasRunFlag = false;
 
-  /** Start retaining a new run's chunks; snapshot its ordered enabled-camera list. */
-  reset(cameraIds: string[]): void {
+  /**
+   * Start retaining a new run's chunks; snapshot its ordered enabled-camera list.
+   * `_grid` is unused (zone coverage decodes chunks by their own origin/dims, not a
+   * grid) but is taken to satisfy the shared `RetainedRun` interface `CoverageRun`
+   * fans out over — see `coverageRun.ts`.
+   */
+  reset(_grid: WorkspaceGrid, cameraIds: string[]): void {
     this.cameraIds = [...cameraIds];
     this.chunks.clear();
     this.hasRunFlag = true;
