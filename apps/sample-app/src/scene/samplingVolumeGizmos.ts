@@ -8,11 +8,16 @@
  * back with no conversion (§5). Volumes of **enabled** zones render normally;
  * volumes of disabled zones are dimmed; the selected volume is highlighted. The
  * fill is **pickable** like camera/probe bodies.
+ *
+ * The keyed entry map, reconcile loop, pickHit, getAttachTarget, and dispose are
+ * the shared `PickableGizmoSet` spine; this file owns the volume entry shape and
+ * its per-frame update.
  */
 import * as THREE from 'three';
 import type { Vec3, Quat } from '@linkervision/camera-coverage-sdk';
 import type { SamplingVolume } from './samplingVolumes.ts';
 import { RenderOrder } from './renderOrder.ts';
+import { PickableGizmoSet } from './gizmoSet.ts';
 
 interface VolumeEntry {
   /** Attach target + transform carrier: position/quaternion/scale == volume's. */
@@ -25,23 +30,13 @@ const EDGE_COLOR = 0x8bd0c0; // teal — distinct from cameras (blue) / probes (
 const SELECTED_EDGE_COLOR = 0xffd23f;
 const FILL_COLOR = 0x8bd0c0;
 
-export class SamplingVolumeGizmoSet {
-  readonly group = new THREE.Group();
-  private entries = new Map<string, VolumeEntry>();
-
+export class SamplingVolumeGizmoSet extends PickableGizmoSet<VolumeEntry> {
   /**
    * Sync the gizmos to the current volumes. A volume renders normally when its
    * zone is in `enabledZoneIds`; volumes of disabled zones are dimmed (§5, §7.3).
    */
   update(volumes: SamplingVolume[], selectedId: string | null, enabledZoneIds: ReadonlySet<string>): void {
-    const seen = new Set<string>();
-    for (const v of volumes) {
-      seen.add(v.id);
-      let entry = this.entries.get(v.id);
-      if (!entry) {
-        entry = this.createEntry(v.id);
-        this.entries.set(v.id, entry);
-      }
+    this.reconcile(volumes, (entry, v) => {
       const { root, fill, edges } = entry;
       root.position.set(...v.position);
       root.quaternion.set(v.rotation[0], v.rotation[1], v.rotation[2], v.rotation[3]);
@@ -54,29 +49,7 @@ export class SamplingVolumeGizmoSet {
       edgeMat.opacity = selected ? 1 : enabled ? 0.85 : 0.25;
       const fillMat = fill.material as THREE.MeshBasicMaterial;
       fillMat.opacity = selected ? 0.18 : enabled ? 0.1 : 0.03;
-    }
-    for (const [id, entry] of this.entries) {
-      if (!seen.has(id)) {
-        this.disposeEntry(entry);
-        this.entries.delete(id);
-      }
-    }
-  }
-
-  /** Nearest hit volume id + its ray distance, or null (§5). */
-  pickHit(raycaster: THREE.Raycaster): { id: string; distance: number } | null {
-    let best: { id: string; distance: number } | null = null;
-    for (const [id, entry] of this.entries) {
-      const hits = raycaster.intersectObject(entry.fill, false);
-      if (hits.length > 0 && (!best || hits[0].distance < best.distance)) {
-        best = { id, distance: hits[0].distance };
-      }
-    }
-    return best;
-  }
-
-  getAttachTarget(id: string): THREE.Object3D | undefined {
-    return this.entries.get(id)?.root;
+    });
   }
 
   /** Read back position/rotation/size after a TransformControls drag (§5). */
@@ -93,12 +66,15 @@ export class SamplingVolumeGizmoSet {
     };
   }
 
-  dispose(): void {
-    for (const entry of this.entries.values()) this.disposeEntry(entry);
-    this.entries.clear();
+  protected attachTargetOf(entry: VolumeEntry): THREE.Object3D {
+    return entry.root;
   }
 
-  private createEntry(id: string): VolumeEntry {
+  protected pickTargetOf(entry: VolumeEntry): THREE.Object3D {
+    return entry.fill;
+  }
+
+  protected createEntry(id: string): VolumeEntry {
     const root = new THREE.Group();
     root.name = id;
 
@@ -123,7 +99,7 @@ export class SamplingVolumeGizmoSet {
     return { root, fill, edges };
   }
 
-  private disposeEntry(entry: VolumeEntry): void {
+  protected disposeEntry(entry: VolumeEntry): void {
     this.group.remove(entry.root);
     entry.fill.geometry.dispose();
     (entry.fill.material as THREE.Material).dispose();

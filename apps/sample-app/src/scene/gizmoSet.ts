@@ -35,6 +35,16 @@ export interface GizmoPicker {
 }
 
 /**
+ * The one capability SceneView needs from any set to drive TransformControls:
+ * the attach target for a selected id. Lets SceneView keep all four sets — the
+ * three pickable ones plus the non-pickable sections — in one attach registry
+ * despite their differing entry generics (`GizmoSet` satisfies it).
+ */
+export interface GizmoAttachable {
+  getAttachTarget(id: string): THREE.Object3D | undefined;
+}
+
+/**
  * A keyed set of Three.js gizmo entries reconciled against the scene. Subclasses
  * own the entry shape `E` and supply the three per-entry primitives (build,
  * teardown, attach target); the base owns the map, the group, the reconcile loop,

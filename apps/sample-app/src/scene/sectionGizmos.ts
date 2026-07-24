@@ -6,7 +6,8 @@
  *
  * A section's heatmap plane and bound outlines are **not pick targets** (spec
  * §13.8) — selection happens from the hierarchy row only — so their `raycast`
- * is stubbed to a no-op regardless of what a caller's raycaster later does.
+ * is stubbed to a no-op regardless of what a caller's raycaster later does, and
+ * this set extends the plain (non-pickable) `GizmoSet` spine.
  */
 import * as THREE from 'three';
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
@@ -19,6 +20,7 @@ import {
   type SectionCellGrid,
 } from './sectionHeatmap.ts';
 import { RenderOrder } from './renderOrder.ts';
+import { GizmoSet } from './gizmoSet.ts';
 
 const OUTLINE_COLOR = 0x9aa3b0;
 const OUTLINE_OPACITY = 0.35;
@@ -71,10 +73,7 @@ function outlineGeometry(width: number, height: number): THREE.BufferGeometry {
   return geom;
 }
 
-export class SectionGizmoSet {
-  readonly group = new THREE.Group();
-  private entries = new Map<string, SectionEntry>();
-
+export class SectionGizmoSet extends GizmoSet<SectionEntry> {
   /**
    * Push current section state + computed cell grids into the scene.
    * `cellGrids` holds a grid per section that has retained data (spec §13.4);
@@ -86,26 +85,9 @@ export class SectionGizmoSet {
     masterVisible: boolean,
     stale: boolean,
   ): void {
-    const seen = new Set<string>();
-    for (const section of sections) {
-      seen.add(section.id);
-      let entry = this.entries.get(section.id);
-      if (!entry) {
-        entry = this.createEntry();
-        this.entries.set(section.id, entry);
-      }
+    this.reconcile(sections, (entry, section) => {
       this.updateEntry(entry, section, cellGrids.get(section.id) ?? null, masterVisible, stale);
-    }
-    for (const [id, entry] of this.entries) {
-      if (!seen.has(id)) {
-        this.disposeEntry(entry);
-        this.entries.delete(id);
-      }
-    }
-  }
-
-  getAttachTarget(id: string): THREE.Object3D | undefined {
-    return this.entries.get(id)?.attachTarget;
+    });
   }
 
   /** Read back the attach target's position on `axis` after a constrained drag (spec §13.8). */
@@ -115,12 +97,13 @@ export class SectionGizmoSet {
     return axis === 0 ? target.position.x : axis === 1 ? target.position.y : target.position.z;
   }
 
-  dispose(): void {
-    for (const entry of this.entries.values()) this.disposeEntry(entry);
-    this.entries.clear();
+  protected attachTargetOf(entry: SectionEntry): THREE.Object3D {
+    return entry.attachTarget;
   }
 
-  private createEntry(): SectionEntry {
+  // Section meshes aren't keyed by id (selection is by hierarchy row), so the
+  // reconcile id is ignored here.
+  protected createEntry(): SectionEntry {
     const group = new THREE.Group();
 
     const texture = new THREE.DataTexture(new Uint8Array(4), 1, 1, THREE.RGBAFormat);
@@ -257,7 +240,7 @@ export class SectionGizmoSet {
     }
   }
 
-  private disposeEntry(entry: SectionEntry): void {
+  protected disposeEntry(entry: SectionEntry): void {
     this.group.remove(entry.group);
     this.group.remove(entry.attachTarget);
     entry.heatmapMesh.geometry.dispose();

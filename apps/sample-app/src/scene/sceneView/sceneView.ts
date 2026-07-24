@@ -42,6 +42,7 @@ import type { ViewId } from '../viewCameras.ts';
 
 import { nearestHit, type PickCandidate } from './pick.ts';
 import { floorVolumeSize, sectionBoundsFromCenters } from './transformReadback.ts';
+import type { GizmoAttachable, GizmoPicker } from '../gizmoSet.ts';
 import type { TransformChange } from './types.ts';
 
 export type { TransformChange } from './types.ts';
@@ -83,6 +84,8 @@ export interface SceneViewState {
   sightlines: { from: Vec3; targets: Vec3[] } | null;
 }
 
+type SelectionKind = NonNullable<Selection>['kind'];
+
 const camId = (s: Selection): string | null => (s?.kind === 'camera' ? s.id : null);
 const probeId = (s: Selection): string | null => (s?.kind === 'probe' ? s.id : null);
 const volumeId = (s: Selection): string | null => (s?.kind === 'volume' ? s.id : null);
@@ -94,6 +97,15 @@ export class SceneView {
   private readonly sectionGizmos: SectionGizmoSet;
   private readonly volumeGizmos: SamplingVolumeGizmoSet;
   private readonly overlay: CoverageOverlay;
+
+  /** The viewport-pickable sets, arbitrated together on a click (spec §5.2, §12.4). */
+  private readonly pickableSets: ReadonlyArray<{ kind: 'camera' | 'probe' | 'volume'; set: GizmoPicker }>;
+  /**
+   * Every set that carries a TransformControls attach target, keyed by selection
+   * kind. A zone is a container with no viewport body, so it has no entry here and
+   * selecting one detaches (spec §12.4, §13.8; `sampling_volumes.md` §5).
+   */
+  private readonly attachableSets: Partial<Record<SelectionKind, GizmoAttachable>>;
 
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
@@ -123,6 +135,22 @@ export class SceneView {
     viewport.scene.add(this.volumeGizmos.group);
     viewport.scene.add(this.overlay.object);
 
+    // A viewport click raycasts each pickable set and the nearest hit wins
+    // (`pick.ts`); attach maps a selection kind straight to the set that owns its
+    // TransformControls target. Sections attach but are not viewport-pickable
+    // (spec §13.8), so they appear only in the attach registry.
+    this.pickableSets = [
+      { kind: 'camera', set: this.gizmos },
+      { kind: 'probe', set: this.probeGizmos },
+      { kind: 'volume', set: this.volumeGizmos },
+    ];
+    this.attachableSets = {
+      camera: this.gizmos,
+      probe: this.probeGizmos,
+      section: this.sectionGizmos,
+      volume: this.volumeGizmos,
+    };
+
     // A genuine click selects the picked gizmo (or deselects on a miss); the click
     // that fires at the end of an orbit/TransformControls drag leaves the selection
     // unchanged (spec §5.2, see ../viewportSelection.ts).
@@ -139,12 +167,11 @@ export class SceneView {
       // `sampling_volumes.md` §5). Hidden camera gizmos are not clickable (spec
       // §2.4). Zones/sections have no viewport body.
       const candidates: PickCandidate[] = [];
-      const camHit = this.prev?.gizmosVisible ? this.gizmos.pickHit(this.raycaster) : null;
-      if (camHit) candidates.push({ selection: { kind: 'camera', id: camHit.id }, distance: camHit.distance });
-      const probeHit = this.probeGizmos.pickHit(this.raycaster);
-      if (probeHit) candidates.push({ selection: { kind: 'probe', id: probeHit.id }, distance: probeHit.distance });
-      const volumeHit = this.volumeGizmos.pickHit(this.raycaster);
-      if (volumeHit) candidates.push({ selection: { kind: 'volume', id: volumeHit.id }, distance: volumeHit.distance });
+      for (const { kind, set } of this.pickableSets) {
+        if (kind === 'camera' && !this.prev?.gizmosVisible) continue;
+        const hit = set.pickHit(this.raycaster);
+        if (hit) candidates.push({ selection: { kind, id: hit.id }, distance: hit.distance });
+      }
       const hit = nearestHit(candidates);
       const next = selectionAfterClick(this.prev?.selection ?? null, hit, this.down, { x: ev.clientX, y: ev.clientY });
       this.selectHandler?.(next);
@@ -331,16 +358,7 @@ export class SceneView {
    * viewport body, so selecting one detaches.
    */
   private attachForSelection(selection: Selection): void {
-    const target =
-      selection?.kind === 'camera'
-        ? this.gizmos.getAttachTarget(selection.id)
-        : selection?.kind === 'probe'
-          ? this.probeGizmos.getAttachTarget(selection.id)
-          : selection?.kind === 'section'
-            ? this.sectionGizmos.getAttachTarget(selection.id)
-            : selection?.kind === 'volume'
-              ? this.volumeGizmos.getAttachTarget(selection.id)
-              : undefined;
+    const target = selection ? this.attachableSets[selection.kind]?.getAttachTarget(selection.id) : undefined;
     if (target) this.viewport.transformControls.attach(target);
     else this.viewport.transformControls.detach();
   }
