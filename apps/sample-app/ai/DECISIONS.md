@@ -6,6 +6,45 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The four gizmo sets share a `GizmoSet` spine
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3, §12.4, §13;
+[`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §5 — **unchanged**;
+a pure structural extraction (no spec edit). The camera, probe, section, and
+sampling-volume gizmo sets each reconciled a keyed collection of Three.js objects
+against the scene with the *same* create/update/sweep loop, and three of them
+repeated the *same* nearest-hit `pickHit` raycast — four copies of the map, the
+group, `getAttachTarget`, and `dispose`, with no shared type. `SceneView`, their
+sole consumer, hand-branched per kind twice: a pick dispatch that pushed one
+candidate per set, and an `attachForSelection` four-way ternary.
+
+**Resolution.** A shared spine in `scene/gizmoSet.ts`. `GizmoSet<E>` owns the
+`entries` map, the group, the generic `reconcile` loop, `getAttachTarget`, and
+`dispose`; each set supplies only `createEntry`/`disposeEntry`/`attachTargetOf`
+and its own `update` signature (which closes over the per-set state — selection,
+flags, enabled zones, cell grids — and calls `reconcile`). `PickableGizmoSet<E>`
+extends it with the shared `pickHit` for the three viewport-pickable sets;
+`SectionGizmoSet` extends the plain `GizmoSet`, since sections are selected from
+the hierarchy row, never the viewport (spec §13.8). `SceneView` now holds the sets
+behind two minimal interfaces — `GizmoPicker` (a three-set pickable registry, with
+the camera's gizmos-hidden guard retained, spec §2.4) and `GizmoAttachable` (a
+four-set attach registry keyed by selection kind) — collapsing both per-kind
+branches. The dead `CameraGizmoSet.pick()` wrapper (no caller) was removed. A new
+`test/gizmoSet.test.ts` covers the spine (reconcile/dispose/getAttachTarget/
+pickHit) through a minimal subclass — the first direct coverage of the reconcile
+loop for the probe/section shapes, which had none.
+
+**Trade-offs.** A two-level hierarchy (`GizmoSet` → `PickableGizmoSet` → the sets)
+plus a template-method `reconcile` is the most indirection of the SceneView-area
+extractions — reading `CameraGizmoSet` now means looking one file up for the loop.
+Accepted for the dedup, the two-interface SceneView registries (one edit site each
+when a fifth gizmo kind lands, not two hand-branches), and the new spine coverage.
+Two registries (three pickable, four attachable) encode the real
+pickable-vs-attachable split rather than one list with exceptions. A free-function
+reconcile helper was considered and rejected: the map/group/dispose state it
+operates on is exactly what a base class already holds, so the class keeps it
+co-located.
+
 ## The editable scene document lives in a pure `sceneReducer`
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5, §8.1, §12–§13;

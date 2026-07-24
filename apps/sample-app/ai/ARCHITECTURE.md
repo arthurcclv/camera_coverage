@@ -165,10 +165,19 @@ default" — see DECISIONS.md).
   §14.5), thin wrappers around `sceneFile.ts` + `sceneGeometryBuild.ts`.
 - `viewport.ts` — async `WebGPURenderer` init, orbit + transform controls, lights,
   grid, render loop.
+- `gizmoSet.ts` — the shared spine the four per-entity gizmo sets extend.
+  `GizmoSet<E>` owns the keyed `entries` map, the group, the create/update/sweep
+  `reconcile` loop, `getAttachTarget`, and `dispose`; subclasses supply
+  `createEntry`/`disposeEntry`/`attachTargetOf` and their own `update` signature.
+  `PickableGizmoSet<E>` adds the nearest-hit `pickHit` for the viewport-pickable
+  three (sections are hierarchy-selected only, spec §13.8). `GizmoPicker` /
+  `GizmoAttachable` are the minimal interfaces `SceneView` holds the sets behind
+  in its pick and attach registries. See DECISIONS.md's GizmoSet entry.
 - `cameraGizmos.ts` — per-camera frustum wireframe + pickable "body" sphere;
-  selection / flag / disable styling.
+  selection / flag / disable styling. Extends `PickableGizmoSet`.
 - `probeGizmos.ts` — per-probe octahedron markers + green sightlines to visible
-  cameras.
+  cameras. Extends `PickableGizmoSet` (overrides `dispose` to also clear the
+  non-entry sightline overlay).
 - `probeVisibility.ts` — `Probe` type, retained-chunk store, world-point → voxel
   mask decode (pure `locateVoxel` / `chunkLocalForGlobalIndex`, the latter shared
   with the section column walker).
@@ -202,7 +211,8 @@ default" — see DECISIONS.md).
 - `sectionGizmos.ts` — per-section heatmap plane (`DataTexture`) + min/max bound
   outlines + axis-constrained TransformControls target; consumes
   `sectionHeatmap.ts`'s output (including its rotation/sign math), owns no
-  aggregation logic.
+  aggregation logic. Extends the plain (non-pickable) `GizmoSet` — sections are
+  selected from the hierarchy row, never the viewport (spec §13.8).
 - `sceneTree.ts` — `SceneNode` union (camera/probe/section + zone/volume) +
   `buildSceneTree` / `flattenVisible`. Zone nodes are both selectable and
   expandable (their volume children); `flattenVisible` treats any node with a
@@ -223,7 +233,7 @@ default" — see DECISIONS.md).
 - `samplingVolumeGizmos.ts` — per-volume wireframe box (edges + faint fill) whose
   root object maps 1:1 to `{position, quaternion, scale}` so TransformControls
   (translate/rotate/scale) writes them straight back; pickable, dims the volumes of
-  disabled zones.
+  disabled zones. Extends `PickableGizmoSet`.
 - `viewportSelection.ts` — pure click-vs-drag + unified selection decision.
 - `transformSpace.ts` — pure local/global ↔ Three.js space mapping + icon/tooltip.
 
@@ -282,16 +292,18 @@ default" — see DECISIONS.md).
 
 A single unified selection: `Selection = { kind: 'camera' | 'probe' | 'section' |
 'zone' | 'volume', id } | null` (`scene/viewportSelection.ts`). A viewport click
-picks the nearest hit across cameras, probes, and **volumes** (raycast in
-`SceneView`, arbitration by the pure `scene/sceneView/pick.ts` `nearestHit`, then
-the click-vs-drag decision `selectionAfterClick`) — sections and zones have no
-pickable body, so they're selected from their hierarchy rows; drag-tail
-clicks (> 5 px travel) are ignored. `SceneView` emits the resolved selection to
-App via `onSelect`. Exactly one `TransformControls` gizmo is
-attached at a time; selecting a probe forces translate-only, selecting a section
-forces translate-only **and** constrains the visible handle to its collapse axis,
-selecting a **volume** enables the volume-only **scale** mode (translate/rotate/
-scale), and selecting a **zone** attaches no gizmo (it's a container). Which zones
+picks the nearest hit across cameras, probes, and **volumes** (`SceneView`
+raycasts each set in its three-set pickable registry, arbitration by the pure
+`scene/sceneView/pick.ts` `nearestHit`, then the click-vs-drag decision
+`selectionAfterClick`) — sections and zones have no pickable body, so they're
+selected from their hierarchy rows; drag-tail clicks (> 5 px travel) are ignored.
+`SceneView` emits the resolved selection to App via `onSelect`. Exactly one
+`TransformControls` gizmo is attached at a time (a four-set attach registry keyed
+by selection kind maps the selection to the set that owns its target); selecting a
+probe forces translate-only, selecting a section forces translate-only **and**
+constrains the visible handle to its collapse axis, selecting a **volume** enables
+the volume-only **scale** mode (translate/rotate/scale), and selecting a **zone**
+attaches no gizmo (it's a container, absent from the attach registry). Which zones
 are **enabled** (contribute to the visualized marked set) is decoupled from
 selection — driven by a per-zone **enabled checkbox** in the hierarchy row
 (independent per zone, like cameras/sections), not by selecting a zone.

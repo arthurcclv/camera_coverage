@@ -66,13 +66,17 @@ slab/chord math, probe `locateVoxel`, the `sceneReducer`, and SceneView's own
 
 - Runner is `node:test` (`node --test --experimental-strip-types
   "test/**/*.test.ts"`) with `node:assert/strict`. No framework, no bundler.
-- **Tests target pure functions only** — never the React render tree or live
-  Three.js/WebGPU. Existing suites: `sceneTree`, `coverageOverlay`,
-  `transformSpace`, `volumetric`, `leftPanelSplit`, `probeVisibility`,
-  `viewportSelection`, `sectionHeatmap`, `sceneReducer`, `sceneView/pick`,
-  `sceneView/transformReadback`. The imperative `SceneView` class itself stays
-  untested (like `viewport.ts`); its decision logic is tested through those two
-  pure helpers. `sceneReducer.test.ts` covers the stale/samplingDirty rules and
+- **Tests target pure functions and CPU-side Three.js objects — never the React
+  render tree or the GPU** (no `WebGPURenderer`, no `viewport.ts`, no render loop).
+  Most suites are pure: `sceneTree`, `coverageOverlay`, `transformSpace`,
+  `volumetric`, `leftPanelSplit`, `probeVisibility`, `viewportSelection`,
+  `sectionHeatmap`, `sceneReducer`, `sceneView/pick`, `sceneView/transformReadback`.
+  A few drive real (renderer-free) Three.js gizmo objects and assert on their
+  state — `cameraGizmos`, `samplingVolumeGizmos`, and `gizmoSet` (the shared spine,
+  via a minimal subclass: reconcile/dispose/getAttachTarget/pickHit) — which is how
+  the reconcile loop is covered for every entry shape. The imperative `SceneView`
+  class itself stays untested (like `viewport.ts`); its decision logic is tested
+  through the two pure `sceneView/*` helpers. `sceneReducer.test.ts` covers the stale/samplingDirty rules and
   selection-follows-CRUD — the orchestration that used to be untestable in App.
 - **Every change ships with a test.** When adding behavior, extract the decision
   logic into a pure function in `scene/`/`ui/` and test that, rather than testing
