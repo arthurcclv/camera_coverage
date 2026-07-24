@@ -56,11 +56,13 @@ dispatches). SceneView diffs the snapshot by reference internally, so each
 App no longer mirrors live state into imperative callbacks (that lives inside
 SceneView). **Keep engine/renderer mutation out of component render bodies, and
 keep scene-document transitions pure in the reducer** — impure work (geometry
-build/dispose, stores, engine, BVH) stays in App around the dispatch. Factor pure
-decision logic out of React/Three so it can be unit-tested (see below) — this is
-why `viewportSelection`, `transformSpace`, `leftPanelSplit`, `sceneTree`, the
-slab/chord math, probe `locateVoxel`, the `sceneReducer`, and SceneView's own
-`pick` / `transformReadback` are standalone pure functions.
+build/dispose, the `CoverageRun` coordinator, engine, BVH) stays in App around the
+dispatch. Factor pure decision logic out of React/Three so it can be unit-tested
+(see below) — this is why `viewportSelection`, `transformSpace`, `leftPanelSplit`,
+`sceneTree`, the slab/chord math, probe `locateVoxel`, the `sceneReducer`, and
+SceneView's own `pick` / `transformReadback` are standalone pure functions. A run's
+retained-chunk stores + generation guard are a single imperative sink,
+`CoverageRun` (`scene/coverageRun.ts`), that App drives and reads through.
 
 ## Testing
 
@@ -70,7 +72,8 @@ slab/chord math, probe `locateVoxel`, the `sceneReducer`, and SceneView's own
   render tree or the GPU** (no `WebGPURenderer`, no `viewport.ts`, no render loop).
   Most suites are pure: `sceneTree`, `coverageOverlay`, `transformSpace`,
   `volumetric`, `leftPanelSplit`, `probeVisibility`, `viewportSelection`,
-  `sectionHeatmap`, `sceneReducer`, `sceneView/pick`, `sceneView/transformReadback`.
+  `sectionHeatmap`, `sceneReducer`, `coverageRun` (the run coordinator: generation
+  guard + reset/addChunk/clear fan-out), `sceneView/pick`, `sceneView/transformReadback`.
   A few drive real (renderer-free) Three.js gizmo objects and assert on their
   state — `cameraGizmos`, `samplingVolumeGizmos`, and `gizmoSet` (the shared spine,
   via a minimal subclass: reconcile/dispose/getAttachTarget/pickHit) — which is how

@@ -6,6 +6,47 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## A `CoverageRun` coordinator owns the retained-chunk consumers + the run guard
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §9, §12–§13, §14.4;
+[`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §7 — **unchanged**;
+a pure structural extraction (no spec edit). A `compute()` streams `ChunkResult`s
+that three pure stores retain in parallel — `ProbeVisibility`,
+`SectionHeatmapStore`, `ZoneCoverageStore` — each reset per run and read on demand.
+`App.tsx` used to `new` all three, wire the identical reset/addChunk/clear fan-out
+across `handleRun`/`applyScene`, read each store from its own `useMemo`, and guard
+a mid-run scene swap with a raw `runGenerationRef` checked at five points. That
+run orchestration was, after the `sceneReducer` extraction, the last non-document
+orchestration left in App.
+
+**Resolution.** `scene/coverageRun.ts`. `CoverageRun` constructs and owns the
+three stores, fans out `reset`/`addChunk`/`clear` over a shared `RetainedRun`
+interface, fronts their reads (`sectionCells`/`probeQueries`/`zoneCoverage`), and
+owns the generation guard: `generation` (the token `handleRun` snapshots before
+its awaits) + `isCurrent(token)`, with `clear()` — the scene-replace path from
+`applyScene` — both wiping the stores and bumping the generation so an in-flight
+run's later chunks are dropped (spec §14.4). `reset()` (run start) deliberately
+does **not** bump, since the run snapshotted its token first. App's three store
+`useMemo`s collapse to one `new CoverageRun()`; `runGenerationRef` is gone.
+
+**Scope.** The **overlay** — the fourth chunk consumer — stays in `SceneView`
+(created async, `viewRef.current` may be null), driven inline by App
+(`resetCoverage()`/`addCoverageChunk()`) right beside the coordinator calls. To
+satisfy `RetainedRun`, `ZoneCoverageStore.reset` gained an unused `grid` param
+(zone coverage decodes chunks by their own origin/dims). `masksVersion` stays in
+App — bumping a version to re-run the derived `useMemo`s is a React concern the
+coordinator can't own.
+
+**Trade-off.** `CoverageRun` centralizes the guard *state*, but the *checking
+discipline* — snapshot `generation` before the first `await`, re-check after each
+engine `await` — stays in `handleRun`, because it interleaves with
+`initAndLoad`/`setSampling`/`compute`, which aren't store operations. So the
+extraction names the guard behind an API and removes the four scattered
+store-wiring blocks, but doesn't make `handleRun` await-guard-free; engine
+orchestration legitimately remains App's. Accepted. `test/coverageRun.test.ts`
+covers the generation semantics (reset doesn't bump, clear does, `isCurrent`) and
+the reset/addChunk/clear fan-out end-to-end against real stores.
+
 ## The four gizmo sets share a `GizmoSet` spine
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3, §12.4, §13;

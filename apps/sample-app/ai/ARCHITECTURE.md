@@ -49,16 +49,18 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
   built geometry) was replaced since the last init — a scene-file import (spec
   §14.4) always forces a fresh `loadScene`/workspace even at the same voxel
   size, tracked via `initializedRoomRef`. It filters out disabled cameras,
-  builds a `WorkspaceGrid`, resets probe-visibility, the section-heatmap and
-  zone-coverage stores, and the overlay (via `SceneView.resetCoverage()`), then
-  `compute({ mode: 1, onChunkDone })` feeds each streamed chunk into **four**
-  retained-data consumers: the coverage overlay (through
-  `SceneView.addCoverageChunk()`), the probe-visibility store, the
-  section-heatmap store, and the zone-coverage store. Every stage after the
-  initial `runGenerationRef` snapshot re-checks it before touching state or
-  feeding a stream consumer, so a run superseded mid-flight by `applyScene`
-  (import) can't land its results or contaminate the new scene's retained
-  chunks — see DECISIONS.md.
+  builds a `WorkspaceGrid`, resets the retained-chunk consumers via
+  `coverageRun.reset(grid, ids)` (probe-visibility, section-heatmap, and
+  zone-coverage stores) plus the overlay inline (`SceneView.resetCoverage()`),
+  then `compute({ mode: 1, onChunkDone })` feeds each streamed chunk to
+  `coverageRun.addChunk()` (the three stores) and the overlay
+  (`SceneView.addCoverageChunk()`) — **four** retained-data consumers, three
+  behind the coordinator and the overlay inline (SceneView owns it). Every stage
+  after the initial `coverageRun.generation` snapshot re-checks it with
+  `coverageRun.isCurrent(gen)` before touching state or feeding a consumer, so a
+  run superseded mid-flight by `applyScene` (import — which calls
+  `coverageRun.clear()`, wiping the stores and bumping the generation) can't land
+  its results or contaminate the new scene's retained chunks — see DECISIONS.md.
 
 ## State management
 
@@ -77,15 +79,19 @@ source of truth, spec §14.1) + `room` (its built `GeometryBuild`), overlay
 options, `voxelSize` (debounced 250 ms), summary, `autoRun`, transform
 mode/space, gizmo visibility, `sectionsVisible` (viewport master toggle), probe
 queries, `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`,
-inspector split height, and the run-generation guard. Per-section
-`SectionCellGrid`s are derived (`useMemo` over `sections` + `masksVersion`). All
-of that, plus two derived `useMemo`s (`clipBand`, `sightlines`), is bundled into
-one immutable `sceneViewState` (`useMemo`) and pushed to `SceneView.sync()` in a
-single effect — SceneView diffs each field by reference, so an expensive op runs
-only on its own change. The only `useRef`s left are the async run/handler path:
-`roomRef`, `runGenerationRef`, `bvhRef`, and **one `stateRef` mirroring the whole
-reducer state** so `handleRun` reads the live document across awaits (it replaced
-the ~7 per-field mirrors and `samplingDirtyRef`). **Auto-run** is a 10 Hz
+and inspector split height. The retained-chunk stores and the run-generation
+guard live on one `coverageRun` (`useMemo(() => new CoverageRun())`, see
+`scene/coverageRun.ts`); the three derived reads (`sectionCellGrids`,
+`zoneCoverage`, `probeQueries`) call its `sectionCells`/`zoneCoverage`/
+`probeQueries`, keyed on `masksVersion`. All of that, plus two derived `useMemo`s
+(`clipBand`, `sightlines`), is bundled into one immutable `sceneViewState`
+(`useMemo`) and pushed to `SceneView.sync()` in a single effect — SceneView diffs
+each field by reference, so an expensive op runs only on its own change. The only
+`useRef`s left are the async run/handler path: `roomRef`, `initializedRoomRef`,
+`bvhRef`, and **one `stateRef` mirroring the whole reducer state** so `handleRun`
+reads the live document across awaits (it replaced the ~7 per-field mirrors and
+`samplingDirtyRef`; the run-generation guard moved onto `coverageRun`). **Auto-run**
+is a 10 Hz
 `setInterval` that fires `handleRun` when inputs are stale and the engine is idle
 and error-free (spec §8.1 throttle).
 
@@ -96,7 +102,7 @@ the `room.group` swap and the clip planes are snapshot fields, so `sync()`
 adds/removes the geometry group on a `room` change without tearing down or
 recreating the WebGPU renderer/orbit camera. `applyScene` (in
 `App.tsx`) is the single place that replaces the whole scene at once — the
-App-owned geometry build + retained-chunk stores as side effects, and the
+App-owned geometry build + `coverageRun.clear()` as side effects, and the
 document in one `sceneReplaced` dispatch; `handleImportScene` is a
 thin wrapper around it and `scene/sceneIO.ts` (there is no in-app "reset to
 default" — see DECISIONS.md).
@@ -178,6 +184,14 @@ default" — see DECISIONS.md).
 - `probeGizmos.ts` — per-probe octahedron markers + green sightlines to visible
   cameras. Extends `PickableGizmoSet` (overrides `dispose` to also clear the
   non-entry sightline overlay).
+- `coverageRun.ts` — the coordinator for a run's three retained-chunk stores +
+  the generation guard. Owns `ProbeVisibility`/`SectionHeatmapStore`/
+  `ZoneCoverageStore`, fans out `reset`/`addChunk`/`clear` over the shared
+  `RetainedRun` interface, and fronts their reads (`sectionCells`/`probeQueries`/
+  `zoneCoverage`) so App never touches a store. `clear()` (scene replaced) also
+  bumps the generation `handleRun` guards its awaits against; `reset()` does not.
+  The overlay (the fourth consumer) stays in `SceneView`, driven inline by App.
+  See DECISIONS.md's CoverageRun entry.
 - `probeVisibility.ts` — `Probe` type, retained-chunk store, world-point → voxel
   mask decode (pure `locateVoxel` / `chunkLocalForGlobalIndex`, the latter shared
   with the section column walker).
