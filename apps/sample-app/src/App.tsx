@@ -3,14 +3,13 @@
  * Three.js runs imperatively inside a ref-driven effect; React owns the
  * CameraConfig[] / Probe[] / overlay-option state and pushes it into the scene.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { WorkspaceGrid, type CameraConfig, type CoverageSummary, type Vec3 } from '@linkervision/camera-coverage-sdk';
 
 import { type RenderBackend } from './scene/viewport.ts';
 import { cameraLabel, toCameraConfig, type SceneCamera } from './cameras/camera.ts';
 import { ProbeVisibility, type Probe, type ProbeVisibilityResult } from './scene/probeVisibility.ts';
 import {
-  defaultSection,
   sectionClipBand,
   sectionLegendVisible,
   SectionHeatmapStore,
@@ -23,7 +22,6 @@ import {
   buildSceneBvh,
   DEFAULT_BOX_LEVEL,
   DEFAULT_ZONE_LEVEL,
-  defaultZoneName,
   extractZonesAndVolumes,
   makeMarkedFilter,
   regionsFromVolumes,
@@ -39,15 +37,6 @@ import {
   type TransformSpace,
 } from './scene/transformSpace.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
-import {
-  duplicateCamera,
-  duplicateProbe,
-  duplicateSection,
-  duplicateVolume,
-  duplicateZone,
-  nextFreeId,
-} from './scene/entityDuplication.ts';
-import { type Selection } from './scene/viewportSelection.ts';
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
 import type { GeometryObject } from './scene/geometryModel.ts';
@@ -58,6 +47,7 @@ import {
 } from './scene/sceneGeometryBuild.ts';
 import { exportSceneToDirectory, importSceneFromDirectory } from './scene/sceneIO.ts';
 import { SceneView, type SceneViewState, type TransformChange } from './scene/sceneView/sceneView.ts';
+import { initSceneState, sceneReducer } from './scene/sceneReducer.ts';
 import { useEngine } from './engine/useEngine.ts';
 
 import {
@@ -89,10 +79,6 @@ const CHUNK_SIZE_XZ = 10;
 const DEFAULT_VOXEL_SIZE = 0.5;
 const DEBOUNCE_MS = 250;
 const AUTO_RUN_MAX_HZ = 10;
-
-// Defaults for a camera spawned from the "+" menu (spec §5.5), matching the
-// default rig's optics (cameras/defaults.ts).
-const NEW_CAMERA = { fov: 60, aspect: 16 / 9, near: 0.1, far: 30 };
 
 /** Human-readable message for a scene-file import/export failure (spec §14.8). */
 function describeSceneError(err: unknown): string {
@@ -198,19 +184,15 @@ export function App() {
     [room],
   );
 
-  const [cameras, setCameras] = useState<SceneCamera[]>(initialScene.cameras);
-  const [probes, setProbes] = useState<Probe[]>(initialScene.probes);
-  const [sections, setSections] = useState<Section[]>(initialScene.sections);
-  // Which section clips the scene geometry (spec §13.9), or null. Scene-level so
-  // at most one section ever clips; independent of selection.
-  const [clipSectionId, setClipSectionId] = useState<string | null>(initialScene.clipSectionId);
-  // Sampling zones/volumes (`sampling_volumes.md` §2). `useZones` gates whether
-  // they restrict coverage; each zone's `enabled` flag picks what the visualizers
-  // show (the union of enabled zones, §7.3). The generation levels (§3.4) are tool
-  // state and don't persist.
-  const [zones, setZones] = useState<Zone[]>(initialScene.zones);
-  const [volumes, setVolumes] = useState<SamplingVolume[]>(initialScene.volumes);
-  const [useZones, setUseZones] = useState(initialScene.useZones);
+  // The editable scene document + its stale/dirty machine live in one pure reducer
+  // (`scene/sceneReducer.ts`); App holds the geometry build, run outputs, and
+  // engine, and dispatches actions. Destructured so the many read sites below stay
+  // unchanged. `clipSectionId` (spec §13.9) is scene-level so at most one section
+  // clips; zones/volumes (`sampling_volumes.md` §2), `useZones` gating whether they
+  // restrict coverage. The generation levels (§3.4) are tool state below, not part
+  // of the document.
+  const [sceneState, dispatch] = useReducer(sceneReducer, initialScene, initSceneState);
+  const { cameras, probes, sections, clipSectionId, zones, volumes, useZones, selection, collapsedIds, stale, hasRunOnce } = sceneState;
   const [zoneLevel, setZoneLevel] = useState(DEFAULT_ZONE_LEVEL);
   const [boxLevel, setBoxLevel] = useState(DEFAULT_BOX_LEVEL);
 
@@ -228,10 +210,6 @@ export function App() {
   const enabledZoneIds = useMemo(() => new Set(zones.filter((z) => z.enabled).map((z) => z.id)), [zones]);
   // Master show/hide-all for the section heatmap layer (viewport toolbar, spec §2.4).
   const [sectionsVisible, setSectionsVisible] = useState(true);
-  const [selection, setSelection] = useState<Selection>(() =>
-    cameras[0] ? { kind: 'camera', id: cameras[0].id } : null,
-  );
-  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const [overlayOptions, setOverlayOptions] = useState<OverlayOptions>({
     ...DEFAULT_OVERLAY_OPTIONS,
     involvedCameraCount: cameras.length,
@@ -241,8 +219,6 @@ export function App() {
   const debouncedVoxelSize = useDebounced(voxelSize, DEBOUNCE_MS);
   const [initializedVoxelSize, setInitializedVoxelSize] = useState<number | null>(null);
   const [summary, setSummary] = useState<CoverageSummary | null>(null);
-  const [hasRunOnce, setHasRunOnce] = useState(false);
-  const [stale, setStale] = useState(false);
   const [autoRun, setAutoRun] = useState(true);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [transformSpace, setTransformSpace] = useState<TransformSpace>(DEFAULT_TRANSFORM_SPACE);
@@ -333,27 +309,14 @@ export function App() {
   // of "cancel any in-flight compute" (spec §14.4), since the engine/worker
   // exposes no true cancellation primitive today.
   const runGenerationRef = useRef(0);
-  const camerasRef = useRef(cameras);
-  camerasRef.current = cameras;
-  const probesRef = useRef(probes);
-  probesRef.current = probes;
-  const sectionsRef = useRef(sections);
-  sectionsRef.current = sections;
-  const volumesRef = useRef(volumes);
-  volumesRef.current = volumes;
-  const zonesRef = useRef(zones);
-  zonesRef.current = zones;
-  const samplingActiveRef = useRef(samplingActive);
-  samplingActiveRef.current = samplingActive;
-  // Set whenever the sampled region set changes (volume add/delete/transform,
-  // `zoneId`, non-empty zone deletion, `useZones`), so the next run re-applies
-  // `setSampling` (`sampling_volumes.md` §8). Cleared inside `handleRun`.
-  const samplingDirtyRef = useRef(false);
+  // The async run path (`handleRun`) reads the latest scene document across
+  // awaits; mirror the whole reducer state into one ref (replacing the old
+  // per-field mirrors). `samplingDirty` now rides on this state, not a ref.
+  const stateRef = useRef(sceneState);
+  stateRef.current = sceneState;
   // Cached app-side BVH (§3.1), keyed on the `room` it was built from; rebuilt
   // lazily on the next Generate after a geometry swap (§11).
   const bvhRef = useRef<{ room: GeometryBuild; bvh: Bvh } | null>(null);
-  const selectionRef = useRef(selection);
-  selectionRef.current = selection;
 
   const estimatedVoxelCount = useMemo(() => {
     const [x0, y0, z0] = room.worldMin;
@@ -392,26 +355,7 @@ export function App() {
   // edit marks the result stale is governed by which state it touches (a probe or
   // section never does — spec §12.5, §13.4 — via the stale effects below).
   const applyTransformChange = useCallback((change: TransformChange) => {
-    switch (change.kind) {
-      case 'camera':
-        setCameras((prev) => prev.map((c) => (c.id === change.id ? { ...c, position: change.position, rotation: change.rotation } : c)));
-        break;
-      case 'probe':
-        setProbes((prev) => prev.map((p) => (p.id === change.id ? { ...p, position: change.position } : p)));
-        break;
-      case 'volume':
-        setVolumes((prev) => prev.map((v) => (v.id === change.id ? { ...v, position: change.position, rotation: change.rotation, size: change.size } : v)));
-        break;
-      case 'section':
-        setSections((prev) =>
-          prev.map((s) =>
-            s.id === change.id
-              ? { ...s, min: change.min, max: change.max, minA: change.minA, maxA: change.maxA, minB: change.minB, maxB: change.maxB }
-              : s,
-          ),
-        );
-        break;
-    }
+    dispatch({ type: 'transformApplied', change });
   }, []);
 
   // --- SceneView: the imperative Three.js bridge, created once (spec §2.3).
@@ -430,7 +374,7 @@ export function App() {
         view.dispose();
         return;
       }
-      view.onSelect((next) => setSelection(next));
+      view.onSelect((next) => dispatch({ type: 'selectionChanged', selection: next }));
       view.onTransform(applyTransformChange);
       viewRef.current = view;
       setRenderBackend(view.renderBackend);
@@ -462,22 +406,14 @@ export function App() {
     setOverlayOptions((o) => ({ ...o, involvedCameraCount: enabledCameraCount }));
   }, [enabledCameraCount]);
 
-  // --- mark results stale on any camera/resolution change after the first run.
-  // Probe edits are intentionally excluded (spec §12.5). ----------------------
+  // --- mark results stale when the resolution (debounced voxel size) changes
+  // after the first run (spec §8.1). Camera and volume/useZones edits mark stale
+  // (and sampling-dirty) inside the reducer transition; only the debounced voxel
+  // size is App state outside it, so it dispatches here. `markStale` is a no-op
+  // until the first run (`hasRunOnce`), so the initial mount fire is harmless. --
   useEffect(() => {
-    if (hasRunOnce) setStale(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameras, debouncedVoxelSize]);
-
-  // --- volumes/useZones are coverage input (`sampling_volumes.md` §4.2, §8):
-  // any change marks the result stale *and* the sampled region set dirty, so the
-  // next run re-applies `setSampling`. Adding an empty zone or renaming a zone
-  // touches only `zones`, so neither marks stale (§4.2). --------------------------
-  useEffect(() => {
-    samplingDirtyRef.current = true;
-    if (hasRunOnce) setStale(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [volumes, useZones]);
+    dispatch({ type: 'markStale' });
+  }, [debouncedVoxelSize]);
 
   // --- probe visibility queries (spec §12.2): recompute for every probe when a
   // probe moves or a completed run replaces the retained masks -----------------
@@ -549,171 +485,107 @@ export function App() {
   // (contributes to the marked set). Toggling a section or zone is a client-side
   // re-filter only — neither marks the coverage result stale.
   const handleToggleEnabled = useCallback((kind: 'camera' | 'section' | 'zone', id: string) => {
-    if (kind === 'camera') {
-      // `enabled` rides on the camera entity (spec §5.4), so the toggle is a plain
-      // entity edit — the cameras stale effect marks the result stale.
-      setCameras((prev) => prev.map((c) => (c.id === id ? { ...c, enabled: !c.enabled } : c)));
-    } else if (kind === 'section') {
-      setSections((prev) => prev.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)));
-    } else {
-      setZones((prev) => prev.map((z) => (z.id === id ? { ...z, enabled: !z.enabled } : z)));
-    }
+    dispatch({ type: 'toggleEnabled', kind, id });
   }, []);
 
   const handleCameraChange = useCallback((id: string, patch: Partial<CameraConfig>) => {
-    setCameras((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+    dispatch({ type: 'changeCamera', id, patch });
   }, []);
 
   const handleProbeChange = useCallback((id: string, position: Vec3) => {
-    setProbes((prev) => prev.map((p) => (p.id === id ? { ...p, position } : p)));
+    dispatch({ type: 'changeProbe', id, position });
   }, []);
 
-  // Renames (spec §5.6): pure display-label writes — like a zone rename they never
-  // touch the engine or mark the result stale (§8.1).
+  // Renames (spec §5.6): pure display-label writes — never mark the result stale,
+  // for any entity (the reducer excludes them from the coverage-input rules).
   const handleRenameCamera = useCallback((id: string, name: string) => {
-    setCameras((prev) => prev.map((c) => (c.id === id ? { ...c, name } : c)));
+    dispatch({ type: 'renameEntity', kind: 'camera', id, name });
   }, []);
 
   const handleRenameProbe = useCallback((id: string, name: string) => {
-    setProbes((prev) => prev.map((p) => (p.id === id ? { ...p, name } : p)));
+    dispatch({ type: 'renameEntity', kind: 'probe', id, name });
   }, []);
 
   const handleRenameSection = useCallback((id: string, name: string) => {
-    setSections((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+    dispatch({ type: 'renameEntity', kind: 'section', id, name });
   }, []);
 
   const handleToggleCollapse = useCallback((nodeId: string) => {
-    setCollapsedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(nodeId)) next.delete(nodeId);
-      else next.add(nodeId);
-      return next;
-    });
+    dispatch({ type: 'toggleCollapse', id: nodeId });
   }, []);
 
-  // --- add / delete entities (spec §5.5, §12.5) ------------------------------
+  // --- add / delete entities (spec §5.5, §12.5). New entities spawn at the
+  // workspace center (App-derived from the geometry); the reducer allocates the
+  // id and auto-selects the new entity. --------------------------------------
   const handleAddCamera = useCallback(() => {
-    const id = nextFreeId('cam', camerasRef.current.map((c) => c.id));
-    setCameras((prev) => [...prev, { id, name: '', enabled: true, position: [...workspaceCenter] as Vec3, rotation: [0, 0, 0, 1], ...NEW_CAMERA }]);
-    setSelection({ kind: 'camera', id });
+    dispatch({ type: 'addCamera', position: workspaceCenter });
   }, [workspaceCenter]);
 
   const handleAddProbe = useCallback(() => {
-    const id = nextFreeId('probe', probesRef.current.map((p) => p.id));
-    setProbes((prev) => [...prev, { id, position: [...workspaceCenter] as Vec3, name: '' }]);
-    setSelection({ kind: 'probe', id });
+    dispatch({ type: 'addProbe', position: workspaceCenter });
   }, [workspaceCenter]);
 
   const handleAddSection = useCallback(() => {
-    const id = nextFreeId('section', sectionsRef.current.map((s) => s.id));
-    setSections((prev) => [...prev, defaultSection(id, room.worldMin, room.worldMax)]);
-    setSelection({ kind: 'section', id });
+    dispatch({ type: 'addSection', worldMin: room.worldMin, worldMax: room.worldMax });
   }, [room]);
 
   const handleSectionChange = useCallback((id: string, patch: Partial<Section>) => {
-    setSections((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+    dispatch({ type: 'changeSection', id, patch });
   }, []);
 
   // Clip toggle (spec §13.9): make this section the sole clip, or turn clipping
-  // off if it already is the clipping section. Selection is irrelevant.
+  // off if it already is. Selection is irrelevant.
   const handleToggleSectionClip = useCallback((id: string) => {
-    setClipSectionId((prev) => (prev === id ? null : id));
+    dispatch({ type: 'toggleSectionClip', id });
   }, []);
 
   const handleDeleteCamera = useCallback((id: string) => {
-    setCameras((prev) => prev.filter((c) => c.id !== id));
-    setSelection((prev) => (prev?.kind === 'camera' && prev.id === id ? null : prev));
+    dispatch({ type: 'deleteEntity', kind: 'camera', id });
   }, []);
 
   const handleDeleteProbe = useCallback((id: string) => {
-    setProbes((prev) => prev.filter((p) => p.id !== id));
-    setSelection((prev) => (prev?.kind === 'probe' && prev.id === id ? null : prev));
+    dispatch({ type: 'deleteEntity', kind: 'probe', id });
   }, []);
 
+  // Deleting the clipping section also clears the clip (handled in the reducer, §13.9).
   const handleDeleteSection = useCallback((id: string) => {
-    setSections((prev) => prev.filter((s) => s.id !== id));
-    // Deleting the clipping section clears the clip (spec §13.9).
-    setClipSectionId((prev) => (prev === id ? null : prev));
-    setSelection((prev) => (prev?.kind === 'section' && prev.id === id ? null : prev));
+    dispatch({ type: 'deleteEntity', kind: 'section', id });
   }, []);
 
-  // --- duplicate entities (spec §5.5) ----------------------------------------
-  // A deep verbatim copy with the next free id, coincident with the original and
-  // auto-selected. Stale-marking is handled by the cameras/volumes effects above.
+  // --- duplicate entities (spec §5.5): the reducer makes a deep verbatim copy
+  // with the next free id, coincident with the original, and selects it. --------
   const handleDuplicateCamera = useCallback((id: string) => {
-    const copy = duplicateCamera(camerasRef.current, id);
-    if (!copy) return;
-    // The verbatim copy inherits the original's `enabled` state on the entity (spec §5.5).
-    setCameras((prev) => [...prev, copy]);
-    setSelection({ kind: 'camera', id: copy.id });
+    dispatch({ type: 'duplicateEntity', kind: 'camera', id });
   }, []);
 
   const handleDuplicateProbe = useCallback((id: string) => {
-    const copy = duplicateProbe(probesRef.current, id);
-    if (!copy) return;
-    setProbes((prev) => [...prev, copy]);
-    setSelection({ kind: 'probe', id: copy.id });
+    dispatch({ type: 'duplicateEntity', kind: 'probe', id });
   }, []);
 
-  // The copy is created not clipping — clipping is a scene-level selection, not a
-  // section property, so it never transfers (spec §5.5, §13.9).
   const handleDuplicateSection = useCallback((id: string) => {
-    const copy = duplicateSection(sectionsRef.current, id);
-    if (!copy) return;
-    setSections((prev) => [...prev, copy]);
-    setSelection({ kind: 'section', id: copy.id });
+    dispatch({ type: 'duplicateEntity', kind: 'section', id });
   }, []);
 
-  // --- zones & volumes (`sampling_volumes.md` §3, §4, §6, §7.3) --------------
-  // Creating an empty zone does not mark stale (an empty zone marks no voxels, §4).
-  // New zones are enabled by default (§7.3).
+  // --- zones & volumes (`sampling_volumes.md` §3, §4, §6, §7.3). The reducer
+  // owns the empty-vs-non-empty stale rules and the add-volume target-zone logic
+  // (selected zone → selected volume's zone → first zone → create "Zone 1"). ----
   const handleAddZone = useCallback(() => {
-    const id = nextFreeId('zone', zonesRef.current.map((z) => z.id));
-    setZones((prev) => [...prev, { id, name: defaultZoneName(id), enabled: true }]);
-    setSelection({ kind: 'zone', id });
+    dispatch({ type: 'addZone' });
   }, []);
 
-  // Adds a 1 m cube at the workspace center into the target zone (the selected
-  // zone, or the selected volume's zone, or the first zone; creating "Zone 1"
-  // first if none exist). Marks stale via the volumes effect (§4).
   const handleAddVolume = useCallback(() => {
-    const currentZones = zonesRef.current;
-    const currentVolumes = volumesRef.current;
-    const sel = selectionRef.current;
-    let targetZoneId =
-      sel?.kind === 'zone'
-        ? sel.id
-        : sel?.kind === 'volume'
-          ? currentVolumes.find((v) => v.id === sel.id)?.zoneId ?? null
-          : null;
-    let nextZones = currentZones;
-    if (targetZoneId === null || !currentZones.some((z) => z.id === targetZoneId)) {
-      targetZoneId = currentZones[0]?.id ?? null;
-    }
-    if (targetZoneId === null) {
-      const zoneId = nextFreeId('zone', currentZones.map((z) => z.id));
-      nextZones = [...currentZones, { id: zoneId, name: defaultZoneName(zoneId), enabled: true }];
-      targetZoneId = zoneId;
-      setZones(nextZones);
-    }
-    const id = nextFreeId('volume', currentVolumes.map((v) => v.id));
-    setVolumes((prev) => [
-      ...prev,
-      { id, zoneId: targetZoneId!, position: [...workspaceCenter] as Vec3, rotation: [0, 0, 0, 1], size: [1, 1, 1] },
-    ]);
-    setSelection({ kind: 'volume', id });
+    dispatch({ type: 'addVolume', position: workspaceCenter });
   }, [workspaceCenter]);
 
   const handleVolumeChange = useCallback((id: string, patch: Partial<SamplingVolume>) => {
-    setVolumes((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
+    dispatch({ type: 'changeVolume', id, patch });
   }, []);
 
-  // Renaming is a pure display-label edit: never marks stale (§6.2).
   const handleRenameZone = useCallback((id: string, name: string) => {
-    setZones((prev) => prev.map((z) => (z.id === id ? { ...z, name } : z)));
+    dispatch({ type: 'renameEntity', kind: 'zone', id, name });
   }, []);
 
-  const handleToggleUseZones = useCallback((v: boolean) => setUseZones(v), []);
+  const handleToggleUseZones = useCallback((v: boolean) => dispatch({ type: 'toggleUseZones', value: v }), []);
 
   const handleZoneLevelChange = useCallback((v: number) => {
     setZoneLevel(v);
@@ -739,42 +611,27 @@ export function App() {
       boxLevel,
       voxelSize,
     );
-    setZones(nextZones);
-    setVolumes(nextVolumes);
-    setSelection(nextZones[0] ? { kind: 'zone', id: nextZones[0].id } : null);
+    dispatch({ type: 'generated', zones: nextZones, volumes: nextVolumes });
   }, [room, zoneLevel, boxLevel, voxelSize]);
 
-  // Deleting a volume marks stale (§4). Clears selection if it was selected.
   const handleDeleteVolume = useCallback((id: string) => {
-    setVolumes((prev) => prev.filter((v) => v.id !== id));
-    setSelection((prev) => (prev?.kind === 'volume' && prev.id === id ? null : prev));
+    dispatch({ type: 'deleteEntity', kind: 'volume', id });
   }, []);
 
-  // Deleting a zone removes it and all its volumes (§4); the volumes removal
-  // marks stale when it had any.
+  // Deleting a zone removes it and all its volumes (§4); the reducer marks stale
+  // only when it actually had volumes.
   const handleDeleteZone = useCallback((id: string) => {
-    setVolumes((prev) => prev.filter((v) => v.zoneId !== id));
-    setZones((prev) => prev.filter((z) => z.id !== id));
-    setSelection((prev) => (prev?.kind === 'zone' && prev.id === id ? null : prev));
+    dispatch({ type: 'deleteEntity', kind: 'zone', id });
   }, []);
 
-  // Duplicating a volume adds a verbatim copy into the *same* zone (spec §5.5).
   const handleDuplicateVolume = useCallback((id: string) => {
-    const copy = duplicateVolume(volumesRef.current, id);
-    if (!copy) return;
-    setVolumes((prev) => [...prev, copy]);
-    setSelection({ kind: 'volume', id: copy.id });
+    dispatch({ type: 'duplicateEntity', kind: 'volume', id });
   }, []);
 
-  // Duplicating a zone deep-copies the zone *and* fresh copies of all its volumes
-  // (each with a new id, referencing the new zone) (spec §5.5). Marks stale via the
-  // volumes effect when the zone had any.
+  // Duplicating a zone deep-copies the zone and fresh copies of all its volumes
+  // (spec §5.5); the reducer marks stale only when it brought volumes.
   const handleDuplicateZone = useCallback((id: string) => {
-    const copy = duplicateZone(zonesRef.current, volumesRef.current, id);
-    if (!copy) return;
-    setZones((prev) => [...prev, copy.zone]);
-    if (copy.volumes.length > 0) setVolumes((prev) => [...prev, ...copy.volumes]);
-    setSelection({ kind: 'zone', id: copy.zone.id });
+    dispatch({ type: 'duplicateEntity', kind: 'zone', id });
   }, []);
 
   // --- scene file: import / export / reset (spec §14) ------------------------
@@ -793,26 +650,30 @@ export function App() {
       volumes: SamplingVolume[];
       useZones: boolean;
     }) => {
+      // Bump the run generation so any in-flight compute discards its results
+      // (spec §14.4). Geometry build + retained-chunk stores are App-owned side
+      // effects; the scene document is reset in one `sceneReplaced` dispatch (the
+      // reducer selects the first camera, resets the run flags, forces a sampling
+      // re-apply, and keeps collapse state).
       runGenerationRef.current += 1;
       disposeGeometryBuild(roomRef.current);
       setRoom(next.build);
       setGeometryObjects(next.geometry);
-      setCameras(next.cameras);
-      setProbes(next.probes);
-      setSections(next.sections);
-      setClipSectionId(next.clipSectionId);
-      // Import replaces zones/volumes from the file (may be empty, §11); the
-      // cached BVH is invalidated (rebuilt lazily on the next Generate). The
-      // sampled set must be re-applied on the next run.
-      setZones(next.zones);
-      setVolumes(next.volumes);
-      setUseZones(next.useZones);
+      // The cached BVH is invalidated (rebuilt lazily on the next Generate).
       bvhRef.current = null;
-      samplingDirtyRef.current = true;
-      setSelection(next.cameras[0] ? { kind: 'camera', id: next.cameras[0].id } : null);
+      dispatch({
+        type: 'sceneReplaced',
+        doc: {
+          cameras: next.cameras,
+          probes: next.probes,
+          sections: next.sections,
+          clipSectionId: next.clipSectionId,
+          zones: next.zones,
+          volumes: next.volumes,
+          useZones: next.useZones,
+        },
+      });
       setSummary(null);
-      setHasRunOnce(false);
-      setStale(false);
       setInitializedVoxelSize(null);
       initializedRoomRef.current = null;
       viewRef.current?.resetCoverage();
@@ -900,16 +761,18 @@ export function App() {
     // Re-apply the sampled region set when it changed or a re-init reset it to
     // full (`sampling_volumes.md` §8). A sampling change needs no re-init (§6),
     // so this is as cheap as a camera edit.
-    if (needsReinit || samplingDirtyRef.current) {
-      const stats = await engine.setSampling(regionsFromVolumes(samplingActiveRef.current, volumesRef.current));
+    if (needsReinit || stateRef.current.samplingDirty) {
+      const s = stateRef.current;
+      const samplingActiveNow = s.useZones && s.volumes.length > 0;
+      const stats = await engine.setSampling(regionsFromVolumes(samplingActiveNow, s.volumes));
       if (gen !== runGenerationRef.current) return;
       if (!stats) return;
-      samplingDirtyRef.current = false;
+      dispatch({ type: 'samplingApplied' });
     }
 
     // Convert app cameras to plain `CameraConfig` (drop the display `name`) at the
     // SDK boundary — the one place the engine type is required (spec §5.6, §14.1).
-    const enabledCameras = camerasRef.current.filter((c) => c.enabled);
+    const enabledCameras = stateRef.current.cameras.filter((c) => c.enabled);
     const ok = engine.setCameras(enabledCameras.map(toCameraConfig));
     if (!ok) return;
 
@@ -940,8 +803,7 @@ export function App() {
     if (gen !== runGenerationRef.current) return;
     if (result) {
       setSummary(result);
-      setHasRunOnce(true);
-      setStale(false);
+      dispatch({ type: 'runCompleted' });
       setMasksVersion((v) => v + 1);
     }
   }, [engine, room, initializedVoxelSize, debouncedVoxelSize, probeVisibility, sectionHeatmapStore, zoneCoverageStore]);
@@ -1037,7 +899,7 @@ export function App() {
             sectionCellGrids={sectionCellGrids}
             zoneSummaries={zoneCoverage?.perZone ?? null}
             collapsedIds={collapsedIds}
-            onSelect={setSelection}
+            onSelect={(next) => dispatch({ type: 'selectionChanged', selection: next })}
             onToggleEnabled={handleToggleEnabled}
             onToggleCollapse={handleToggleCollapse}
             onAddCamera={handleAddCamera}
@@ -1102,7 +964,7 @@ export function App() {
               onChange={handleProbeChange}
               onRename={handleRenameProbe}
               cameraNameById={cameraNameById}
-              onSelectCamera={(id) => setSelection({ kind: 'camera', id })}
+              onSelectCamera={(id) => dispatch({ type: 'selectionChanged', selection: { kind: 'camera', id } })}
             />
           ) : (
             <CameraPanel
