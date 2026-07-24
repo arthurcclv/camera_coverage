@@ -8,16 +8,16 @@ import { WorkspaceGrid, type CameraConfig, type CoverageSummary, type Vec3 } fro
 
 import { type RenderBackend } from './scene/viewport.ts';
 import { cameraLabel, toCameraConfig, type SceneCamera } from './cameras/camera.ts';
-import { ProbeVisibility, type Probe, type ProbeVisibilityResult } from './scene/probeVisibility.ts';
+import { type Probe, type ProbeVisibilityResult } from './scene/probeVisibility.ts';
 import {
   sectionClipBand,
   sectionLegendVisible,
-  SectionHeatmapStore,
   type Section,
   type SectionCellGrid,
 } from './scene/sectionHeatmap.ts';
 import { coverageLegendScale, overlayLegendScale, sectionLegendScale } from './scene/heatmapLegend.ts';
 import { DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
+import { CoverageRun } from './scene/coverageRun.ts';
 import {
   buildSceneBvh,
   DEFAULT_BOX_LEVEL,
@@ -25,7 +25,6 @@ import {
   extractZonesAndVolumes,
   makeMarkedFilter,
   regionsFromVolumes,
-  ZoneCoverageStore,
   type SamplingVolume,
   type Zone,
 } from './scene/samplingVolumes.ts';
@@ -169,11 +168,11 @@ export function App() {
   const [geometryObjects, setGeometryObjects] = useState<GeometryObject[]>(initialScene.geometry);
   const [room, setRoom] = useState<GeometryBuild>(() => buildStaticGeometrySync(initialScene.geometry));
   const engine = useEngine();
-  const probeVisibility = useMemo(() => new ProbeVisibility(), []);
-  const sectionHeatmapStore = useMemo(() => new SectionHeatmapStore(), []);
-  // Fourth retained-run consumer (`sampling_volumes.md` §7.2): per-zone coverage
-  // aggregation over the same masks that back probes and sections.
-  const zoneCoverageStore = useMemo(() => new ZoneCoverageStore(), []);
+  // The retained-chunk consumers (probe visibility, section heatmap, zone
+  // coverage) + the run-generation guard, behind one coordinator (spec §9,
+  // §12–§13, §14.4). App drives its reset/addChunk/clear and reads through it; the
+  // overlay (the fourth consumer) stays inline below since SceneView owns it.
+  const coverageRun = useMemo(() => new CoverageRun(), []);
 
   const workspaceCenter = useMemo<Vec3>(
     () => [
@@ -304,11 +303,11 @@ export function App() {
   // a re-init when this no longer matches, so a geometry swap (import/reset)
   // isn't masked by voxel size staying the same (spec §14.4).
   const initializedRoomRef = useRef<GeometryBuild | null>(null);
-  // Bumped by `applyScene`; `handleRun` discards a run's results if this no
-  // longer matches the generation it started with — the in-scope interpretation
-  // of "cancel any in-flight compute" (spec §14.4), since the engine/worker
-  // exposes no true cancellation primitive today.
-  const runGenerationRef = useRef(0);
+  // The run-generation guard now lives on `coverageRun`: `applyScene` bumps it via
+  // `coverageRun.clear()` and `handleRun` snapshots `coverageRun.generation`,
+  // discarding a run whose token is no longer current — the in-scope stand-in for
+  // "cancel any in-flight compute" (spec §14.4), since the engine exposes no true
+  // cancellation primitive today.
   // The async run path (`handleRun`) reads the latest scene document across
   // awaits; mirror the whole reducer state into one ref (replacing the old
   // per-field mirrors). `samplingDirty` now rides on this state, not a ref.
@@ -330,23 +329,22 @@ export function App() {
   // the retained masks. Computed for every section (not just visible ones), so
   // hierarchy badges and the stats panel stay live regardless of the per-
   // section visibility checkbox. ---------------------------------------------
-  const sectionCellGrids = useMemo(() => {
-    const map = new Map<string, SectionCellGrid | null>();
+  const sectionCellGrids = useMemo(
     // The marked filter blacks out columns outside the enabled zones' union
     // (spec §7.3); a volume/zone-enable change re-filters here, no recompute.
-    for (const s of sections) map.set(s.id, sectionHeatmapStore.computeCells(s, markedFilter));
-    return map;
+    () => coverageRun.sectionCells(sections, markedFilter),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sections, masksVersion, sectionHeatmapStore, markedFilter]);
+    [sections, masksVersion, coverageRun, markedFilter],
+  );
 
   // --- per-zone coverage aggregation (`sampling_volumes.md` §7.2): recomputed
   // from the retained run whenever zone membership/enabled or a new run replaces
   // the retained masks. Per-zone stats are broken out for every zone; the
   // enabled-union drives the overlay/main stats (§7.3, §7.4). --------------------
   const zoneCoverage = useMemo(
-    () => zoneCoverageStore.compute(zones, volumes),
+    () => coverageRun.zoneCoverage(zones, volumes),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [zones, volumes, masksVersion, zoneCoverageStore],
+    [zones, volumes, masksVersion, coverageRun],
   );
   const enabledUnionSummary = zoneCoverage?.enabledUnion ?? null;
 
@@ -418,10 +416,8 @@ export function App() {
   // --- probe visibility queries (spec §12.2): recompute for every probe when a
   // probe moves or a completed run replaces the retained masks -----------------
   useEffect(() => {
-    const map = new Map<string, ProbeVisibilityResult>();
-    for (const p of probes) map.set(p.id, probeVisibility.query(p.position));
-    setProbeQueries(map);
-  }, [probes, masksVersion, probeVisibility]);
+    setProbeQueries(coverageRun.probeQueries(probes));
+  }, [probes, masksVersion, coverageRun]);
 
   // --- sightlines from the selected probe to each camera that sees it (§12.4).
   // Derived (recomputed on probe selection, its query, or a camera move) and
@@ -650,12 +646,12 @@ export function App() {
       volumes: SamplingVolume[];
       useZones: boolean;
     }) => {
-      // Bump the run generation so any in-flight compute discards its results
-      // (spec §14.4). Geometry build + retained-chunk stores are App-owned side
-      // effects; the scene document is reset in one `sceneReplaced` dispatch (the
-      // reducer selects the first camera, resets the run flags, forces a sampling
-      // re-apply, and keeps collapse state).
-      runGenerationRef.current += 1;
+      // Geometry build + retained-chunk consumers are App-owned side effects; the
+      // scene document is reset in one `sceneReplaced` dispatch (the reducer
+      // selects the first camera, resets the run flags, forces a sampling re-apply,
+      // and keeps collapse state). `coverageRun.clear()` (below) both wipes the
+      // retained stores and bumps the generation so any in-flight compute discards
+      // its results (spec §14.4).
       disposeGeometryBuild(roomRef.current);
       setRoom(next.build);
       setGeometryObjects(next.geometry);
@@ -676,14 +672,12 @@ export function App() {
       setSummary(null);
       setInitializedVoxelSize(null);
       initializedRoomRef.current = null;
-      viewRef.current?.resetCoverage();
-      probeVisibility.clear();
-      sectionHeatmapStore.clear();
-      zoneCoverageStore.clear();
+      viewRef.current?.resetCoverage(); // the overlay lives in SceneView
+      coverageRun.clear(); // wipes the three stores + invalidates in-flight runs
       setMasksVersion((v) => v + 1);
       setSceneError(null);
     },
-    [probeVisibility, sectionHeatmapStore, zoneCoverageStore],
+    [coverageRun],
   );
 
   const handleImportScene = useCallback(async () => {
@@ -743,13 +737,13 @@ export function App() {
     // Snapshot the scene "generation": if `applyScene` (import/reset) bumps
     // this while we're mid-run, every check below discards this run's results
     // instead of applying them — the in-scope stand-in for "cancel any
-    // in-flight compute" (spec §14.4; see `runGenerationRef`'s declaration).
-    const gen = runGenerationRef.current;
+    // in-flight compute" (spec §14.4; see `coverageRun`'s guard).
+    const gen = coverageRun.generation;
     const needsReinit =
       initializedVoxelSize === null || initializedVoxelSize !== debouncedVoxelSize || initializedRoomRef.current !== room;
     if (needsReinit) {
       const initResult = await engine.initAndLoad(room.sceneMesh, room.worldMin, room.worldMax, debouncedVoxelSize, CHUNK_SIZE_XZ);
-      if (gen !== runGenerationRef.current) return;
+      if (!coverageRun.isCurrent(gen)) return;
       if (!initResult) {
         setInitializedVoxelSize(null);
         return;
@@ -765,7 +759,7 @@ export function App() {
       const s = stateRef.current;
       const samplingActiveNow = s.useZones && s.volumes.length > 0;
       const stats = await engine.setSampling(regionsFromVolumes(samplingActiveNow, s.volumes));
-      if (gen !== runGenerationRef.current) return;
+      if (!coverageRun.isCurrent(gen)) return;
       if (!stats) return;
       dispatch({ type: 'samplingApplied' });
     }
@@ -777,36 +771,32 @@ export function App() {
     if (!ok) return;
 
     // Retain this run's chunks + ordered enabled-camera ids for probe lookup
-    // (spec §12.2), in parallel with the overlay.
+    // (spec §12.2), in parallel with the overlay (which SceneView owns).
     const grid = new WorkspaceGrid({
       worldMin: room.worldMin,
       worldMax: room.worldMax,
       voxelSize: debouncedVoxelSize,
       chunkSizeXZ: CHUNK_SIZE_XZ,
     });
-    probeVisibility.reset(grid, enabledCameras.map((c) => c.id));
-    sectionHeatmapStore.reset(grid, enabledCameras.map((c) => c.id));
-    zoneCoverageStore.reset(grid, enabledCameras.map((c) => c.id));
+    coverageRun.reset(grid, enabledCameras.map((c) => c.id));
     viewRef.current?.resetCoverage();
     const result = await engine.compute({
       mode: 1,
       onChunkDone: (_chunkId, chunkResult) => {
-        // A newer scene may have replaced (and cleared) these stores mid-stream;
+        // A newer scene may have replaced (and cleared) the stores mid-stream;
         // don't let a stale chunk repopulate them (spec §14.4).
-        if (gen !== runGenerationRef.current) return;
+        if (!coverageRun.isCurrent(gen)) return;
         viewRef.current?.addCoverageChunk(chunkResult);
-        probeVisibility.addChunk(chunkResult);
-        sectionHeatmapStore.addChunk(chunkResult);
-        zoneCoverageStore.addChunk(chunkResult);
+        coverageRun.addChunk(chunkResult);
       },
     });
-    if (gen !== runGenerationRef.current) return;
+    if (!coverageRun.isCurrent(gen)) return;
     if (result) {
       setSummary(result);
       dispatch({ type: 'runCompleted' });
       setMasksVersion((v) => v + 1);
     }
-  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, probeVisibility, sectionHeatmapStore, zoneCoverageStore]);
+  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, coverageRun]);
 
   // --- auto-run: recompute automatically once results go stale, throttled to
   // at most AUTO_RUN_MAX_HZ runs/sec ------------------------------------------
