@@ -43,20 +43,22 @@ spec change:
 Because React owns state and the Three.js side is one imperative sink (`SceneView`,
 see [ARCHITECTURE.md](./ARCHITECTURE.md)), a typical feature touches three places:
 
-1. **State** — add `useState` in `App.tsx`. If the scene needs to reflect it, add
-   a field to `SceneViewState` (`scene/sceneView/`) and include it in the
-   `sceneViewState` snapshot — App builds the snapshot; it no longer mirrors state
-   into imperative callbacks. A `useRef` mirror is now only for the run/handler
-   path (values `handleRun`/`applyScene` read imperatively), not for the scene.
+1. **State** — if it is part of the editable scene document (an entity field, a
+   selection/collapse/dirtiness rule), add a case (and, if needed, an action) to
+   `scene/sceneReducer.ts` and `dispatch` it from a thin `App.tsx` handler; put
+   any new stale/samplingDirty rule there. Otherwise (viewport UI, run output,
+   geometry build) add `useState` in `App.tsx`. The only `useRef`s are the async
+   run/handler path (the `stateRef` mirror + `roomRef`/`runGenerationRef`/`bvhRef`).
 2. **Pure logic** — put the actual decision/derivation in a pure function under
    `scene/` or `ui/` (e.g. how selection resolves, how a chunk maps to voxels),
    so it can be unit-tested without React or a GPU.
-3. **Sink + UI** — consume the new snapshot field in a guarded block of
-   `SceneView.sync()` (drive the relevant `scene/*` object's `update()`/
-   `setOptions()`), and render a presentational `ui/*` component driven by
-   props/callbacks. A drag that edits state comes back through `onTransform`.
+3. **Sink + UI** — if the scene must reflect it, add a field to `SceneViewState`
+   (`scene/sceneView/`), include it in the `sceneViewState` snapshot, and consume
+   it in a guarded block of `SceneView.sync()`; render a presentational `ui/*`
+   component driven by props/callbacks. A drag that edits state comes back through
+   `onTransform` → `dispatch`.
 
-Then add a test for the pure function.
+Then add a test — for the reducer transition and/or the pure function.
 
 ## Testing
 

@@ -62,24 +62,32 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
 
 ## State management
 
-All state lives in `App.tsx` `useState` — cameras, probes, sections,
-`geometryObjects` (the scene-file source of truth, spec §14.1) + `room` (its
-built `GeometryBuild`: collision mesh + renderable group + workspace bounds),
-selection, `collapsedIds`, overlay options, `voxelSize`
-(debounced 250 ms), summary, stale flag, `autoRun`, transform mode/space, gizmo
-visibility, `sectionsVisible` (the viewport master toggle), probe queries,
-`masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`,
-inspector split height. Per-section `SectionCellGrid`s are derived state
-(`useMemo` over `sections` + `masksVersion`), not stored directly. All of that,
-plus two derived `useMemo`s (`clipBand`, `sightlines`), is bundled into one
-immutable `sceneViewState` (`useMemo`) and pushed to `SceneView.sync()` in a
+State is split in two. The **editable scene document** — cameras, probes,
+sections, `clipSectionId`, zones, volumes, `useZones`, plus `selection`,
+`collapsedIds`, and the `stale`/`hasRunOnce`/`samplingDirty` machine — lives in a
+single pure reducer, `scene/sceneReducer.ts`, reached via `useReducer` in
+`App.tsx` and destructured for reading. Every CRUD/rename/toggle/duplicate
+handler, viewport selection, and transform drag is a thin `dispatch(...)`; the
+rules for which edit marks the result stale (and which also dirties the sampled
+region set) live in that one tested transition, not in effects (spec §8.1). See
+DECISIONS.md.
+
+Everything else stays in `App.tsx` `useState`: `geometryObjects` (the scene-file
+source of truth, spec §14.1) + `room` (its built `GeometryBuild`), overlay
+options, `voxelSize` (debounced 250 ms), summary, `autoRun`, transform
+mode/space, gizmo visibility, `sectionsVisible` (viewport master toggle), probe
+queries, `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`,
+inspector split height, and the run-generation guard. Per-section
+`SectionCellGrid`s are derived (`useMemo` over `sections` + `masksVersion`). All
+of that, plus two derived `useMemo`s (`clipBand`, `sightlines`), is bundled into
+one immutable `sceneViewState` (`useMemo`) and pushed to `SceneView.sync()` in a
 single effect — SceneView diffs each field by reference, so an expensive op runs
-only on its own change. A handful of `useRef`s remain, but only for the
-**run/handler path** (`camerasRef`, `roomRef`, `runGenerationRef`,
-`samplingDirtyRef`, …), not for the scene sink; the ~21 mirror refs that used to
-feed the imperative Three.js callbacks now live as locals inside SceneView.
-**Auto-run** is a 10 Hz `setInterval` that fires `handleRun` when inputs are
-stale and the engine is idle and error-free (spec §8.1 throttle).
+only on its own change. The only `useRef`s left are the async run/handler path:
+`roomRef`, `runGenerationRef`, `bvhRef`, and **one `stateRef` mirroring the whole
+reducer state** so `handleRun` reads the live document across awaits (it replaced
+the ~7 per-field mirrors and `samplingDirtyRef`). **Auto-run** is a 10 Hz
+`setInterval` that fires `handleRun` when inputs are stale and the engine is idle
+and error-free (spec §8.1 throttle).
 
 `room` used to be a `useMemo(() => buildRoom(), [])` constant; it's now real
 state so scene-file import (spec §14) can replace it. The `SceneView.create()`
@@ -87,8 +95,9 @@ effect runs exactly once (it depends only on the stable `applyTransformChange`);
 the `room.group` swap and the clip planes are snapshot fields, so `sync()`
 adds/removes the geometry group on a `room` change without tearing down or
 recreating the WebGPU renderer/orbit camera. `applyScene` (in
-`App.tsx`) is the single place that replaces geometry + cameras + probes +
-sections + all derived/retained-run state together; `handleImportScene` is a
+`App.tsx`) is the single place that replaces the whole scene at once — the
+App-owned geometry build + retained-chunk stores as side effects, and the
+document in one `sceneReplaced` dispatch; `handleImportScene` is a
 thin wrapper around it and `scene/sceneIO.ts` (there is no in-app "reset to
 default" — see DECISIONS.md).
 
@@ -96,9 +105,11 @@ default" — see DECISIONS.md).
 
 **Entry / orchestration**
 - `main.tsx` — React entry; mounts `<App>` in StrictMode.
-- `App.tsx` — layout, engine lifecycle, all state orchestration, and building
-  the `sceneViewState` snapshot it pushes to `SceneView` (no direct Three.js
-  wiring — that lives in `scene/sceneView/`).
+- `App.tsx` — layout, engine lifecycle, run orchestration, and building the
+  `sceneViewState` snapshot it pushes to `SceneView`. The editable scene document
+  is a `useReducer(sceneReducer)`; App dispatches actions rather than holding that
+  state directly, and does no direct Three.js wiring (that lives in
+  `scene/sceneView/`).
 - `worker.ts` — SDK worker host + warning side-channel.
 - `engine/useEngine.ts` — `WorkerClient` lifecycle + init/load/setCameras/compute
   wrappers with CPU fallback.
@@ -127,6 +138,14 @@ default" — see DECISIONS.md).
 - `sceneModel.ts` — the unified `Scene` type (`geometry + cameras + probes +
   sections + zones + volumes + useZones`, spec §14.1) + `defaultScene()`, the
   single source of the boot state (zones/volumes empty, `useZones` false).
+- `sceneReducer.ts` — the pure scene-document reducer (`sceneReducer` +
+  `initSceneState`): the `Scene` fields minus geometry, plus `selection`,
+  `collapsedIds`, and the `stale`/`hasRunOnce`/`samplingDirty` flags. A
+  fine-grained typed `SceneAction` union drives every CRUD/rename/toggle/
+  duplicate/transform/selection edit; it allocates ids (`nextFreeId`) and calls
+  the `entityDuplication` helpers, and is the one place the stale-marking rules
+  (spec §8.1) live. Pure — App does the impure work around each dispatch.
+  Unit-tested in `test/sceneReducer.test.ts`.
 - `sceneGeometryBuild.ts` — reduces a `GeometryObject[]` to one `GeometryBuild`
   (merged collision `SceneMesh` + renderable `THREE.Group` + workspace bounds,
   spec §14.6). `buildStaticGeometrySync` handles `room`/`box` only (the

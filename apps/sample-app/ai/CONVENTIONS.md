@@ -45,17 +45,22 @@ Grouped by layer:
 
 ## The state pattern
 
-React owns canonical state; the Three.js side is a single imperative sink,
-`SceneView` (`scene/sceneView/`), fed one immutable snapshot per change through
-`sync()` and answering with resolved `onSelect`/`onTransform` events. SceneView
-diffs the snapshot by reference internally, so each `scene/*` object's
-`update()`/`setOptions()` still fires only on its own inputs — but App no longer
-mirrors live state into imperative callbacks (that now lives inside SceneView).
-**Keep engine/renderer mutation out of component render bodies.** Factor pure
+React owns canonical state; the **editable scene document** is a pure
+`useReducer(sceneReducer)` (`scene/sceneReducer.ts`), so every entity edit is a
+`dispatch(action)` and the stale-marking rules live in one tested transition, not
+in effects. The Three.js side is a single imperative sink, `SceneView`
+(`scene/sceneView/`), fed one immutable snapshot per change through `sync()` and
+answering with resolved `onSelect`/`onTransform` events (which App turns back into
+dispatches). SceneView diffs the snapshot by reference internally, so each
+`scene/*` object's `update()`/`setOptions()` still fires only on its own inputs;
+App no longer mirrors live state into imperative callbacks (that lives inside
+SceneView). **Keep engine/renderer mutation out of component render bodies, and
+keep scene-document transitions pure in the reducer** — impure work (geometry
+build/dispose, stores, engine, BVH) stays in App around the dispatch. Factor pure
 decision logic out of React/Three so it can be unit-tested (see below) — this is
 why `viewportSelection`, `transformSpace`, `leftPanelSplit`, `sceneTree`, the
-slab/chord math, probe `locateVoxel`, and SceneView's own `pick` /
-`transformReadback` are standalone pure functions.
+slab/chord math, probe `locateVoxel`, the `sceneReducer`, and SceneView's own
+`pick` / `transformReadback` are standalone pure functions.
 
 ## Testing
 
@@ -64,10 +69,11 @@ slab/chord math, probe `locateVoxel`, and SceneView's own `pick` /
 - **Tests target pure functions only** — never the React render tree or live
   Three.js/WebGPU. Existing suites: `sceneTree`, `coverageOverlay`,
   `transformSpace`, `volumetric`, `leftPanelSplit`, `probeVisibility`,
-  `viewportSelection`, `sectionHeatmap`, `sceneView/pick`,
+  `viewportSelection`, `sectionHeatmap`, `sceneReducer`, `sceneView/pick`,
   `sceneView/transformReadback`. The imperative `SceneView` class itself stays
   untested (like `viewport.ts`); its decision logic is tested through those two
-  pure helpers.
+  pure helpers. `sceneReducer.test.ts` covers the stale/samplingDirty rules and
+  selection-follows-CRUD — the orchestration that used to be untestable in App.
 - **Every change ships with a test.** When adding behavior, extract the decision
   logic into a pure function in `scene/`/`ui/` and test that, rather than testing
   through React.

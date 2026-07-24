@@ -6,6 +6,54 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The editable scene document lives in a pure `sceneReducer`
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5, §8.1, §12–§13;
+[`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §4 — a pure
+structural extraction (no spec edit) **except two spec-alignment fixes noted
+below**. The scene document — cameras, probes, sections, `clipSectionId`, zones,
+volumes, `useZones`, plus `selection`, `collapsedIds`, and the
+`stale`/`hasRunOnce`/`samplingDirty` flags — used to be ~11 `useState` in
+`App.tsx` mutated by ~34 scattered handlers, with the stale-marking rules hidden
+in two `useEffect`s keyed on `[cameras, debouncedVoxelSize]` and `[volumes,
+useZones]`. None of it was reachable by `node --test`.
+
+**Resolution.** One pure `sceneReducer(state, action)` (`scene/sceneReducer.ts`)
+owns that slice via `useReducer`; App destructures it for reading and every
+handler is a thin `dispatch`. A fine-grained typed `SceneAction` union carries
+each intent; the reducer allocates ids (`nextFreeId`) and calls the
+`entityDuplication` helpers. The stale/samplingDirty machine and
+selection-follows-CRUD now live in that one transition, unit-tested exhaustively
+in `test/sceneReducer.test.ts`.
+
+**Scope split.** The reducer is pure. `App.tsx` keeps the geometry build
+(`room`/`geometryObjects`), `voxelSize`, run outputs, the engine, the
+run-generation guard, and all impure orchestration (build disposal, retained-chunk
+store resets, the Generate BVH, engine calls) — done around each dispatch.
+`applyScene` resets the document in one `sceneReplaced` dispatch and does the
+impure rest; the debounced `voxelSize` dispatches `markStale`; `handleRun`
+dispatches `samplingApplied`/`runCompleted` and reads the live document across
+awaits through **one `stateRef`** mirroring reducer state (it replaced the ~7
+per-field mirror refs and `samplingDirtyRef`). Folding the run outputs or the
+generation guard in was rejected — that is run orchestration (a separate future
+step), not the document.
+
+**Two spec-alignment fixes.** The old effects marked stale on any change to the
+`[cameras]`/`[volumes]` array *reference*, which over-invalidated in two cases the
+reducer now encodes to match the spec/comments (both are wasted-recompute-only, so
+they bring code into spec compliance without a spec change): a **camera rename**
+marks neither stale nor dirty (spec §5.6 — renames never mark stale — like every
+other rename; the old `[cameras]` effect fired on it), and **deleting or
+duplicating an *empty* zone** marks neither (only a zone that actually had volumes
+is a sampled-set change; the old unconditional `setVolumes(filter)` fired on the
+new array reference regardless — duplicate-zone was already guarded).
+
+**Trade-off.** State reads now come from a destructured reducer value and the
+async run path reads one `stateRef` snapshot instead of live per-field refs;
+`samplingApplied` clears the dirty flag via dispatch rather than a synchronous
+ref write (same one-render race the ref version already had). Accepted for a
+single tested transition and ~140 fewer lines in `App.tsx`.
+
 ## App's imperative Three.js bridge collapsed behind a `SceneView` module
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2–§13 — **unchanged**; this was
@@ -276,10 +324,10 @@ disabled camera duplicates to a disabled one automatically via the verbatim copy
 special-casing. A zone **deep-copies its child volumes** (fresh ids, pointing at the new zone) so
 the copy is truly identical; a duplicated volume stays in the **same zone**.
 
-**Stale-marking is not explicit.** Duplicating flows through the same `setCameras`/`setVolumes`
-setters as add/delete, so the existing cameras/volumes `useEffect`s mark the result stale — a
-camera, a volume, or a non-empty zone marks stale; a probe, section, or empty zone does not, with no
-new stale plumbing.
+**Stale-marking follows the same rules as add/delete** — a camera, a volume, or a non-empty
+zone marks stale; a probe, section, or empty zone does not. (Originally this fell out of the
+shared cameras/volumes `useEffect`s; it is now encoded per-action in the `sceneReducer` — see
+the reducer entry at the top of this file — with the same outcome.)
 
 ---
 
