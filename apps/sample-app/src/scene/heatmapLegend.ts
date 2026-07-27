@@ -13,11 +13,16 @@
  *       - `coverageLegendScale` — **coverage mode**: the plain coverage fraction
  *         `0..1` (§13.3), also the fallback the section scale uses before a run.
  *
- * All pure (no React / no THREE) so the tick math is unit-testable (see
- * `test/heatmapLegend.test.ts`). This module imports only the `SectionAggregation`
- * and `OverlayMode` *types*, so there is no runtime import cycle.
+ * A third builder, `chooseHeatmapLegend`, picks *which* legend the floating widget
+ * shows (or none) from the current clip/overlay state — the section legend when an
+ * enabled section is clipping and a run is retained, else the overlay legend when the
+ * overlay is visible, else nothing (spec §13.6).
+ *
+ * All pure (no React / no THREE) so the tick math and the selection logic are
+ * unit-testable (see `test/heatmapLegend.test.ts`). This module imports only *types*
+ * from `sectionHeatmap.ts` / `coverageOverlay.ts`, so there is no runtime import cycle.
  */
-import type { SectionAggregation } from './sectionHeatmap.ts';
+import type { Section, SectionAggregation, SectionCellGrid } from './sectionHeatmap.ts';
 import type { OverlayMode } from './coverageOverlay.ts';
 
 // --- Turbo-style colormap (spec §13.5): dark blue (0) through cyan, green,
@@ -165,4 +170,39 @@ export function sectionLegendScale(
     };
   }
   return coverageLegendScale();
+}
+
+/** Overlay state the legend selector needs — a subset of `OverlayOptions` (§9). */
+export interface OverlayLegendState {
+  visible: boolean;
+  overlayHue: number;
+  mode: OverlayMode;
+}
+
+/**
+ * Pick the floating legend the widget shows, or `null` to hide it (spec §13.6).
+ *
+ * The legend always describes the **clipping section** — never the current selection.
+ * `clipSection` is the enabled section clipping the *visible* section layer (the
+ * caller resolves it via `sectionLegendVisible`), or `null` when no section is
+ * clipping. `clipGrid` is that section's retained cell grid, or `null` before a run.
+ *
+ *  - An enabled section is clipping (`clipSection != null`) → **section mode**: show the
+ *    section legend keyed to *its* aggregation and the retained run's camera count, but
+ *    only once a run is retained (`clipGrid != null`). Before a run the plane draws
+ *    nothing, so the widget is hidden (`null`) rather than showing a placeholder — and
+ *    it does **not** fall through to the overlay legend.
+ *  - Otherwise → the overlay legend when the overlay is visible, else `null`.
+ */
+export function chooseHeatmapLegend(
+  clipSection: Section | null,
+  clipGrid: SectionCellGrid | null,
+  overlay: OverlayLegendState,
+): LegendScale | null {
+  if (clipSection != null) {
+    return clipGrid != null
+      ? sectionLegendScale(clipSection.aggregation, clipGrid.cameraIds.length)
+      : null;
+  }
+  return overlay.visible ? overlayLegendScale(overlay.overlayHue, overlay.mode) : null;
 }

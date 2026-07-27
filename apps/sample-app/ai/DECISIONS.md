@@ -6,6 +6,35 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The section legend describes the clipping section and needs a retained run
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.5/§13.6. The bottom-right
+section legend used to key its scale off the **currently-selected** section and fall
+back to a plain Turbo "Coverage fraction" bar whenever `N` was unknown — including
+before any run. So adding a section and enabling clip (no run yet) showed a Turbo
+colorbar labeled "Coverage fraction" describing a plane that draws **nothing** (every
+cell transparent until a run is retained), and selecting a different entity blanked or
+changed the legend even though the *clipping* section's heatmap was what was on screen.
+
+**Resolution.** Two changes, both in `heatmapLegend.ts` + `App.tsx`:
+- The legend now describes the **clipping section** (`clipSectionId`), never the
+  selection — its aggregation drives the caption, and its retained run's
+  `cameraIds.length` drives `N`.
+- It **requires a retained run**: no cell grid → the legend is hidden (`null`), not a
+  placeholder. Since nothing is drawn pre-run, there is nothing to describe.
+
+The legend-selection logic moved out of an inline IIFE in `App.tsx` into a pure
+`chooseHeatmapLegend(clipSection, clipGrid, overlay)` builder in `heatmapLegend.ts`,
+returning `LegendScale | null`. **Why:** it makes the "which legend, or none" decision
+unit-testable (`test/heatmapLegend.test.ts`) instead of buried in JSX, and keeps the
+precedence explicit — an enabled clipping section claims the slot (hiding the widget
+when it has no run, rather than falling through to the overlay legend); only when no
+section is clipping does a visible overlay show its legend. The one surviving fallback
+is defensive: a run retained with **zero** enabled cameras (`N=0`) still uses the plain
+fraction scale to avoid a `k/0` tick position. `heatmapLegend.ts` imports only *types*
+from `sectionHeatmap.ts` (the builder takes already-resolved `Section`/`SectionCellGrid`
+values), so the existing `turboColormap` import back the other way stays acyclic.
+
 ## A `CoverageRun` coordinator owns the retained-chunk consumers + the run guard
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §9, §12–§13, §14.4;
@@ -530,11 +559,18 @@ renders as a floating `.viewport-legend` overlay at the viewport bottom-right (a
 overlay beside the two top toolbars, §2.4) rather than as a right-sidebar panel, and
 shows **one of two legends, or nothing**:
 - **Section legend** when `sectionLegendVisible(sectionsVisible, sections, clipSectionId)`
-  holds — the master toggle is on **and** `clipSectionId` references an existing,
-  **enabled** section (§13.9). Turbo bar; scale is selection-driven (§13.6).
-- **Coverage-overlay legend** when the section legend is *not* shown **and** the coverage
+  holds **and** the clipping section has a retained cell grid — the master toggle is on,
+  `clipSectionId` references an existing, **enabled** section (§13.9), and a run exists.
+  Turbo bar; scale keyed to the **clipping** section's aggregation, not the selection
+  (§13.6). Before a run the plane draws nothing, so the widget is hidden.
+- **Coverage-overlay legend** when **no** enabled section is clipping **and** the coverage
   overlay is visible (`overlayOptions.visible`, §9) — the overlay's hue-intensity ramp
   (coverage mode) or solid swatch (blind-spots mode) via `overlayLegendScale(hue, mode)`.
+  A clipping-but-not-yet-run section keeps the slot (widget hidden), so it does not fall
+  through to the overlay legend.
+
+The three-way choice (section / overlay / none) is a pure `chooseHeatmapLegend` builder
+in `heatmapLegend.ts`, not inline JSX — see the top-of-file decision.
 
 **Why:** the widget always describes whatever coverage visualization is actually on
 screen — the clipped section heatmap when you're inspecting a slice, otherwise the voxel
@@ -554,7 +590,7 @@ presentational — the gates never touch `compute()`. It stays an opaque `.panel
 (plus a drop shadow to lift it off the 3D scene) rather than a translucent HUD, for
 consistency with every other panel and guaranteed readability over bright cells.
 
-## Section legend labels track the selected section's aggregation
+## Section legend labels track the clipping section's aggregation
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.5/§13.6. The colorbar is a
 fixed Turbo gradient (value→color is always the linear `0..1` mapping), but its tick
@@ -563,12 +599,14 @@ pure builders that both return `{caption, ticks:[{label, pos}]}`:
 - `sectionLegendScale(aggregation, cameraCount)` — **section mode**: a **camera count**
   `0..N` for `mean`/`max`/`min` (N = the retained run's enabled-camera count, i.e. the
   coverage-fraction denominator; count `k` sits at position `k/N` because the mapping is
-  linear), or a **percentage** for `blind`. It delegates to `coverageLegendScale()` when
-  `N` is unknown (no aggregation / no run yet).
+  linear), or a **percentage** for `blind`. It delegates to `coverageLegendScale()` only
+  in the defensive `N=0` case (a run retained with no enabled cameras); the widget is
+  hidden outright before any run rather than showing this fallback (§13.6).
 - `coverageLegendScale()` — **coverage mode**: the plain coverage **fraction** `0..1`.
 
-Both live in **`heatmapLegend.ts`** (not `sectionHeatmap.ts`), and the caller (App)
-picks the mode — section scale when a section is selected, coverage scale otherwise.
+Both live in **`heatmapLegend.ts`** (not `sectionHeatmap.ts`); the `chooseHeatmapLegend`
+builder there picks the mode — the section scale keyed to the **clipping** section (once
+a run exists), the overlay scale when no section is clipping, or none.
 **Why the split & the module:** the widget serves two conceptually different scales
 ("how many cameras see this" vs. an abstract `0..1` coverage fraction); folding both
 into a section-named function/module read as section-only and hid the coverage case, so

@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  chooseHeatmapLegend,
   coverageLegendScale,
   overlayLegendScale,
   sectionLegendScale,
   turboColormap,
   turboCssGradient,
 } from '../src/scene/heatmapLegend.ts';
+import type { Section, SectionAggregation, SectionCellGrid } from '../src/scene/sectionHeatmap.ts';
 
 // --- Turbo colormap (spec §13.5) ---------------------------------------------
 
@@ -126,4 +128,59 @@ test('sectionLegendScale: adaptive step keeps ~5-9 ticks and always includes 0 a
 test('sectionLegendScale: N=100 uses a nice step of 20', () => {
   const scale = sectionLegendScale('max', 100);
   assert.deepEqual(scale.ticks.map((t) => t.label), ['0', '20', '40', '60', '80', '100']);
+});
+
+// --- chooseHeatmapLegend (which legend the widget shows, spec §13.6) ----------
+
+function makeSection(aggregation: SectionAggregation): Section {
+  return {
+    id: 'section-1', orientation: 'horizontal', min: 0, max: 1, minA: 0, maxA: 1,
+    minB: 0, maxB: 1, aggregation, enabled: true, clipRange: 1, name: '',
+  };
+}
+
+function makeGrid(cameraIds: string[]): SectionCellGrid {
+  return {
+    dimsA: 1, dimsB: 1, cells: [], camWords: 1, cameraIds,
+    extentA: { min: 0, max: 1 }, extentB: { min: 0, max: 1 },
+  };
+}
+
+const NO_OVERLAY = { visible: false, overlayHue: 210, mode: 'coverage' as const };
+
+test('chooseHeatmapLegend: clipping section with a retained run shows its section legend', () => {
+  const scale = chooseHeatmapLegend(makeSection('mean'), makeGrid(['a', 'b', 'c']), NO_OVERLAY);
+  // Keyed to the CLIP section's aggregation + the run's camera count (N=3).
+  assert.deepEqual(scale, sectionLegendScale('mean', 3));
+  assert.equal(scale?.caption, 'Cameras seeing voxel');
+});
+
+test('chooseHeatmapLegend: blind clip section reads its own aggregation, not the selection', () => {
+  const scale = chooseHeatmapLegend(makeSection('blind'), makeGrid(['a', 'b']), NO_OVERLAY);
+  assert.equal(scale?.caption, 'Blind-voxel share');
+});
+
+test('chooseHeatmapLegend: clipping but no retained run hides the legend (no Turbo fallback)', () => {
+  // The reported bug: add a section + enable clip, before any run → nothing drawn.
+  assert.equal(chooseHeatmapLegend(makeSection('mean'), null, NO_OVERLAY), null);
+});
+
+test('chooseHeatmapLegend: clipping + no run does NOT fall through to the overlay legend', () => {
+  const overlayVisible = { visible: true, overlayHue: 210, mode: 'coverage' as const };
+  assert.equal(chooseHeatmapLegend(makeSection('mean'), null, overlayVisible), null);
+});
+
+test('chooseHeatmapLegend: no clipping section shows the overlay legend when the overlay is visible', () => {
+  const scale = chooseHeatmapLegend(null, null, { visible: true, overlayHue: 120, mode: 'coverage' });
+  assert.deepEqual(scale, overlayLegendScale(120, 'coverage'));
+});
+
+test('chooseHeatmapLegend: no clipping section and hidden overlay shows nothing', () => {
+  assert.equal(chooseHeatmapLegend(null, null, NO_OVERLAY), null);
+});
+
+test('chooseHeatmapLegend: clip section legend wins over a visible overlay', () => {
+  const overlayVisible = { visible: true, overlayHue: 210, mode: 'blindspots' as const };
+  const scale = chooseHeatmapLegend(makeSection('max'), makeGrid(['a']), overlayVisible);
+  assert.equal(scale?.caption, 'Cameras seeing voxel');
 });

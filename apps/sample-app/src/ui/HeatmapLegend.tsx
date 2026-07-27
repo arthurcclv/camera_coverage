@@ -2,9 +2,9 @@
  * Heatmap legend (spec §2.2, §13.6): a compact floating colorbar — just the caption,
  * the colorbar gradient, and its numeric ticks (no block title, no colormap name).
  * Purely presentational: it renders whatever `LegendScale` it is handed, gradient and
- * all. The caller chooses which — a section scale (camera count / blind %) via
- * `sectionLegendScale`, the Turbo coverage fraction via `coverageLegendScale`, or the
- * coverage overlay's hue ramp via `overlayLegendScale` (all in `heatmapLegend.ts`).
+ * all. The caller picks which via `chooseHeatmapLegend` (`heatmapLegend.ts`) — a section
+ * scale (camera count / blind %) for the clipping section, the coverage overlay's hue
+ * ramp, or nothing — and only mounts this component when that returns a non-`null` scale.
  */
 import type { LegendScale } from '../scene/heatmapLegend.ts';
 

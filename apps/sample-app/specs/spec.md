@@ -981,10 +981,10 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
   meaning is labeled in the controls and Section stats so the shared legend stays
   unambiguous.
 - **Legend scale.** The colorbar gradient is fixed, but its numeric labels are read in
-  the units the selected section's aggregation encodes — a **camera count** (`0`..`N`)
-  for `mean`/`max`/`min`, a **percentage** for `blind`, or the plain coverage
-  **fraction** as a fallback — per §13.6. Value → color is still the same linear
-  Turbo mapping over `0..1`; only the *labels* change.
+  the units the **clipping section's** aggregation encodes — a **camera count** (`0`..`N`)
+  for `mean`/`max`/`min`, or a **percentage** for `blind` — per §13.6. The legend
+  requires a **retained run** and is hidden before one (nothing is drawn to describe).
+  Value → color is still the same linear Turbo mapping over `0..1`; only the *labels* change.
 
 ### 13.6 Controls & enablement
 
@@ -1011,36 +1011,40 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
   heatmaps/overlay themselves. The widget shows **one of two legends** (or nothing), all
   built by the pure builders in `heatmapLegend.ts`:
 
-  - **Section legend** — shown **when the section layer is visible *and* an enabled
-    section is currently clipping the scene** (the master **Section** toggle, §2.4, is
-    on **and** `clipSectionId` (§13.9, §14.1) references an existing section whose
-    **`enabled`** flag is set — which also guarantees `sections` is non-empty). The
-    `enabled` requirement ties the legend to a heatmap that is actually drawn: the
-    clipping section's heatmap plane renders only when the master toggle is on **and**
-    that section is enabled (§13.5), so a disabled clip section shows no legend. Its
-    colorbar is the **fixed Turbo gradient** (§13.5); its **numeric scale and caption
-    adapt to the currently-selected section's aggregation** (built by
+  - **Section legend** — shown **when the section layer is visible, an enabled section
+    is currently clipping the scene, *and* a run is retained** (the master **Section**
+    toggle, §2.4, is on; `clipSectionId` (§13.9, §14.1) references an existing section
+    whose **`enabled`** flag is set — which also guarantees `sections` is non-empty; and
+    that section has a **retained cell grid**, §13.4). Both extra conditions tie the
+    legend to a heatmap that is actually drawn: the clipping section's heatmap plane
+    renders only when the master toggle is on **and** that section is enabled (§13.5),
+    and before any `compute()` the plane draws nothing (every cell transparent). With no
+    heatmap to describe the legend is **hidden** rather than showing a placeholder scale
+    — so a disabled clip section, or a clip section with no retained run yet, shows no
+    legend. The legend describes the **clipping section** — the one whose heatmap the
+    clip reveals — **not** whatever entity is currently selected; selection never
+    affects it. Its colorbar is the **fixed Turbo gradient** (§13.5); its **numeric
+    scale and caption adapt to the clipping section's aggregation** (built by
     `sectionLegendScale`) so the numbers read in the units the heatmap encodes:
     - `mean` / `max` / `min` — the scale is a **camera count**, `0` to `N`, where `N`
-      is the enabled-camera count of the **retained run** the selected section's
+      is the enabled-camera count of the **retained run** the clipping section's
       heatmap reflects (the coverage-fraction denominator, §13.3; the same count the
       per-camera stats decode against). Because coverage fraction maps **linearly** to
       color, a count `k` sits at colorbar position `k / N`. Labels are **whole camera
       counts** at an **adaptive step** (a "nice" step — 1, 2, 5, 10, 20, 25, 50, … —
       chosen to yield ~5–9 roughly evenly-spaced ticks), always including `0` and `N`.
-      Caption: **"Cameras seeing voxel"**.
+      Caption: **"Cameras seeing voxel"**. (In the degenerate case of a run retained
+      with **no enabled cameras** — `N = 0` — the scale falls back to the plain
+      coverage fraction `0`..`1` via `coverageLegendScale` to avoid a `k / 0` scale.)
     - `blind` — the scale is the **blind-voxel share** as a **percentage**, `0%` to
       `100%` (ticks `0/50/100` only); camera counts are meaningless here (§13.5).
       Caption: **"Blind-voxel share"**.
-    - **No section selected, or no `compute()` completed yet** (so `N` is unknown) —
-      the scale falls back to the plain **coverage fraction** `0`..`1`
-      (ticks `0/0.25/0.5/0.75/1`, still over the Turbo gradient; built by
-      `coverageLegendScale`). Caption: **"Coverage fraction"**.
     For the section legend the Turbo gradient never changes — only its tick labels and
     caption do.
 
-  - **Coverage-overlay legend** — shown **when the section legend is *not* shown *and*
-    the coverage overlay is visible** (`overlayOptions.visible`, §9). Instead of the
+  - **Coverage-overlay legend** — shown **when no enabled section is clipping (so the
+    section legend does not apply) *and* the coverage overlay is visible**
+    (`overlayOptions.visible`, §9). Instead of the
     Turbo colormap it reflects the overlay's **own appearance** (§9.1, §9.2), built by
     `overlayLegendScale(overlayHue, mode)`:
     - **Coverage** mode — a **transparent → full-hue intensity ramp** in the current
@@ -1050,9 +1054,10 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
       full intensity, so there is no fraction scale, §9.1). Caption: **"Blind spots"**;
       no numeric ticks.
 
-  When neither applies (no section legend **and** the overlay hidden) the widget is
-  hidden, so it never floats over a scene with nothing to describe. Switching or
-  relabeling between the two is instant and never triggers `compute()` (§13.4).
+  The widget is hidden whenever it has **nothing to describe** — no enabled section
+  clipping **and** the overlay hidden, or an enabled section clipping but **no run
+  retained yet** — so it never floats over a scene with nothing to describe. Switching
+  or relabeling between the two is instant and never triggers `compute()` (§13.4).
 - **Enabled.** Each section's hierarchy row has an **enabled checkbox**
   ("Enable/Disable section") toggling that one heatmap on/off (the section analog of
   the camera enable checkbox, §5.4, and the unified `onToggleEnabled` handler, but

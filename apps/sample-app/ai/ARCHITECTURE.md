@@ -217,11 +217,14 @@ default" — see DECISIONS.md).
   colormap (`turboColormap`/`turboCssGradient`) and three pure legend-scale builders,
   each returning a `LegendScale` (`{caption, ticks, gradient}`): `sectionLegendScale`
   (section mode: camera-count / blind-share, Turbo), `coverageLegendScale` (Turbo plain
-  fraction — the section legend's fallback), and `overlayLegendScale(hue, mode)` (the
-  coverage overlay's **hue-intensity ramp** / solid blind-spots swatch, §9.1/§9.2). The
-  gradient rides on `LegendScale` so the component stays dumb. Imports only the
-  `SectionAggregation` and `OverlayMode` *types*, so runtime deps stay one-way. Pure —
-  no React, no Three.js.
+  fraction — the `N=0` defensive fallback), and `overlayLegendScale(hue, mode)` (the
+  coverage overlay's **hue-intensity ramp** / solid blind-spots swatch, §9.1/§9.2). Plus
+  `chooseHeatmapLegend(clipSection, clipGrid, overlay)` — the pure selector that returns
+  the right `LegendScale` **or `null`** (§13.6): the section legend keyed to the
+  **clipping** section once a run is retained, else the overlay legend, else hidden. The
+  gradient rides on `LegendScale` so the component stays dumb. Imports only *types* from
+  `sectionHeatmap.ts` / `coverageOverlay.ts`, so runtime deps stay one-way. Pure — no
+  React, no Three.js.
 - `sectionGizmos.ts` — per-section heatmap plane (`DataTexture`) + min/max bound
   outlines + axis-constrained TransformControls target; consumes
   `sectionHeatmap.ts`'s output (including its rotation/sign math), owns no

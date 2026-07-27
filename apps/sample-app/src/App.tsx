@@ -15,7 +15,7 @@ import {
   type Section,
   type SectionCellGrid,
 } from './scene/sectionHeatmap.ts';
-import { coverageLegendScale, overlayLegendScale, sectionLegendScale } from './scene/heatmapLegend.ts';
+import { chooseHeatmapLegend } from './scene/heatmapLegend.ts';
 import { DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
 import { CoverageRun } from './scene/coverageRun.ts';
 import {
@@ -1027,20 +1027,20 @@ export function App() {
             />
           </div>
           {(() => {
-            // The bottom-right legend shows the section legend when an enabled section
-            // is clipping (§13.6), else the coverage-overlay legend when the overlay is
-            // visible (§9); hidden when neither applies.
-            const sectionLegend = sectionLegendVisible(sectionsVisible, sections, clipSectionId);
-            const coverageLegend = !sectionLegend && overlayOptions.visible;
-            if (!sectionLegend && !coverageLegend) return null;
-            const scale = sectionLegend
-              ? selectedSection
-                ? sectionLegendScale(
-                    selectedSection.aggregation,
-                    sectionCellGrids.get(selectedSection.id)?.cameraIds.length ?? null,
-                  )
-                : coverageLegendScale()
-              : overlayLegendScale(overlayOptions.overlayHue, overlayOptions.mode);
+            // The bottom-right legend describes the *clipping* section (not the
+            // selection) when one is clipping and a run is retained (§13.6), else the
+            // coverage-overlay legend when the overlay is visible (§9); hidden otherwise.
+            const clipSection =
+              sectionLegendVisible(sectionsVisible, sections, clipSectionId)
+                ? sections.find((s) => s.id === clipSectionId) ?? null
+                : null;
+            const clipGrid = clipSection ? sectionCellGrids.get(clipSection.id) ?? null : null;
+            const scale = chooseHeatmapLegend(clipSection, clipGrid, {
+              visible: overlayOptions.visible,
+              overlayHue: overlayOptions.overlayHue,
+              mode: overlayOptions.mode,
+            });
+            if (!scale) return null;
             return (
               <div className="viewport-legend">
                 <HeatmapLegend scale={scale} />
