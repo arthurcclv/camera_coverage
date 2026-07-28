@@ -6,6 +6,47 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Position / rotation / size are numeric text fields, not sliders
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.1, §5.2, §5.2.1, §12.3 and
+[`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §6.1. The camera,
+probe, and volume editors used one `Slider` per axis for position, Euler rotation,
+and (volume) size. Sliders can't express an exact value and were capped to arbitrary
+UI ranges (camera Pos X ±12 m, etc.) that could be smaller than the scene needs.
+
+**Resolution.** Every X/Y/Z and yaw/pitch/roll triplet is now a `Vec3Field` — a
+group label (Position / Rotation / Size) plus three numeric text fields on one row.
+FOV and Range stay sliders (single scalars that were always bounded).
+
+Decisions worth recording:
+
+- **Commit on blur/Enter, revert on Escape; a focused field holds the raw typed
+  string.** Two forces drove this over live-per-keystroke commit: every edit marks the
+  run stale and re-renders the scene (one commit per edit, not per keystroke), and the
+  rotation Euler is re-derived from the quaternion on each render — committing mid-type
+  would round-trip through `quatToEuler` and **overwrite the caret**. Holding the draft
+  string while focused (and not overwriting it from props) sidesteps both; unfocused
+  fields still track the live value, so gizmo drags update the numbers.
+- **Rotation columns are axis-correct (X=pitch, Y=yaw, Z=roll), reordered for display
+  only.** `eulerToQuat`/`quatToEuler` still speak `{yaw,pitch,roll}` in `YXZ` order
+  (`cameras/math.ts` unchanged) — the label/order change is purely presentational.
+- **Clamp meaningful, free the rest.** Pitch stays ±89° (gimbal) and volume size keeps
+  its per-axis voxel floor; position/yaw/roll drop their former slider bounds and accept
+  any finite value. Invalid/empty input reverts to the last committed value (never NaN).
+- **Parse/clamp/revert *and the commit decision* extracted to a pure `numberField.ts`
+  helper.** `commitNumberField` does parse+clamp+revert; `resolveFieldCommit` decides
+  whether a focused field's raw string should write at all, returning `null` for a no-op.
+  Crucially it compares the raw string against the field's **displayed** value
+  (`value.toFixed(digits)`), not the higher-precision stored value — otherwise a
+  focus-then-blur on a rotation field showing "45" (stored 45.4° from a quat round-trip)
+  would spuriously commit 45 and mark the run stale on a zero-edit interaction. **Why a
+  pure helper:** it makes the only interesting logic unit-testable under `node --test`
+  (`test/numberField.test.ts`) without a DOM harness — the `Vec3Field` component and the
+  three panels are thin glue, matching the existing "logic in a pure module" pattern
+  (`leftPanelSplit.ts`). (The spurious-commit case above was caught in code review
+  precisely because it originally lived in the untested React glue; moving it into
+  `resolveFieldCommit` both fixed it and covered it with a regression test.)
+
 ## The section legend describes the clipping section and needs a retained run
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.5/§13.6. The bottom-right

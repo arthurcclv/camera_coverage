@@ -267,13 +267,14 @@ default" — see DECISIONS.md).
   left panel, above the hierarchy; hidden entirely where the File System Access
   API is unavailable.
 - `SceneHierarchy.tsx` — tree view, add menu, duplicate/delete context menu, per-kind rows.
-- `CameraPanel.tsx` — selected-camera position / Euler / FOV / range (far) sliders.
-- `ProbePanel.tsx` — probe position sliders + visibility readout + stale hint.
+- `CameraPanel.tsx` — selected-camera editor: Position + Rotation as grouped
+  numeric text fields (`Vec3Field`, §5.2.1); FOV / range (far) stay sliders.
+- `ProbePanel.tsx` — probe position (grouped text field) + visibility readout + stale hint.
 - `SectionPanel.tsx` — orientation / thickness / aggregation editor for the
   selected section (thickness keeps the section's center fixed; position only
   changes via the viewport drag).
-- `VolumePanel.tsx` — selected-volume position / Euler / size sliders + a zone
-  reassignment dropdown.
+- `VolumePanel.tsx` — selected-volume Position / Rotation / Size as grouped numeric
+  text fields (`Vec3Field`, §5.2.1) + a zone reassignment dropdown.
 - `ZonePanel.tsx` — selected-zone editable name + member count + per-zone coverage
   stats (whether the zone is enabled is controlled by the zone row's checkbox, not here).
 - `OverlayControls.tsx` — resolution slider + overlay mode / color / intensity.
@@ -302,6 +303,11 @@ default" — see DECISIONS.md).
   blind / min / max / per-camera).
 - `RunBar.tsx` — run button, auto-run, backend / stale / error indicators.
 - `Slider.tsx` — reusable labeled range slider (optional gradient track).
+- `Vec3Field.tsx` — grouped numeric vector editor (§5.2.1): a group label + three
+  labeled text fields; each commits on blur/Enter, reverts on Escape, and holds the
+  raw string while focused so a gizmo drag / Euler round-trip can't stomp the caret.
+- `numberField.ts` — pure parse → clamp → revert helper behind `Vec3Field`
+  (`commitNumberField`); the single test seam for field behavior (`test/numberField.test.ts`).
 - `leftPanelSplit.ts` — pure clamp + `localStorage` (de)serialization for the
   draggable divider.
 

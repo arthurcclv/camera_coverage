@@ -111,8 +111,17 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   (8 px left). A `.stat-line.spaced` sets a stat row off from the controls above
   it (8 px top). No inline spacing styles — spacing lives in `index.css`.
 - **Row** (`.row`): label left, control right, space-between, 12 px label +
-  right-aligned `.value-chip`. `Slider.tsx` is the one reusable control (plain
-  range, plus a `.spectrum` rainbow variant with a white thumb for hue).
+  right-aligned `.value-chip`. `Slider.tsx` is the reusable control for bounded
+  scalars (plain range, plus a `.spectrum` rainbow variant with a white thumb for
+  hue) — e.g. FOV, Range, resolution.
+- **Vector field** (`.vec-row`, `Vec3Field.tsx`): the editor for X/Y/Z and
+  yaw/pitch/roll triplets (position, rotation, size) — a **fixed 58 px group label**
+  (`.vec-group-label`, keeps the field grids aligned across Position / Rotation /
+  Size) then a `.vec-fields` grid of three equal columns. Each `.vec-field` is a dim
+  10 px axis letter (`.vec-axis`, `#7c8592`) + a dark text input (`#14161a` field,
+  `#2a2e36` border, 4 px radius, tabular-nums; blue `#3a5ba0` focus border). Fields
+  commit on blur/Enter and revert on Escape; no `.value-chip` (the input shows the
+  value). Rotation columns are axis-correct: X = pitch, Y = yaw, Z = roll.
 - **Button** (`.btn`): blue primary; `.secondary` neutral; `.active` = blue
   (toggle "on"); disabled goes flat grey. `.block` makes a full-width stacked
   action button (8 px top margin, e.g. "Generate from geometry"). `.icon-btn` for

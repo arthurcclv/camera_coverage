@@ -6,7 +6,7 @@
  */
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 import { probeLabel, type Probe, type ProbeVisibilityResult } from '../scene/probeVisibility.ts';
-import { Slider } from './Slider.tsx';
+import { Vec3Field } from './Vec3Field.tsx';
 
 export interface ProbePanelProps {
   probe: Probe | null;
@@ -50,9 +50,16 @@ export function ProbePanel({ probe, query, hasRunOnce, stale, cameraNameById, on
           />
         </div>
 
-        <Slider label="Pos X" value={probe.position[0]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(0, v)} />
-        <Slider label="Pos Y" value={probe.position[1]} min={0} max={6.5} step={0.1} onChange={(v) => setPosition(1, v)} />
-        <Slider label="Pos Z" value={probe.position[2]} min={-12} max={12} step={0.1} onChange={(v) => setPosition(2, v)} />
+        {/* Position: free (spec §5.2.1). Probe edits never mark the run stale (§12.5). */}
+        <Vec3Field
+          label="Position"
+          digits={2}
+          columns={[
+            { label: 'X', value: probe.position[0], onCommit: (v) => setPosition(0, v) },
+            { label: 'Y', value: probe.position[1], onCommit: (v) => setPosition(1, v) },
+            { label: 'Z', value: probe.position[2], onCommit: (v) => setPosition(2, v) },
+          ]}
+        />
 
         {stale && hasRunOnce && (
           <p className="hint warn">⚠ Coverage out of date — recompute</p>

@@ -344,9 +344,13 @@ for **both**:
 ### 5.1 Rotation representation
 
 - The **quaternion is the source of truth** stored per camera.
-- The panel exposes **Euler yaw / pitch / roll** sliders, converted to/from the
-  quaternion (`cameras/math.ts`). The TransformControls gizmo writes the
-  quaternion directly; the Euler sliders are re-derived for display.
+- The panel exposes **Euler yaw / pitch / roll** as numeric text fields (§5.2,
+  §5.2.1), converted to/from the quaternion (`cameras/math.ts`). The rotation row
+  is **axis-labeled X / Y / Z** — X = rotation about X (**pitch**), Y = about Y
+  (**yaw**), Z = about Z (**roll**), matching the `YXZ` Euler order in
+  `cameras/math.ts` — not the words yaw/pitch/roll. The TransformControls gizmo
+  writes the quaternion directly; the Euler fields are re-derived for display,
+  except a field is not re-derived while it is focused (§5.2.1).
 
 ### 5.2 Editing interaction
 
@@ -362,16 +366,50 @@ for **both**:
   TransformControls gizmo). Only a genuine click deselects: a click that concludes a
   camera-orbit or TransformControls drag (pointer moved past a small threshold between
   press and release) is ignored and leaves the selection unchanged.
-- **Panel sliders** edit the selected camera: position X/Y/Z, yaw/pitch/roll, FOV,
-  and **Range (far)** — the detection range / far frustum plane (`CameraConfig.far`),
-  slider range 0.5–100 m, step 0.1. Editing it resizes the frustum gizmo (§5.3) live
-  and invalidates the displayed coverage result (§5.4).
+- **Panel fields** edit the selected camera. **Position** (X/Y/Z) and **rotation**
+  (X/Y/Z = pitch/yaw/roll, §5.1) are each a **grouped row of three numeric text
+  fields** (§5.2.1). **FOV** and **Range (far)** — the detection range / far frustum
+  plane (`CameraConfig.far`), range 0.5–100 m, step 0.1 — remain **sliders**. Editing
+  any of them resizes the frustum gizmo (§5.3) live where applicable and invalidates
+  the displayed coverage result (§5.4, §8.1).
 - **Name field** — a text input at the top of the panel edits the camera's display
-  name (§5.6). Unlike the sliders, editing the name is a pure display change: it
-  never resizes a gizmo and never invalidates coverage.
+  name (§5.6). Unlike the position/rotation fields, editing the name is a pure display
+  change: it never resizes a gizmo and never invalidates coverage.
 - **TransformControls** gizmo (translate + rotate modes, in Local or Global space
   per the §2.4 space toggle) on the selected camera in the viewport, kept in
   two-way sync with the panel.
+
+### 5.2.1 Numeric text-field editing
+
+Position, rotation, and volume size (`sampling_volumes.md` §6.1) are edited through
+**grouped rows of three numeric text fields** — one row per vector: a group label
+(Position / Rotation / Size) followed by three fields carrying dim axis letters
+**X / Y / Z**. FOV and Range (§5.2) are single scalars and stay sliders. Shared
+behavior for every numeric text field:
+
+- **Commit on blur or Enter**; **Escape** reverts to the last committed value. While
+  a field is **focused** it holds the raw typed string and is **not** overwritten by
+  re-derived props, so a concurrent gizmo drag or an Euler→quat→Euler round-trip
+  (§5.1) never stomps the caret. An **unfocused** field always shows the live value.
+- **Invalid or empty** input (anything that is not a finite number) reverts to the
+  last committed value on commit — the scene is never written a `NaN`.
+- **Bounds — clamp meaningful, free the rest.** Constraints that protect the engine
+  are clamped: **pitch ∈ [−89, 89]°** (avoids gimbal degeneracy, §5.1) and volume
+  **size ≥ the per-axis floor** (`sampling_volumes.md` §5). **Position, yaw, and
+  roll are unbounded** — any finite value is accepted; the former slider min/max on
+  those were arbitrary UI extents and are dropped.
+- A committed edit marks the result stale (§8.1) **once per commit**, like any other
+  camera/volume edit. Probe position is the exception — it never marks stale (§12.5).
+  Focusing and blurring a field **without a real change** — no edit, or a value that
+  rounds/clamps back to the one already shown — is **not** a commit and marks nothing
+  stale (the commit decision compares against the field's displayed value, not the
+  higher-precision stored value it may carry from a quat round-trip or gizmo drag).
+- Unfocused display precision matches the former sliders: position/size to 2 decimals,
+  rotation to 0 decimals.
+
+The parse → clamp → revert decision is a pure function independent of React, so it can
+be unit-tested directly (see testing notes); the field component and each panel are
+thin wrappers over it.
 
 ### 5.3 Frustum gizmos
 
@@ -765,7 +803,9 @@ When a probe is selected (§5.2), the left panel shows, in place of the camera p
 - header `Probe — <name>` (§12.1);
 - a **Name** text input editing the probe's display name — live, and never marks the
   result stale (§12.1, §5.6);
-- **position X / Y / Z** sliders (a point has no orientation — no rotation or FOV);
+- **position X / Y / Z** as a grouped row of numeric text fields (§5.2.1) — a point
+  has no orientation, so there is no rotation or FOV. Editing position follows §5.2.1
+  but, like dragging the marker, **never marks the result stale** (§12.5);
 - a **visibility readout** against the enabled cameras of the retained run:
   - a summary line **"Seen by K of N cameras"** (N = that run's enabled-camera count),
   - one row per enabled camera marked **visible (✓)** or **not visible (–)**, decoded
@@ -797,10 +837,11 @@ within one throttled run.
 - Selecting a probe attaches `TransformControls` in **translate mode only**; the
   rotate mode/toggle (§2.4) is disabled/ignored while a probe is selected (a point has
   no orientation). Dragging the marker edits the probe position, kept in two-way sync
-  with the panel sliders.
+  with the panel fields (§5.2.1).
 - Moving a probe **re-reads the existing masks** as it crosses voxel boundaries and
   updates the panel and sightlines live; it does **not** mark results stale or trigger
-  recompute (a probe is not part of the coverage input, §12.5).
+  recompute (a probe is not part of the coverage input, §12.5). Position edits stay in
+  two-way sync with the panel fields (§5.2.1).
 - **Sightlines.** While a probe is selected, a **green line segment** is drawn from
   the probe to each camera that **sees** it (visible cameras only), rebuilt when the
   probe moves or the masks change. Only the selected probe draws sightlines.

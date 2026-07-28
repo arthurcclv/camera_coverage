@@ -7,7 +7,7 @@
  */
 import { eulerToQuat, quatToEuler } from '../cameras/math.ts';
 import { minVolumeSize, zoneLabel, type SamplingVolume, type Zone } from '../scene/samplingVolumes.ts';
-import { Slider } from './Slider.tsx';
+import { Vec3Field } from './Vec3Field.tsx';
 
 export interface VolumePanelProps {
   volume: SamplingVolume | null;
@@ -16,8 +16,6 @@ export interface VolumePanelProps {
   voxelSize: number;
   onChange(id: string, patch: Partial<SamplingVolume>): void;
 }
-
-const MAX_SIZE = 20;
 
 export function VolumePanel({ volume, zones, voxelSize, onChange }: VolumePanelProps) {
   if (!volume) return null;
@@ -63,17 +61,38 @@ export function VolumePanel({ volume, zones, voxelSize, onChange }: VolumePanelP
           </select>
         </div>
 
-        <Slider label="Pos X" value={volume.position[0]} min={-15} max={15} step={0.1} onChange={(v) => setPosition(0, v)} />
-        <Slider label="Pos Y" value={volume.position[1]} min={-2} max={10} step={0.1} onChange={(v) => setPosition(1, v)} />
-        <Slider label="Pos Z" value={volume.position[2]} min={-15} max={15} step={0.1} onChange={(v) => setPosition(2, v)} />
+        {/* Position: free (spec §5.2.1). */}
+        <Vec3Field
+          label="Position"
+          digits={2}
+          columns={[
+            { label: 'X', value: volume.position[0], onCommit: (v) => setPosition(0, v) },
+            { label: 'Y', value: volume.position[1], onCommit: (v) => setPosition(1, v) },
+            { label: 'Z', value: volume.position[2], onCommit: (v) => setPosition(2, v) },
+          ]}
+        />
 
-        <Slider label="Yaw" value={euler.yaw} min={-180} max={180} step={1} digits={0} onChange={(v) => setEuler({ yaw: v })} />
-        <Slider label="Pitch" value={euler.pitch} min={-89} max={89} step={1} digits={0} onChange={(v) => setEuler({ pitch: v })} />
-        <Slider label="Roll" value={euler.roll} min={-180} max={180} step={1} digits={0} onChange={(v) => setEuler({ roll: v })} />
+        {/* Rotation columns axis-correct: X=pitch, Y=yaw, Z=roll (spec §5.1). */}
+        <Vec3Field
+          label="Rotation"
+          digits={0}
+          columns={[
+            { label: 'X', value: euler.pitch, min: -89, max: 89, onCommit: (v) => setEuler({ pitch: v }) },
+            { label: 'Y', value: euler.yaw, onCommit: (v) => setEuler({ yaw: v }) },
+            { label: 'Z', value: euler.roll, onCommit: (v) => setEuler({ roll: v }) },
+          ]}
+        />
 
-        <Slider label="Size X" value={volume.size[0]} min={minSize} max={MAX_SIZE} step={0.1} onChange={(v) => setSize(0, v)} />
-        <Slider label="Size Y" value={volume.size[1]} min={minSize} max={MAX_SIZE} step={0.1} onChange={(v) => setSize(1, v)} />
-        <Slider label="Size Z" value={volume.size[2]} min={minSize} max={MAX_SIZE} step={0.1} onChange={(v) => setSize(2, v)} />
+        {/* Size floored at the per-axis minimum (spec §5); setSize floors again defensively. */}
+        <Vec3Field
+          label="Size"
+          digits={2}
+          columns={[
+            { label: 'X', value: volume.size[0], min: minSize, onCommit: (v) => setSize(0, v) },
+            { label: 'Y', value: volume.size[1], min: minSize, onCommit: (v) => setSize(1, v) },
+            { label: 'Z', value: volume.size[2], min: minSize, onCommit: (v) => setSize(2, v) },
+          ]}
+        />
       </div>
     </div>
   );

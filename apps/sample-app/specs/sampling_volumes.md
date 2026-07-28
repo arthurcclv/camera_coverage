@@ -314,10 +314,13 @@ Zones                         (group umbrella — passive; expand/collapse only)
 
 ### 6.1 Selected-volume editor — `VolumePanel.tsx` (left detail panel)
 
-Header `Volume — <id>`, showing its zone; **Position X/Y/Z**, **Rotation
-yaw/pitch/roll** (Euler⇄quat via `cameras/math.ts`, quaternion is source of truth),
-**Size X/Y/Z** sliders (min per §5); a **Zone** dropdown to reassign the volume to
-another zone. Every edit marks stale (§4.2). Delete is via the context menu (§4).
+Header `Volume — <id>`, showing its zone; **Position X/Y/Z**, **Rotation X/Y/Z**
+(= pitch/yaw/roll, Euler⇄quat via `cameras/math.ts`, quaternion is source of truth;
+`spec.md` §5.1), and **Size X/Y/Z** — each a **grouped row of numeric text fields**
+(`spec.md` §5.2.1); plus a **Zone** dropdown to reassign the volume to another zone.
+Size keeps its per-axis floor (§5) as a clamp; position/rotation follow the
+clamp-meaningful/free-the-rest rule of `spec.md` §5.2.1. Every edit marks stale
+(§4.2). Delete is via the context menu (§4).
 
 ### 6.2 Selected-zone panel — `ZonePanel.tsx` (left detail panel)
 

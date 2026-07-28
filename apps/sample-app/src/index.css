@@ -315,6 +315,53 @@ body {
   font-size: 12px;
 }
 
+/* Grouped numeric vector editor (spec §5.2.1): a group label + three labeled
+   text fields on one row (Vec3Field). The fixed-width group label keeps the field
+   grids aligned across the Position / Rotation / Size rows. */
+.vec-group-label {
+  width: 58px;
+}
+
+.vec-fields {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.vec-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vec-axis {
+  flex-shrink: 0;
+  width: 8px;
+  text-align: center;
+  font-size: 10px;
+  color: #7c8592;
+}
+
+.vec-field input {
+  width: 100%;
+  min-width: 0;
+  background: #14161a;
+  color: #e6e8eb;
+  border: 1px solid #2a2e36;
+  border-radius: 4px;
+  padding: 3px 5px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vec-field input:focus {
+  outline: none;
+  border-color: #3a5ba0;
+}
+
 .value-chip {
   font-size: 11px;
   color: #7fb8e6;
