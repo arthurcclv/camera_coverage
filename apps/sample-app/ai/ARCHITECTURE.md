@@ -302,12 +302,18 @@ default" — see DECISIONS.md).
 - `SectionStatsPanel.tsx` — selected-section coverage stats (colored-cell mean /
   blind / min / max / per-camera).
 - `RunBar.tsx` — run button, auto-run, backend / stale / error indicators.
-- `Slider.tsx` — reusable labeled range slider (optional gradient track).
+- `Slider.tsx` — reusable labeled range slider (optional gradient track); its value
+  readout is an editable `NumberInput` (§5.2.1). `integer` sliders (octree levels)
+  round the committed value.
+- `NumberInput.tsx` — the shared numeric text input behind both field kinds (§5.2.1):
+  commits on blur/Enter, reverts on Escape, and holds the raw string while focused so a
+  gizmo drag / Euler round-trip / slider drag can't stomp the caret. A `seed` prop picks
+  the focus seed — `'display'` (rounded, vector fields) vs `'full'` (slider fields).
 - `Vec3Field.tsx` — grouped numeric vector editor (§5.2.1): a group label + three
-  labeled text fields; each commits on blur/Enter, reverts on Escape, and holds the
-  raw string while focused so a gizmo drag / Euler round-trip can't stomp the caret.
-- `numberField.ts` — pure parse → clamp → revert helper behind `Vec3Field`
-  (`commitNumberField`); the single test seam for field behavior (`test/numberField.test.ts`).
+  labeled `NumberInput`s (seed `'display'`).
+- `numberField.ts` — pure parse → clamp → revert + focus-seed helpers behind the fields
+  (`commitNumberField` / `resolveFieldCommit` / `seedFieldValue`); the single test seam
+  for field behavior (`test/numberField.test.ts`).
 - `leftPanelSplit.ts` — pure clamp + `localStorage` (de)serialization for the
   draggable divider.
 

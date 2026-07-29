@@ -51,6 +51,7 @@ export function SamplingVolumeControls(props: SamplingVolumeControlsProps) {
         max={MAX_ZONE_LEVEL}
         step={1}
         digits={0}
+        integer
         onChange={props.onZoneLevelChange}
       />
       <Slider
@@ -60,6 +61,7 @@ export function SamplingVolumeControls(props: SamplingVolumeControlsProps) {
         max={MAX_BOX_LEVEL}
         step={1}
         digits={0}
+        integer
         onChange={props.onBoxLevelChange}
       />
 

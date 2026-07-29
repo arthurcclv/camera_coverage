@@ -6,6 +6,39 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Slider value readouts are editable text fields (shared `NumberInput`)
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.2.1 (+ cross-refs in §5.2, §6,
+§13.6, and [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §3.4). Every
+`Slider` kept its read-only value chip after the pose fields moved to `Vec3Field`;
+that chip is now an editable text field so any slider-backed value (FOV, range, voxel
+size, section thickness/footprint/reveal, octree levels) can be typed exactly.
+
+Decisions worth recording:
+
+- **One shared `NumberInput`, not a second copy of the commit/revert logic.** The
+  focus-draft + blur/Enter-commit + Escape-revert behavior already lived (privately)
+  inside `Vec3Field`. It was extracted to `NumberInput.tsx` and both `Vec3Field` and
+  `Slider` consume it, so the subtle caret/no-op handling has a single home. The one
+  axis the two field kinds differ on is a `seed: 'display' | 'full'` prop.
+- **Slider fields seed the full stored value on focus; vector fields seed the rounded
+  display.** A slider value can hold precision the readout hides (a typed FOV 42.37 in a
+  0-decimal field). Re-focusing seeds that full value via `seedFieldValue`, trimmed to
+  ≤6 decimals with trailing zeros stripped — lossless for real edits, and it also hides
+  float noise from a viewport drag (`0.30000000000000004 → "0.3"`). Vector fields keep
+  the rounded seed so their no-op guard (compare-against-displayed) is unchanged.
+- **Exact value, clamp to range only — never snap to step.** Text entry is precisely the
+  affordance the slider step denies, so the committed value is the parsed number clamped
+  to `[min, max]` and nothing more. **Integer sliders are the exception:** an `integer`
+  slider (zone/box octree levels) rounds after clamping, because a fractional level is
+  meaningless downstream. FOV also has `step=1`/`digits=0` but is *not* integer — the two
+  are indistinguishable to the component, so the caller declares `integer` explicitly.
+  The no-op re-check happens *after* rounding, so typing `2.4` at level 2 marks nothing
+  stale.
+- **`seedFieldValue` is a pure function in `numberField.ts`**, unit-tested at the same
+  `node --test` seam as `commitNumberField`/`resolveFieldCommit` — no DOM harness, matching
+  the existing "logic in a pure module" pattern. The React `NumberInput` stays thin glue.
+
 ## Position / rotation / size are numeric text fields, not sliders
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.1, §5.2, §5.2.1, §12.3 and

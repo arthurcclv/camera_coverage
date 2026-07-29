@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commitNumberField, resolveFieldCommit } from '../src/ui/numberField.ts';
+import { commitNumberField, resolveFieldCommit, seedFieldValue } from '../src/ui/numberField.ts';
 
 // The pure parse → clamp → revert decision behind every numeric text field
 // (spec §5.2.1). Only external behavior is asserted here; the React wrapper is
@@ -88,4 +88,28 @@ test('resolveFieldCommit: no commit when a typed value clamps back to the curren
 
 test('resolveFieldCommit: preserves precision the user types beyond display digits', () => {
   assert.equal(resolveFieldCommit('1.234', 1.23, 2, {}), 1.234);
+});
+
+// seedFieldValue: full-precision focus seed for slider value fields (spec §5.2.1).
+test('seedFieldValue: shows precision the rounded readout hides', () => {
+  // 42.37 stored in a 0-decimal FOV field seeds "42.37", not "42".
+  assert.equal(seedFieldValue(42.37), '42.37');
+  assert.equal(seedFieldValue(0.37), '0.37');
+});
+
+test('seedFieldValue: strips trailing zeros and any bare decimal point', () => {
+  assert.equal(seedFieldValue(2), '2');
+  assert.equal(seedFieldValue(0.5), '0.5');
+  assert.equal(seedFieldValue(12.5), '12.5');
+  assert.equal(seedFieldValue(0), '0');
+});
+
+test('seedFieldValue: hides float noise from a viewport drag', () => {
+  assert.equal(seedFieldValue(0.1 + 0.2), '0.3'); // 0.30000000000000004
+  assert.equal(seedFieldValue(-3.4), '-3.4');
+});
+
+test('seedFieldValue: reverts non-finite input to an empty string (never NaN)', () => {
+  assert.equal(seedFieldValue(Number.NaN), '');
+  assert.equal(seedFieldValue(Number.POSITIVE_INFINITY), '');
 });

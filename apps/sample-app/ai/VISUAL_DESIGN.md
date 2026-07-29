@@ -38,7 +38,7 @@ yourself repeating a value, promote it to a `:root` variable).
 | Role | Hex | Notes |
 |---|---|---|
 | Primary accent (blue) | `#2c66c9` → hover `#3574e0` | buttons, active toggles, selection border `#3a5ba0`, selected row bg `#24304a` |
-| Accent text / numeric | `#7fb8e6` | value chips, spinner, CPU badge |
+| Accent text / numeric | `#7fb8e6` | tree-row rates, spinner, CPU / zone badge |
 | Success / visible (green) | `#4de08a` on `#123a2b` | WebGPU badge, "seen" marks, sightlines |
 | Warning / stale (amber) | `#ffb84d` on `#4a3410` | stale badge, warning hints |
 | Error / flagged (red) | `#ff7d7d` / `#ff9d9d` on `#4a1414` / `#3a1414` | flagged-camera badge, error banner |
@@ -110,10 +110,15 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   inside a body (12 px top margin); `.panel-title .badge` trails the title text
   (8 px left). A `.stat-line.spaced` sets a stat row off from the controls above
   it (8 px top). No inline spacing styles — spacing lives in `index.css`.
-- **Row** (`.row`): label left, control right, space-between, 12 px label +
-  right-aligned `.value-chip`. `Slider.tsx` is the reusable control for bounded
-  scalars (plain range, plus a `.spectrum` rainbow variant with a white thumb for
-  hue) — e.g. FOV, Range, resolution.
+- **Row** (`.row`): label left, control right, space-between, 12 px label.
+  `Slider.tsx` is the reusable control for bounded scalars (plain range, plus a
+  `.spectrum` rainbow variant with a white thumb for hue) — e.g. FOV, Range,
+  resolution. Its value readout is a `.slider-value` **editable text input** (same
+  dark boxed chrome as the vector fields — 56 px, `#14161a` field, `#2a2e36` border,
+  right-aligned tabular-nums, blue `#3a5ba0` focus border), replacing the old
+  read-only `.value-chip`. When the row is too narrow for the label + slider + value,
+  the **slider shrinks** (the range carries `min-width: 0`); the label and value box
+  keep their size, so the row never overflows the panel horizontally.
 - **Vector field** (`.vec-row`, `Vec3Field.tsx`): the editor for X/Y/Z and
   yaw/pitch/roll triplets (position, rotation, size) — a **fixed 58 px group label**
   (`.vec-group-label`, keeps the field grids aligned across Position / Rotation /

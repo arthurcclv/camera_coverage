@@ -35,6 +35,20 @@ export function commitNumberField(raw: string, { min, max, fallback }: NumberFie
 }
 
 /**
+ * Full-precision seed string for a slider value field on focus (spec §5.2.1). A
+ * slider value field seeds with the stored value rather than the rounded readout,
+ * so re-editing a value that carries precision beyond the display (a typed 42.37 in
+ * a 0-decimal FOV field) is lossless. Trimmed to at most 6 decimal places with
+ * trailing zeros (and any bare decimal point) removed, which also hides float noise
+ * from a viewport drag: 0.30000000000000004 → "0.3", 42.37 → "42.37", 2 → "2".
+ * (Grouped vector fields seed the rounded display instead — see `Vec3Field`.)
+ */
+export function seedFieldValue(value: number): string {
+  if (!Number.isFinite(value)) return '';
+  return value.toFixed(6).replace(/\.?0+$/, '');
+}
+
+/**
  * Decide whether a focused field's raw string should write a new value, and what
  * that value is (spec §5.2.1) — the whole "commit or not" decision, so it can be
  * tested without a DOM harness. Returns `null` when nothing should be written:

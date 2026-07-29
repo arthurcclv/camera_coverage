@@ -276,6 +276,10 @@ body {
 
 .row input[type='range'] {
   flex: 1;
+  /* Absorb the squeeze here: without min-width:0 a range input won't shrink below
+     its intrinsic width, so a long label + the fixed-width value field would overflow
+     the panel. The slider gives way; the label and value box keep their size. */
+  min-width: 0;
 }
 
 /* Spectrum variant: rainbow track (background set inline) with a visible thumb. */
@@ -362,12 +366,24 @@ body {
   border-color: #3a5ba0;
 }
 
-.value-chip {
-  font-size: 11px;
-  color: #7fb8e6;
-  min-width: 40px;
+/* Editable value field at the right end of a slider row (spec §5.2.1) — the same
+   boxed chrome as the grouped vector fields, replacing the old read-only readout. */
+.row input.slider-value {
+  width: 56px;
+  flex-shrink: 0;
+  background: #14161a;
+  color: #e6e8eb;
+  border: 1px solid #2a2e36;
+  border-radius: 4px;
+  padding: 3px 5px;
+  font-size: 12px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.row input.slider-value:focus {
+  outline: none;
+  border-color: #3a5ba0;
 }
 
 .btn {

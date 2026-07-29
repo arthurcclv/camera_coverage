@@ -205,6 +205,8 @@ overlap — fine, the marked set is a union.
 - **Zone level** slider: integer **0–6**, default **2** (→ up to 4 zones).
 - **Box level** slider: integer **`zoneLevel`–8**, default **4**. Clamped to
   `≥ zoneLevel`.
+- Both are **integer sliders** (spec §5.2.1): the value readout is an editable text
+  field that **rounds** a typed value to the nearest whole level within range.
 - Both re-extract from the cached BVH instantly (no rebuild).
 - Each **Generate** (or level change) **replaces the entire `zones` + `volumes`
   set** with the freshly extracted result. Hand-edits since the last Generate are

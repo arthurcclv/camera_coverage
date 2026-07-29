@@ -369,7 +369,8 @@ for **both**:
 - **Panel fields** edit the selected camera. **Position** (X/Y/Z) and **rotation**
   (X/Y/Z = pitch/yaw/roll, §5.1) are each a **grouped row of three numeric text
   fields** (§5.2.1). **FOV** and **Range (far)** — the detection range / far frustum
-  plane (`CameraConfig.far`), range 0.5–100 m, step 0.1 — remain **sliders**. Editing
+  plane (`CameraConfig.far`), range 0.5–100 m, step 0.1 — remain **sliders**, each with
+  an **editable value field** in place of the old read-only readout (§5.2.1). Editing
   any of them resizes the frustum gizmo (§5.3) live where applicable and invalidates
   the displayed coverage result (§5.4, §8.1).
 - **Name field** — a text input at the top of the panel edits the camera's display
@@ -381,35 +382,67 @@ for **both**:
 
 ### 5.2.1 Numeric text-field editing
 
-Position, rotation, and volume size (`sampling_volumes.md` §6.1) are edited through
-**grouped rows of three numeric text fields** — one row per vector: a group label
-(Position / Rotation / Size) followed by three fields carrying dim axis letters
-**X / Y / Z**. FOV and Range (§5.2) are single scalars and stay sliders. Shared
-behavior for every numeric text field:
+Two kinds of numeric text field appear in the panels, sharing one commit/revert core:
+
+- **Grouped vector fields** — position, rotation, and volume size (`sampling_volumes.md`
+  §6.1): one row per vector — a group label (Position / Rotation / Size) followed by
+  three fields carrying dim axis letters **X / Y / Z**.
+- **Slider value fields** — **every slider in the app** keeps its slider control but its
+  formerly read-only value readout is an **editable numeric text field**: FOV and Range
+  (§5.2), the resolution voxel size (§6), the section thickness / footprint / reveal-range
+  sliders (§13.6), and the sampling zone-level / box-level sliders (`sampling_volumes.md`
+  §6.1). The slider thumb and the field are two views of one value; typing commits the
+  value the slider would otherwise set.
+
+Shared behavior for every numeric text field:
 
 - **Commit on blur or Enter**; **Escape** reverts to the last committed value. While
   a field is **focused** it holds the raw typed string and is **not** overwritten by
-  re-derived props, so a concurrent gizmo drag or an Euler→quat→Euler round-trip
-  (§5.1) never stomps the caret. An **unfocused** field always shows the live value.
+  re-derived props, so a concurrent gizmo drag, an Euler→quat→Euler round-trip (§5.1),
+  or a slider drag of the same value never stomps the caret. An **unfocused** field
+  always shows the live value.
 - **Invalid or empty** input (anything that is not a finite number) reverts to the
   last committed value on commit — the scene is never written a `NaN`.
-- **Bounds — clamp meaningful, free the rest.** Constraints that protect the engine
-  are clamped: **pitch ∈ [−89, 89]°** (avoids gimbal degeneracy, §5.1) and volume
-  **size ≥ the per-axis floor** (`sampling_volumes.md` §5). **Position, yaw, and
-  roll are unbounded** — any finite value is accepted; the former slider min/max on
-  those were arbitrary UI extents and are dropped.
 - A committed edit marks the result stale (§8.1) **once per commit**, like any other
   camera/volume edit. Probe position is the exception — it never marks stale (§12.5).
   Focusing and blurring a field **without a real change** — no edit, or a value that
-  rounds/clamps back to the one already shown — is **not** a commit and marks nothing
-  stale (the commit decision compares against the field's displayed value, not the
-  higher-precision stored value it may carry from a quat round-trip or gizmo drag).
-- Unfocused display precision matches the former sliders: position/size to 2 decimals,
-  rotation to 0 decimals.
+  rounds/clamps back to the one already stored — is **not** a commit and marks nothing
+  stale.
 
-The parse → clamp → revert decision is a pure function independent of React, so it can
-be unit-tested directly (see testing notes); the field component and each panel are
-thin wrappers over it.
+**Grouped vector fields** additionally:
+
+- **Bounds — clamp meaningful, free the rest.** **Pitch ∈ [−89, 89]°** (avoids gimbal
+  degeneracy, §5.1) and volume **size ≥ the per-axis floor** (`sampling_volumes.md` §5)
+  are clamped; **position, yaw, and roll are unbounded** — any finite value is accepted
+  (the former slider min/max on those were arbitrary UI extents and are dropped).
+- On **focus**, seed the field with the **rounded display value** (position/size to 2
+  decimals, rotation to 0). The no-op guard compares the raw string against that
+  displayed value, so an untouched focus/blur carrying higher precision from a quat
+  round-trip or gizmo drag does not spuriously commit.
+
+**Slider value fields** additionally:
+
+- are **always clamped to the slider's [min, max]** — a slider has no unbounded axis.
+- commit the **exact typed value, clamped to range only** — never snapped to the
+  slider's step — so text entry gives precision the slider drag cannot (e.g. FOV
+  42.37, voxel 0.37). **Integer sliders are the exception**: a slider declared
+  **integer** (zone level, box level — octree indices) **rounds** its committed value
+  to the nearest whole number within range. Step-1 *continuous* sliders like FOV are
+  **not** integer sliders and keep their typed decimals.
+- on **focus**, seed the field with the **full stored value** rather than the rounded
+  readout, trimmed to at most ~6 significant decimals with trailing zeros removed, so
+  re-editing a value carrying extra precision — or float noise from a viewport drag —
+  is lossless and clean. The no-op guard still holds via the value-equality check (a
+  seeded full-precision string that parses back to the stored value commits nothing).
+- **Unfocused display precision** matches the former readout — the slider's `digits`
+  (FOV and the integer sliders to 0 decimals, the metric sliders to their existing
+  precision).
+
+The parse → clamp → revert decision **and** the focus-seed formatting are **pure
+functions** independent of React (`ui/numberField.ts`), so they are unit-tested directly
+(see testing notes); the field component and each panel are thin wrappers over them. The
+two field kinds are one shared `NumberInput` component parameterized by a **seed mode**
+(`display` vs `full`).
 
 ### 5.3 Frustum gizmos
 
@@ -561,7 +594,7 @@ at the `setCameras()` boundary (§8). Rules:
 
 ## 6. Resolution control
 
-- `voxelSize` default **0.5 m**; slider range **0.1 – 1.0 m**.
+- `voxelSize` default **0.5 m**; slider range **0.1 – 1.0 m** (value editable per §5.2.1).
 - `voxelSize` is fixed at `init()`, so changing it triggers a full re-run of
   `init` → `loadScene` → `setSampling` (scene mesh is cached and reused).
 - The slider is **debounced**; the UI shows an estimated voxel count for the
@@ -1035,6 +1068,7 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
   name — live, never marks the result stale, §13.1, §5.6), the orientation selector,
   the thickness slider, **two footprint sliders (width & height)** (§13.2), the
   aggregation selector, a **Clip toggle button**, and a **reveal-range slider** (§13.9).
+  Each of these sliders' value readouts is editable per §5.2.1.
   The width/height sliders are **labeled by the world axis they size for the current
   orientation** — horizontal: `Width (X)` / `Depth (Z)`; vertical-x: `Width (Z)` /
   `Height (Y)`; vertical-z: `Width (X)` / `Height (Y)` — so a horizontal footprint's two
