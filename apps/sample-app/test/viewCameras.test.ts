@@ -4,6 +4,8 @@ import * as THREE from 'three';
 import {
   DEFAULT_VIEW,
   FIT_PADDING,
+  PERSPECTIVE_FAR,
+  PERSPECTIVE_NEAR,
   VIEW_IDS,
   VIEW_LABELS,
   fallbackBounds,
@@ -29,6 +31,13 @@ test('only ortho views are orthographic; only perspective allows orbit (spec §2
     assert.equal(isOrthographic(v), true);
     assert.equal(orbitEnabled(v), false, `${v} must be locked (pan+zoom only)`);
   }
+});
+
+test('perspective clip planes are a valid range reaching well past the room (spec §2.4)', () => {
+  assert.ok(PERSPECTIVE_NEAR > 0, 'near must be positive');
+  assert.ok(PERSPECTIVE_FAR > PERSPECTIVE_NEAR, 'far beyond near');
+  // The default room is ~24 units across; the far plane must not be the limit.
+  assert.ok(PERSPECTIVE_FAR >= 1000, 'far reaches past any plausible imported scene');
 });
 
 // Bounds: a 20×6×20 room-ish box centered above the floor.

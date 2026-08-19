@@ -29,6 +29,8 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { ViewHelper as OrientationGizmo } from 'three/addons/helpers/ViewHelper.js';
 import {
   DEFAULT_VIEW,
+  PERSPECTIVE_FAR,
+  PERSPECTIVE_NEAR,
   fallbackBounds,
   fitOrtho,
   isOrthographic,
@@ -92,7 +94,7 @@ export async function createViewport(container: HTMLElement): Promise<Viewport> 
   // A steep-ish elevation keeps the optical path through the full-volume
   // coverage overlay short, so it reads as a translucent haze rather than a
   // near-opaque wall at a grazing viewing angle (see coverageOverlay.ts).
-  const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
+  const camera = new THREE.PerspectiveCamera(55, 1, PERSPECTIVE_NEAR, PERSPECTIVE_FAR);
   camera.position.set(13, 24, 15);
   camera.lookAt(0, 1, 0);
 

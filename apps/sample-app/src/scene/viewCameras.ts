@@ -29,6 +29,15 @@ export const VIEW_LABELS: Record<ViewId, string> = {
 /** The view selected on load; never persisted to the scene file (spec §2.4). */
 export const DEFAULT_VIEW: ViewId = 'perspective';
 
+/**
+ * Near/far clip planes for the perspective view. Unlike the ortho elevations —
+ * whose planes are derived per scene by `fitOrtho` — the perspective camera is
+ * never auto-fit, so these are its permanent values. `FAR` is deliberately far
+ * beyond the demo room so a zoomed-out or imported large scene never clips.
+ */
+export const PERSPECTIVE_NEAR = 0.1;
+export const PERSPECTIVE_FAR = 10000;
+
 /** Ortho views are the three axis-aligned elevations; perspective is not. */
 export function isOrthographic(view: ViewId): boolean {
   return view !== 'perspective';
