@@ -6,6 +6,73 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The Selected view renders through the selected camera, and its drag aims it
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4.1 (+ §5.2 for the gesture,
+§5.3 for the hidden gizmo). A fifth View-selector entry renders the viewport from
+the currently selected camera, answering "what does this camera see?" directly
+rather than via the frustum wireframe and the overlay.
+
+Decisions worth recording:
+
+- **Live-bound to the selection, with no empty state.** The view derives entirely
+  from `selection` + `cameras`, so there is nothing to remember and nothing to
+  invalidate; walking the camera list walks the rig. The cost is one invalid
+  combination — `activeView === 'camera'` with a non-camera selection — closed on
+  both sides: the menu row is disabled when no camera is selected, and App reverts
+  to Perspective if the selection stops being a camera. Neither the renderer nor
+  the gizmo code ever sees a "camera view with no camera".
+- **`'camera'` is a `ViewId`, not a parallel boolean.** A separate flag would allow
+  `activeView: 'top'` + `cameraViewActive: true`. The cost was that
+  `Exclude<ViewId, 'perspective'>` silently stopped meaning "the ortho elevations" —
+  hence the explicit `OrthoViewId`, and `isOrthographic` becoming a whitelist rather
+  than `!== 'perspective'`, which would have misreported this perspective view as
+  orthographic.
+- **A dedicated `PerspectiveCamera`, not the gizmo set's mirror object.**
+  `CameraGizmoSet` already keeps a `PerspectiveCamera` per camera with the exact
+  pose and lens, which is tempting to just render through. But this view needs the
+  *fit* FOV (see below), and mutating the gizmo's FOV would corrupt the
+  `CameraHelper` wireframe the other views draw from it.
+- **The rendered FOV is derived, and the frame guide comes from the same call.** A
+  camera's 16:9 rarely matches the viewport, so rendering at its exact FOV either
+  crops the image or fills the viewport with scene it cannot see. `fitCameraView`
+  expands the FOV until the true image fits with `CAMERA_VIEW_PADDING` on the
+  binding axis and returns the guide rect alongside it — one computation feeding
+  both, so the outline can never drift from the render. The guide is returned as
+  *fractions*, so the DOM overlay is pure percentages and survives resizes.
+  `CAMERA_VIEW_PADDING` is its own constant rather than a reuse of `FIT_PADDING`:
+  same shape, different job (a deliberate band of context, not breathing room).
+- **Clip planes are the viewport's, not the camera's.** Rendering at the camera's
+  `far` would be defensible — it *is* the detection range — but it makes a large
+  scene unreadable, and the overlay already conveys range.
+- **Navigation is replaced by aiming, so clicks go inert.** With orbit off, a drag
+  has no other job, so it aims the camera (yaw/pitch, ±89° clamp, roll preserved —
+  the invariants `CameraPanel` already enforces). Making clicks inert then costs
+  nothing and closes a trap: deselect-on-miss would eject the view to Perspective
+  mid-task. It also means no click-vs-drag threshold applies in this view.
+- **The drag is mouselook, not grab-the-world.** Both directions were built; the
+  aim following the pointer won. The sensitivity is FOV-derived either way, but the
+  *reason* differs and only one survives the flip: grab-the-world justified it by
+  pinning the scene point under the cursor (true only for that direction, and only
+  exactly at the image center, since the projection is nonlinear across the frame),
+  whereas mouselook justifies it as "a drag spanning the image sweeps one field of
+  view" — an angular claim that holds everywhere. The consequence to keep in mind is
+  that the ±89° pitch clamp is now hit routinely rather than exceptionally: the
+  default rig sits at −28° and downward is the natural drag, so the clamp is a
+  working part of the gesture, not an edge guard.
+- **The drag accumulates locally, but emits every move.** It reuses the
+  `TransformChange {kind:'camera'}` path so the panel ticks live and `stale` latches
+  as usual — but re-reading the rotation from state each move would drop deltas that
+  arrive within one React batch, so the in-flight orientation is held in the gesture
+  and the absolute rotation is emitted from it.
+- **Suppression is per-camera, not a layer flag.** Only the camera being rendered
+  through hides (its body and frustum are degenerate at the eye point); the others
+  keep drawing, which is what makes their placement in this camera's field of view
+  visible. Hence a `suppressedId` argument to `CameraGizmoSet.update` rather than
+  hiding the group.
+
+---
+
 ## Slider value readouts are editable text fields (shared `NumberInput`)
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.2.1 (+ cross-refs in §5.2, §6,

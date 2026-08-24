@@ -1,11 +1,16 @@
 /**
  * Viewport top-middle View selector (spec §2.4). A button showing the current
- * view's name and a chevron opens a menu of the four viewport cameras —
- * Perspective / Top / Front / Right — with a checkmark on the active one.
- * Selecting a view switches which camera the viewport renders through (§2.4)
+ * view's name and a chevron opens a menu of the five viewport cameras —
+ * Perspective / Top / Front / Right / Selected — with a checkmark on the active
+ * one. Selecting a view switches which camera the viewport renders through (§2.4)
  * and closes the menu; the menu also closes on an outside click, Escape, or
  * re-clicking the button. Labeled "View", never "Camera" — that word is
- * reserved for the coverage cameras (§5) and the Cameras layer toggle.
+ * reserved for the coverage cameras (§5) and the Cameras layer toggle, which is
+ * why the camera view's row reads "Selected" (§2.4.1).
+ *
+ * A row may be **disabled** — the Selected row is, whenever the selection is not
+ * a camera (§2.4.1). A disabled row is dimmed, carries a tooltip explaining why,
+ * and does not respond to clicks.
  */
 import { useEffect, useRef, useState } from 'react';
 import { VIEW_IDS, VIEW_LABELS, type ViewId } from '../scene/viewCameras.ts';
@@ -13,6 +18,8 @@ import { VIEW_IDS, VIEW_LABELS, type ViewId } from '../scene/viewCameras.ts';
 export interface ViewSelectorProps {
   activeView: ViewId;
   onSelect(view: ViewId): void;
+  /** Views that cannot currently be chosen, mapped to the reason (a tooltip). */
+  disabledViews?: ReadonlyMap<ViewId, string>;
 }
 
 function ChevronIcon() {
@@ -23,7 +30,7 @@ function ChevronIcon() {
   );
 }
 
-export function ViewSelector({ activeView, onSelect }: ViewSelectorProps) {
+export function ViewSelector({ activeView, onSelect, disabledViews }: ViewSelectorProps) {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
 
@@ -60,21 +67,27 @@ export function ViewSelector({ activeView, onSelect }: ViewSelectorProps) {
       </button>
       {open && (
         <ul className="menu view-menu" role="menu" aria-label="View">
-          {VIEW_IDS.map((view) => (
-            <li
-              key={view}
-              role="menuitemradio"
-              aria-checked={view === activeView}
-              className={`view-menu-row${view === activeView ? ' selected' : ''}`}
-              onClick={() => {
-                onSelect(view);
-                setOpen(false);
-              }}
-            >
-              <span className="view-menu-check">{view === activeView ? '✓' : ''}</span>
-              {VIEW_LABELS[view]}
-            </li>
-          ))}
+          {VIEW_IDS.map((view) => {
+            const disabledReason = disabledViews?.get(view);
+            return (
+              <li
+                key={view}
+                role="menuitemradio"
+                aria-checked={view === activeView}
+                aria-disabled={disabledReason ? true : undefined}
+                title={disabledReason}
+                className={`view-menu-row${view === activeView ? ' selected' : ''}${disabledReason ? ' disabled' : ''}`}
+                onClick={() => {
+                  if (disabledReason) return;
+                  onSelect(view);
+                  setOpen(false);
+                }}
+              >
+                <span className="view-menu-check">{view === activeView ? '✓' : ''}</span>
+                {VIEW_LABELS[view]}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

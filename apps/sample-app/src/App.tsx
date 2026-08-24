@@ -63,7 +63,7 @@ import { SectionPanel } from './ui/SectionPanel.tsx';
 import { OverlayControls } from './ui/OverlayControls.tsx';
 import { ViewportLayerMenu } from './ui/ViewportLayerMenu.tsx';
 import { ViewSelector } from './ui/ViewSelector.tsx';
-import { DEFAULT_VIEW, type ViewId } from './scene/viewCameras.ts';
+import { DEFAULT_VIEW, type CameraViewFit, type ViewId } from './scene/viewCameras.ts';
 import { HeatmapLegend } from './ui/HeatmapLegend.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
 import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
@@ -238,6 +238,10 @@ export function App() {
   // Active viewport view (top-middle View selector, spec §2.4). Transient UI
   // state — not persisted to the scene file; resets to Perspective on load.
   const [activeView, setActiveView] = useState<ViewId>(DEFAULT_VIEW);
+  // The Selected view's frame guide (spec §2.4.1), as fractions of the viewport,
+  // published by SceneView from the same fit that set the rendered FOV; null
+  // whenever that view is not active.
+  const [cameraGuide, setCameraGuide] = useState<CameraViewFit['guide'] | null>(null);
   // Scene-file import/export state (spec §14.7, §14.8).
   const [sceneError, setSceneError] = useState<string | null>(null);
   const [sceneIOBusy, setSceneIOBusy] = useState(false);
@@ -367,7 +371,7 @@ export function App() {
 
     let cancelled = false;
     (async () => {
-      const view = await SceneView.create(container);
+      const view = await SceneView.create(container, setCameraGuide);
       if (cancelled) {
         view.dispose();
         return;
@@ -397,6 +401,20 @@ export function App() {
     const clipped = clipSectionId ? sections.find((s) => s.id === clipSectionId) : undefined;
     return clipped ? sectionClipBand(clipped, room.worldMin, room.worldMax) : null;
   }, [clipSectionId, sections, room]);
+
+  // --- the Selected view exists only for a selected camera (spec §2.4.1): if the
+  // selection stops being one — a probe/section/zone/volume, or a clear — the
+  // viewport reverts to Perspective, so an active Selected view always implies a
+  // selected camera and there is no empty state to render. -------------------
+  useEffect(() => {
+    if (activeView === 'camera' && !selectedCameraId) setActiveView(DEFAULT_VIEW);
+  }, [activeView, selectedCameraId]);
+
+  // The Selected row is the one view that can be unavailable (spec §2.4.1).
+  const disabledViews = useMemo<ReadonlyMap<ViewId, string>>(
+    () => (selectedCameraId ? new Map() : new Map([['camera', 'Select a camera to use this view'] as const])),
+    [selectedCameraId],
+  );
 
   const enabledCameraCount = cameras.filter((c) => c.enabled).length;
 
@@ -1012,8 +1030,21 @@ export function App() {
             </button>
           </div>
           <div className="viewport-toolbar-center">
-            <ViewSelector activeView={activeView} onSelect={setActiveView} />
+            <ViewSelector activeView={activeView} onSelect={setActiveView} disabledViews={disabledViews} />
           </div>
+          {/* Frame guide (spec §2.4.1): outlines the selected camera's true image
+              inside the padded render. Percentages come straight from the fit
+              that set the rendered FOV, so outline and render always agree. */}
+          {cameraGuide && (
+            <div
+              className="camera-frame-guide"
+              aria-hidden="true"
+              style={{
+                width: `${cameraGuide.widthFrac * 100}%`,
+                height: `${cameraGuide.heightFrac * 100}%`,
+              }}
+            />
+          )}
           <div className="viewport-toolbar-right">
             <ViewportLayerMenu
               coverageVisible={overlayOptions.visible}

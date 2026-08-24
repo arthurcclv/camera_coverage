@@ -138,6 +138,19 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   checkbox + glyph + label). Toggling keeps the menu open; it closes on
   outside-click / Escape / re-click. Reuses the `.menu` popover chrome shared with
   the hierarchy add/context menus.
+- **View selector** (`.view-menu`, a `.menu` popover): the top-middle button opens
+  the five view rows (`.view-menu-row`: a 12 px blue `#4d9dff` checkmark column +
+  label; `.selected` brightens the label to `#fff`). A row that cannot be chosen
+  takes `.view-menu-row.disabled` — opacity 0.4, no hover background, and a `title`
+  carrying the reason, matching how the toolbar disables Scale rather than hiding it.
+  Currently only the **Selected** row uses it (no camera selected, spec §2.4.1).
+- **Frame guide** (`.camera-frame-guide`): in the Selected view, a **1 px
+  `#ffd23f`** rectangle centered over the canvas marking the selected camera's true
+  image (spec §2.4.1). It takes the *selected-camera yellow* from the gizmo table
+  above deliberately — it is that camera's frustum seen head-on. Sized in
+  percentages from the fit, `pointer-events: none` so a drag still reaches the
+  canvas to aim. The area outside it is **not** dimmed: it is legible context
+  showing what a small pan or a wider FOV would gain.
 - **Badge** (`.badge`): pill, 11 px/600 — variants `stale`, `backend-webgpu`,
   `backend-cpu`, `flagged`, `zone` (neutral blue, the volume's zone reference).
 - **Tree row** (`.tree-row`): caret + colored `.dot` + ellipsized `.label` +

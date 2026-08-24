@@ -174,9 +174,10 @@ heatmap legend at its bottom-right (§13.6):
   viewport renders through. The button shows the current view's name and a
   chevron and opens a menu (same interaction model as the layer dropdown below —
   it closes on an outside click, **Escape**, or re-clicking the button) listing
-  the four views with a checkmark on the active one. Labeled **View** (not
-  "Camera", which is reserved for the coverage cameras of §5 and the **Cameras**
-  layer toggle below):
+  the five views with a checkmark on the active one. Labeled **View**; the word
+  "Camera" stays reserved for the coverage cameras of §5 and the **Cameras**
+  layer toggle below, which is why the fifth row is named **Selected** — dropping
+  the word entirely rather than competing with it:
   - **Perspective** — the default `PerspectiveCamera` (a 3/4 orbit view) with
     full orbit + pan + zoom. Selected on load.
   - **Top / Front / Right** — three **orthographic** cameras (true parallel
@@ -185,16 +186,23 @@ heatmap legend at its bottom-right (§13.6):
     (up +Y). In an orthographic view orbit/rotation is **locked** — the view
     stays a true axis-aligned elevation — and only **pan** (drag) and **zoom**
     (wheel, dollying the ortho frustum) are available.
+  - **Selected** — a perspective view rendered from the **currently selected
+    camera** (§5), so the viewport shows what that camera sees. Both this row and
+    the selector button read the static label "Selected" — never the camera's own
+    name. Detailed in §2.4.1.
 
-  Each view is a persistent camera with its **own remembered framing**: the
-  first time a view is selected its frustum/position is auto-fit to the scene
-  bounds and centered; afterward it keeps whatever pan/zoom the user left it at,
+  Each of those **first four** views is a persistent camera with its **own
+  remembered framing**: the first time a view is selected its frustum/position is
+  auto-fit to the scene bounds and centered; afterward it keeps whatever pan/zoom
+  the user left it at,
   so returning to a view restores its last framing (the auto-fit does not re-run,
   and is not re-applied when scene geometry later changes). Selection and the
-  transform gizmos (§5.2) stay fully **enabled in every view** — switching
+  transform gizmos (§5.2) stay fully **enabled in those four views** — switching
   re-points the orbit controls, `TransformControls`, and the picking raycaster
   at the active camera — so the orthographic views can be used for precise
-  axis-aligned placement. The selected view is **transient viewport state**, like
+  axis-aligned placement. The **Selected** view is the exception on both
+  counts: it has no remembered framing, no transform gizmo, and inert viewport
+  clicks (§2.4.1). Whichever view is **active** is **transient viewport state**, like
   the layer toggles: it is **not** written to the scene file (§14) and resets to
   Perspective on every load.
 - **Top-right** — a single **eye icon button** that opens a **layer-visibility
@@ -237,6 +245,83 @@ selector, so the helper's click-to-snap is intentionally left unwired.
 **compute** backend (§3.2): the renderer draws on the main thread, the compute backend
 runs the coverage calculation in the worker. They are selected and reported (§10)
 separately, and each may independently be WebGPU or its fallback.
+
+### 2.4.1 Selected view
+
+The **Selected** view (§2.4) renders the viewport through the camera
+currently selected in the scene (§5), so the viewport answers "what does this
+camera see?" — the question the coverage overlay and the frustum wireframe can
+only answer indirectly. It is a live view *of a scene entity* rather than a free
+editor camera, and that difference drives everything below.
+
+**Binding to the selection.** The view always renders through the **current**
+selection, so selecting a different camera in the hierarchy (§5.5) cuts the
+viewport to that camera's eye immediately — clicking down the camera list walks
+the rig one view at a time. Consequently:
+
+- The menu row is **disabled** (dimmed, non-clickable, tooltip "Select a camera
+  to use this view") whenever the selection is not a camera.
+- It is enabled for **any** selected camera, including a **disabled** one (§5.4):
+  a disabled camera still has a pose and FOV, and previewing what it *would* see
+  is how one decides whether to enable it — the same reasoning by which §5.3
+  draws the frustum for a selected disabled camera. Nothing in the view marks the
+  disabled case specially; the coverage overlay simply shows no contribution from
+  that camera, because it took no part in the run.
+- If the selection stops being a camera while the view is active — a probe,
+  section, zone, or volume is selected, or the selection is cleared — the
+  viewport **reverts to Perspective**. An active Selected view therefore
+  always implies a selected camera; there is no empty state to render.
+- The view has **no remembered framing** and is never auto-fit: its framing is
+  derived wholly from the selected camera, so there is nothing to remember. Like
+  the other views it is transient state, never written to the scene file (§14).
+
+**Framing and the frame guide.** The rendered frustum is **derived from**, not
+copied from, the camera. A camera's `aspect` (16/9 by default) rarely matches the
+viewport's, so rendering at the camera's exact FOV would either crop its image or
+fill the viewport with scene the camera cannot see. Instead the rendered vertical
+FOV is **expanded so the camera's true image fits inside the viewport with a
+constant padding on all sides**, at any window shape, and a **frame guide** marks
+the true image bounds:
+
+- The guide is a **1px outline in the selected-camera yellow** (`#ffd23f`, the
+  §5.3 selection color) — that camera's frustum seen head-on. Geometry **inside**
+  the guide is what the camera sees; geometry outside it is not.
+- There is **no dimming** of the region outside the guide. The padding band
+  renders at full brightness as legible context, showing what a small pan or a
+  wider FOV would gain.
+- The guide rectangle is produced by the **same pure fit function** that yields
+  the rendered FOV — one computation feeding both — so the outline and the render
+  can never disagree. It is recomputed when the viewport resizes or the camera's
+  FOV/aspect changes.
+- **Clip planes** are the viewport's own generous perspective near/far, **not**
+  the camera's `near`/`far`. The camera's `far` is its detection range, and
+  clipping the scene there would leave the view unreadable in a large scene; the
+  coverage overlay (§9) already conveys range.
+
+**Navigation is replaced by aiming.** Orbit, pan, and zoom are **all disabled**
+in this view: the viewport *is* the camera's image, and any orbit or zoom would
+show coverage the camera does not actually have. A **left-drag instead aims the
+selected camera**, writing its rotation — the gesture is specified in §5.2.
+
+**Gizmos.** The selected camera's own **body and frustum wireframe are hidden**
+while the viewport renders through it (§5.3), as is its `TransformControls` gizmo:
+all three are degenerate at the eye point (the frustum's edges project exactly
+onto the image borders, and the gizmo's handles surround the viewer). Everything
+else keeps drawing — the **other** cameras' bodies (so their placement within
+this camera's field of view is visible), probes, sections, sampling volumes, the
+coverage overlay, the grid, and the bottom-left orientation gizmo, which mirrors
+this camera's orientation as it does any other view's.
+
+A wall-mounted camera looks across the workspace at a grazing angle, so the
+coverage overlay (§9) can read as a dense wall of fog here rather than the
+translucent haze the Perspective view's steeper elevation gives. This is
+**accepted**: dense fog along a ray genuinely means a lot of covered volume in
+that direction, and the **Coverage** row of the layer dropdown (§2.4) is the
+one-click escape hatch.
+
+The **top-left transform toolbar** (§2.4) stays **enabled** in this view even
+though no `TransformControls` gizmo is drawn; the mode and space it sets simply
+take effect on returning to another view.
 
 ---
 
@@ -379,6 +464,30 @@ for **both**:
 - **TransformControls** gizmo (translate + rotate modes, in Local or Global space
   per the §2.4 space toggle) on the selected camera in the viewport, kept in
   two-way sync with the panel.
+- **Aiming from the camera's own view.** In the **Selected** view (§2.4.1)
+  the viewport is the selected camera's image and there is no gizmo, so the
+  viewport interactions above are replaced:
+  - **A left-drag aims the camera.** The drag **steers the camera**, first-person
+    mouselook style: dragging right turns the camera **right**, dragging down tilts
+    it **down** — the aim follows the pointer, and the scene sweeps the opposite
+    way. Degrees per pixel are derived from the camera's FOV and the rendered image
+    size, so a drag spanning the image sweeps **exactly one field of view**: a
+    narrow lens gives fine control and a wide lens coarse control, with no fixed
+    sensitivity constant.
+  - Only **yaw and pitch** are written. **Pitch is clamped to ±89°** and **roll is
+    preserved exactly** — the same invariants the rotation fields enforce (§5.1,
+    §5.2.1) — so the horizon stays level, as a mounted camera's does, and the
+    panel can always represent what the drag produced.
+  - The rotation is written **continuously during the drag**, through the same path
+    as a `TransformControls` drag: the panel's rotation fields tick live (§5.2.1)
+    and the result is marked stale (§8.1) exactly as any other camera rotation
+    edit. Position is not editable from this view — it stays with the panel fields
+    and the gizmo in the other views.
+  - **Viewport clicks change nothing** in this view: there is no picking, and —
+    unlike the deselect rule above — a click on empty space does **not** deselect,
+    which would otherwise eject the view back to Perspective (§2.4.1). Selection
+    changes come from the scene hierarchy (§5.5). Because clicks are inert there
+    is no click-vs-drag threshold to apply: any pointer movement aims.
 
 ### 5.2.1 Numeric text-field editing
 
@@ -455,6 +564,13 @@ camera (§5.4). A non-selected camera shows only its body, never a frustum, rega
 of enabled or flagged (`CAMERA_INSIDE_GEOMETRY`) state. A disabled camera's body is
 dimmed (§5.4). A viewport-level toggle can hide/show the whole camera layer at once
 (§2.4).
+
+**Exception — rendering through the camera.** While the viewport renders *through*
+the selected camera (the **Selected** view, §2.4.1), that camera draws
+**neither its body nor its frustum**: both are degenerate at the eye point, the
+frustum's edges projecting onto the image borders. Every **other** camera's body
+still draws normally, so their placement within this camera's field of view stays
+visible.
 
 ### 5.4 Enable / disable
 

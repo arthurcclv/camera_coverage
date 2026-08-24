@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {
+  CAMERA_VIEW_PADDING,
   DEFAULT_VIEW,
   FIT_PADDING,
   PERSPECTIVE_FAR,
@@ -9,19 +10,25 @@ import {
   VIEW_IDS,
   VIEW_LABELS,
   fallbackBounds,
+  fitCameraView,
   fitOrtho,
   isOrthographic,
   isUsableBounds,
+  navigationEnabled,
   orbitEnabled,
   orthoFrustumForAspect,
   unionFiniteBounds,
-  type ViewId,
+  type OrthoViewId,
 } from '../src/scene/viewCameras.ts';
 
-test('view metadata: perspective first, four labeled views, perspective default', () => {
-  assert.deepEqual([...VIEW_IDS], ['perspective', 'top', 'front', 'right']);
+test('view metadata: perspective first, Selected last, five labeled views (spec §2.4)', () => {
+  assert.deepEqual([...VIEW_IDS], ['perspective', 'top', 'front', 'right', 'camera']);
   assert.equal(DEFAULT_VIEW, 'perspective');
   for (const v of VIEW_IDS) assert.equal(typeof VIEW_LABELS[v], 'string');
+  // The camera view is labeled "Selected" — never the camera's name, and never a
+  // label carrying the reserved word "Camera" (spec §2.4).
+  assert.equal(VIEW_LABELS.camera, 'Selected');
+  for (const v of VIEW_IDS) assert.ok(!/camera/i.test(VIEW_LABELS[v]), `${v} label must not say "Camera"`);
 });
 
 test('only ortho views are orthographic; only perspective allows orbit (spec §2.4)', () => {
@@ -30,6 +37,18 @@ test('only ortho views are orthographic; only perspective allows orbit (spec §2
   for (const v of ['top', 'front', 'right'] as const) {
     assert.equal(isOrthographic(v), true);
     assert.equal(orbitEnabled(v), false, `${v} must be locked (pan+zoom only)`);
+  }
+});
+
+test('the camera view is perspective, not ortho, and has no navigation (spec §2.4.1)', () => {
+  // The regression this guards: `isOrthographic` was once `!== 'perspective'`,
+  // which would misreport the camera view as an orthographic elevation.
+  assert.equal(isOrthographic('camera'), false);
+  assert.equal(orbitEnabled('camera'), false);
+  // Orbit, pan, and zoom are all off — a drag aims the camera instead (§5.2).
+  assert.equal(navigationEnabled('camera'), false);
+  for (const v of ['perspective', 'top', 'front', 'right'] as const) {
+    assert.equal(navigationEnabled(v), true, `${v} keeps orbit-control navigation`);
   }
 });
 
@@ -46,7 +65,7 @@ const MAX = new THREE.Vector3(10, 6, 10);
 const CENTER = new THREE.Vector3(0, 3, 0);
 
 test('fitOrtho targets the bounds center and orients per the axis convention', () => {
-  const expected: Record<Exclude<ViewId, 'perspective'>, { dir: THREE.Vector3; up: THREE.Vector3 }> = {
+  const expected: Record<OrthoViewId, { dir: THREE.Vector3; up: THREE.Vector3 }> = {
     top: { dir: new THREE.Vector3(0, 1, 0), up: new THREE.Vector3(0, 0, -1) },
     front: { dir: new THREE.Vector3(0, 0, 1), up: new THREE.Vector3(0, 1, 0) },
     right: { dir: new THREE.Vector3(1, 0, 0), up: new THREE.Vector3(0, 1, 0) },
@@ -131,4 +150,70 @@ test('unionFiniteBounds reports no contribution when every box is degenerate', (
   const target = new THREE.Box3();
   const inf = new THREE.Box3(new THREE.Vector3(Infinity, Infinity, Infinity), new THREE.Vector3(-Infinity, -Infinity, -Infinity));
   assert.equal(unionFiniteBounds(target, [new THREE.Box3(), inf]), false);
+});
+
+// --- fitCameraView: the Selected view's framing (spec §2.4.1) ----------------
+
+const CAM_FOV = 60;
+const CAM_ASPECT = 16 / 9;
+
+/** Half-extents at unit distance, the space fitCameraView reasons in. */
+function halfExtents(fov: number, aspect: number): { w: number; h: number } {
+  const h = Math.tan((fov * Math.PI) / 360);
+  return { w: h * aspect, h };
+}
+
+test('fitCameraView always contains the camera image, whatever the viewport shape', () => {
+  const cam = halfExtents(CAM_FOV, CAM_ASPECT);
+  // Wide, square, and tall viewports — the guide must fit inside all three.
+  for (const viewportAspect of [21 / 9, 16 / 9, 4 / 3, 1, 3 / 4]) {
+    const fit = fitCameraView(CAM_FOV, CAM_ASPECT, viewportAspect);
+    assert.ok(fit.renderFov >= CAM_FOV, `renderFov must never crop (aspect ${viewportAspect})`);
+    assert.ok(fit.guide.widthFrac > 0 && fit.guide.widthFrac <= 1, `guide width in range (${viewportAspect})`);
+    assert.ok(fit.guide.heightFrac > 0 && fit.guide.heightFrac <= 1, `guide height in range (${viewportAspect})`);
+
+    // The guide's fractions must describe the camera's true image in the
+    // rendered frustum: guideFrac * renderHalfExtent === camHalfExtent.
+    const render = halfExtents(fit.renderFov, viewportAspect);
+    assert.ok(Math.abs(fit.guide.heightFrac * render.h - cam.h) < 1e-12, `height maps to cam FOV (${viewportAspect})`);
+    assert.ok(Math.abs(fit.guide.widthFrac * render.w - cam.w) < 1e-12, `width maps to cam FOV (${viewportAspect})`);
+  }
+});
+
+test('fitCameraView leaves padding on all sides, binding axis at exactly 1/padding', () => {
+  // Viewport wider than the camera → height binds; taller → width binds.
+  const wide = fitCameraView(CAM_FOV, CAM_ASPECT, 21 / 9);
+  assert.ok(Math.abs(wide.guide.heightFrac - 1 / CAMERA_VIEW_PADDING) < 1e-12, 'height binds on a wide viewport');
+  assert.ok(wide.guide.widthFrac < wide.guide.heightFrac, 'wide viewport pads the sides more');
+
+  const tall = fitCameraView(CAM_FOV, CAM_ASPECT, 3 / 4);
+  assert.ok(Math.abs(tall.guide.widthFrac - 1 / CAMERA_VIEW_PADDING) < 1e-12, 'width binds on a tall viewport');
+  assert.ok(tall.guide.heightFrac < tall.guide.widthFrac, 'tall viewport pads top/bottom more');
+
+  // Padding is real on every axis: the guide never reaches the canvas edge.
+  for (const fit of [wide, tall]) {
+    assert.ok(fit.guide.widthFrac < 1, 'context band on the sides');
+    assert.ok(fit.guide.heightFrac < 1, 'context band top/bottom');
+  }
+});
+
+test('fitCameraView matches aspects exactly when viewport and camera agree', () => {
+  const fit = fitCameraView(CAM_FOV, CAM_ASPECT, CAM_ASPECT);
+  // Both axes bind at once; the guide is a uniform inset.
+  assert.ok(Math.abs(fit.guide.widthFrac - 1 / CAMERA_VIEW_PADDING) < 1e-12);
+  assert.ok(Math.abs(fit.guide.heightFrac - 1 / CAMERA_VIEW_PADDING) < 1e-12);
+  // The rendered FOV is the camera's, widened by the padding — not equal to it.
+  assert.ok(fit.renderFov > CAM_FOV);
+});
+
+test('fitCameraView survives a degenerate aspect (pre-layout container)', () => {
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const fit = fitCameraView(CAM_FOV, CAM_ASPECT, bad);
+    assert.ok(Number.isFinite(fit.renderFov) && fit.renderFov > 0, `renderFov finite for aspect ${bad}`);
+    assert.ok(Number.isFinite(fit.guide.widthFrac) && fit.guide.widthFrac > 0, `guide finite for aspect ${bad}`);
+    assert.ok(Number.isFinite(fit.guide.heightFrac) && fit.guide.heightFrac > 0);
+  }
+  // A degenerate camera aspect falls back to square rather than producing NaN.
+  const fit = fitCameraView(CAM_FOV, 0, 16 / 9);
+  assert.ok(Number.isFinite(fit.renderFov) && fit.renderFov > 0);
 });

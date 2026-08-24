@@ -19,12 +19,20 @@
  *
  * The decision logic this bridge owns is pure and tested elsewhere: nearest-hit
  * arbitration (`pick.ts`), the transform readback math (`transformReadback.ts`),
- * and the click-vs-drag rule (`../viewportSelection.ts`).
+ * the click-vs-drag rule (`../viewportSelection.ts`), and the aim-drag mapping
+ * (`../../cameras/aim.ts`).
+ *
+ * In the **Selected** view (spec §2.4.1) the pointer handling inverts: clicks are
+ * inert (no pick, no deselect) and a drag aims the selected camera instead,
+ * emitting the same `TransformChange` a gizmo drag would.
  */
 import * as THREE from 'three';
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 
 import { createViewport, type RenderBackend, type Viewport } from '../viewport.ts';
+import { aimDelta } from '../../cameras/aim.ts';
+import { eulerToQuat, quatToEuler, type EulerAngles } from '../../cameras/math.ts';
+import type { CameraViewFit } from '../viewCameras.ts';
 import { CameraGizmoSet } from '../cameraGizmos.ts';
 import { ProbeGizmoSet } from '../probeGizmos.ts';
 import { SectionGizmoSet } from '../sectionGizmos.ts';
@@ -115,7 +123,18 @@ export class SceneView {
   private selectHandler: ((selection: Selection) => void) | null = null;
   private transformHandler: ((change: TransformChange) => void) | null = null;
 
+  /**
+   * In-flight aim drag in the Selected view (spec §2.4.1, §5.2). The orientation
+   * is accumulated **locally** rather than re-read from state each move: React
+   * state lands a render behind the pointer, so reading it back would drop the
+   * deltas of any moves that arrive within one batch. The absolute rotation is
+   * still emitted on every move, so the panel and gizmos stay live (§5.2).
+   */
+  private aim: { pointerId: number; x: number; y: number; id: string; euler: EulerAngles } | null = null;
+
   private readonly onPointerDown: (ev: PointerEvent) => void;
+  private readonly onPointerMove: (ev: PointerEvent) => void;
+  private readonly onPointerUp: (ev: PointerEvent) => void;
   private readonly onClick: (ev: MouseEvent) => void;
   private readonly onObjectChange: () => void;
 
@@ -157,8 +176,14 @@ export class SceneView {
     this.onPointerDown = (ev) => {
       this.down.x = ev.clientX;
       this.down.y = ev.clientY;
+      this.beginAim(ev);
     };
+    this.onPointerMove = (ev) => this.moveAim(ev);
+    this.onPointerUp = (ev) => this.endAim(ev);
     this.onClick = (ev) => {
+      // Viewport clicks change nothing in the Selected view: no picking, and no
+      // deselect-on-miss — which would eject the view to Perspective (spec §2.4.1).
+      if (this.prev?.activeView === 'camera') return;
       const rect = viewport.renderer.domElement.getBoundingClientRect();
       this.pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
       this.pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
@@ -179,13 +204,23 @@ export class SceneView {
     this.onObjectChange = () => this.emitTransform();
 
     viewport.renderer.domElement.addEventListener('pointerdown', this.onPointerDown);
+    viewport.renderer.domElement.addEventListener('pointermove', this.onPointerMove);
+    viewport.renderer.domElement.addEventListener('pointerup', this.onPointerUp);
+    viewport.renderer.domElement.addEventListener('pointercancel', this.onPointerUp);
     viewport.renderer.domElement.addEventListener('click', this.onClick);
     viewport.transformControls.addEventListener('objectChange', this.onObjectChange);
   }
 
-  /** Build the viewport (async `WebGPURenderer.init`) and wire up the scene objects. */
-  static async create(container: HTMLElement): Promise<SceneView> {
-    const viewport = await createViewport(container);
+  /**
+   * Build the viewport (async `WebGPURenderer.init`) and wire up the scene objects.
+   * `onCameraGuide` forwards the Selected view's frame-guide rect straight from
+   * the viewport to App, which renders the outline (spec §2.4.1).
+   */
+  static async create(
+    container: HTMLElement,
+    onCameraGuide?: (guide: CameraViewFit['guide'] | null) => void,
+  ): Promise<SceneView> {
+    const viewport = await createViewport(container, { onCameraGuide });
     return new SceneView(viewport);
   }
 
@@ -235,9 +270,12 @@ export class SceneView {
       setGeometryClippingPlanes(next.room, next.clipBand ? clipBandPlanes(next.clipBand) : []);
     }
 
-    // --- camera gizmos (spec §5.3): [cameras, selectedCameraId, flagged] --------
-    if (!prev || prev.cameras !== next.cameras || camId(prev.selection) !== camId(next.selection) || prev.flaggedCameras !== next.flaggedCameras) {
-      this.gizmos.update(next.cameras, camId(next.selection), next.flaggedCameras);
+    // --- camera gizmos (spec §5.3): [cameras, selectedCameraId, flagged, activeView].
+    // `activeView` joins the diff because the camera being rendered through draws
+    // neither body nor frustum (spec §2.4.1). -----------------------------------
+    if (!prev || prev.cameras !== next.cameras || camId(prev.selection) !== camId(next.selection) || prev.flaggedCameras !== next.flaggedCameras || prev.activeView !== next.activeView) {
+      const suppressed = next.activeView === 'camera' ? camId(next.selection) : null;
+      this.gizmos.update(next.cameras, camId(next.selection), next.flaggedCameras, suppressed);
     }
 
     // --- probe gizmos (spec §12.4): [probes, selectedProbeId] -------------------
@@ -265,9 +303,10 @@ export class SceneView {
       this.overlay.setOptions(next.overlayOptions);
     }
 
-    // --- TransformControls attach per selection kind (spec §12.4, §13.8) --------
-    if (!prev || prev.selection !== next.selection) {
-      this.attachForSelection(next.selection);
+    // --- TransformControls attach per selection kind (spec §12.4, §13.8), with
+    // `activeView` in the diff because the Selected view detaches (§2.4.1) ------
+    if (!prev || prev.selection !== next.selection || prev.activeView !== next.activeView) {
+      this.attachForSelection(next.selection, next.activeView);
     }
 
     // --- TransformControls mode (spec §12.4, §13.8): [transformMode, selection] -
@@ -290,6 +329,20 @@ export class SceneView {
       this.volumeGizmos.group.visible = next.zonesVisible;
     }
 
+    // --- Selected view source (spec §2.4.1): the selected camera's pose + lens.
+    // Pushed regardless of the active view so entering the view is immediate; the
+    // viewport publishes the frame guide only while it *is* active. Must precede
+    // the `activeView` block below, which re-fits from whatever source is stored.
+    if (!prev || prev.cameras !== next.cameras || camId(prev.selection) !== camId(next.selection)) {
+      const id = camId(next.selection);
+      const cam = id ? next.cameras.find((c) => c.id === id) : undefined;
+      this.viewport.setCameraViewSource(
+        cam
+          ? { position: cam.position, rotation: cam.rotation, fov: cam.fov, aspect: cam.aspect ?? 16 / 9 }
+          : null,
+      );
+    }
+
     // --- active view (spec §2.4) -----------------------------------------------
     if (!prev || prev.activeView !== next.activeView) {
       this.viewport.setActiveView(next.activeView);
@@ -307,6 +360,9 @@ export class SceneView {
   dispose(): void {
     const dom = this.viewport.renderer.domElement;
     dom.removeEventListener('pointerdown', this.onPointerDown);
+    dom.removeEventListener('pointermove', this.onPointerMove);
+    dom.removeEventListener('pointerup', this.onPointerUp);
+    dom.removeEventListener('pointercancel', this.onPointerUp);
     dom.removeEventListener('click', this.onClick);
     this.viewport.transformControls.removeEventListener('objectChange', this.onObjectChange);
     this.overlay.dispose();
@@ -315,6 +371,75 @@ export class SceneView {
     this.sectionGizmos.dispose();
     this.volumeGizmos.dispose();
     this.viewport.dispose();
+  }
+
+  /** The camera the Selected view is rendering through, or null (spec §2.4.1). */
+  private cameraViewTarget(state: SceneViewState | null): SceneCamera | null {
+    if (state?.activeView !== 'camera') return null;
+    const id = camId(state.selection);
+    return (id && state.cameras.find((c) => c.id === id)) || null;
+  }
+
+  /**
+   * Start an aim drag (spec §2.4.1, §5.2). Only in the Selected view, only the
+   * primary button — the orbit controls are disabled there, so nothing else
+   * competes for the gesture, and there is no click-vs-drag threshold to clear
+   * because clicks are inert in that view.
+   */
+  private beginAim(ev: PointerEvent): void {
+    if (ev.button !== 0) return;
+    const target = this.cameraViewTarget(this.prev);
+    if (!target) return;
+    this.aim = {
+      pointerId: ev.pointerId,
+      x: ev.clientX,
+      y: ev.clientY,
+      id: target.id,
+      euler: quatToEuler(target.rotation),
+    };
+    // Capture so a drag that leaves the canvas keeps aiming until release.
+    this.viewport.renderer.domElement.setPointerCapture?.(ev.pointerId);
+  }
+
+  /**
+   * Apply one increment of an aim drag: mouselook, rated over the *guide* rect
+   * (the camera's true image), so a drag spanning it sweeps one field of view and
+   * the aim follows the pointer (spec §5.2). Emits the absolute rotation through
+   * the same transform path as a gizmo drag, so the panel ticks live and the
+   * result marks stale.
+   */
+  private moveAim(ev: PointerEvent): void {
+    const aim = this.aim;
+    if (!aim || ev.pointerId !== aim.pointerId) return;
+    const target = this.cameraViewTarget(this.prev);
+    // Selection or view changed mid-drag (e.g. from the hierarchy): abandon it
+    // rather than writing to a camera the user is no longer looking through.
+    if (!target || target.id !== aim.id) {
+      this.endAim(ev);
+      return;
+    }
+    const image = this.viewport.cameraGuideSizePx();
+    if (!image) return;
+
+    const dx = ev.clientX - aim.x;
+    const dy = ev.clientY - aim.y;
+    if (dx === 0 && dy === 0) return;
+    aim.x = ev.clientX;
+    aim.y = ev.clientY;
+    aim.euler = aimDelta(aim.euler, dx, dy, target.fov, target.aspect ?? 16 / 9, image);
+    this.transformHandler?.({
+      kind: 'camera',
+      id: aim.id,
+      position: target.position,
+      rotation: eulerToQuat(aim.euler),
+    });
+  }
+
+  private endAim(ev: PointerEvent): void {
+    if (!this.aim || ev.pointerId !== this.aim.pointerId) return;
+    const dom = this.viewport.renderer.domElement;
+    if (dom.hasPointerCapture?.(ev.pointerId)) dom.releasePointerCapture(ev.pointerId);
+    this.aim = null;
   }
 
   /**
@@ -357,7 +482,13 @@ export class SceneView {
    * §12.4, §13.8; `sampling_volumes.md` §5). A zone is a container with no
    * viewport body, so selecting one detaches.
    */
-  private attachForSelection(selection: Selection): void {
+  private attachForSelection(selection: Selection, activeView: ViewId): void {
+    // The Selected view shows no gizmo: it would be attached to the very camera
+    // being rendered through, so its handles would surround the viewer (§2.4.1).
+    if (activeView === 'camera') {
+      this.viewport.transformControls.detach();
+      return;
+    }
     const target = selection ? this.attachableSets[selection.kind]?.getAttachTarget(selection.id) : undefined;
     if (target) this.viewport.transformControls.attach(target);
     else this.viewport.transformControls.detach();

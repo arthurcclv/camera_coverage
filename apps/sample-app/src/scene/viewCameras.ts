@@ -1,11 +1,12 @@
 /**
- * Viewport view cameras (spec §2.4): the pure geometry behind the top-middle
- * **View selector**. The viewport renders through one of four cameras —
- * `perspective` (the default 3/4 orbit view) plus three world-axis-aligned
- * orthographic elevations (`top` / `front` / `right`). This module is kept free
- * of the renderer/DOM/controls so it can be unit-tested (test/viewCameras.test.ts);
- * `scene/viewport.ts` owns the camera *objects*, the OrbitControls/TransformControls
- * re-pointing, and the render loop.
+ * Viewport view cameras (spec §2.4, §2.4.1): the pure geometry behind the
+ * top-middle **View selector**. The viewport renders through one of five cameras —
+ * `perspective` (the default 3/4 orbit view), three world-axis-aligned
+ * orthographic elevations (`top` / `front` / `right`), and `camera`, the
+ * **Selected** view that renders from the currently selected scene camera
+ * (§2.4.1). This module is kept free of the renderer/DOM/controls so it can be
+ * unit-tested (test/viewCameras.test.ts); `scene/viewport.ts` owns the camera
+ * *objects*, the OrbitControls/TransformControls re-pointing, and the render loop.
  *
  * Axis convention (Y-up, glTF): Top looks straight down −Y with −Z as screen-up;
  * Front looks along −Z from +Z; Right looks along −X from +X. Both ortho views
@@ -13,17 +14,30 @@
  */
 import * as THREE from 'three';
 
-export type ViewId = 'perspective' | 'top' | 'front' | 'right';
+export type ViewId = 'perspective' | 'top' | 'front' | 'right' | 'camera';
 
-/** Selector order (Perspective first, spec §2.4). */
-export const VIEW_IDS: readonly ViewId[] = ['perspective', 'top', 'front', 'right'];
+/**
+ * The three axis-aligned elevations. Spelled out rather than derived as
+ * `Exclude<ViewId, 'perspective'>` — that exclusion stopped meaning "ortho" once
+ * the perspective `camera` view joined `ViewId`.
+ */
+export type OrthoViewId = 'top' | 'front' | 'right';
 
-/** Human labels shown in the View dropdown. */
+/** Selector order (Perspective first, Selected last — spec §2.4). */
+export const VIEW_IDS: readonly ViewId[] = ['perspective', 'top', 'front', 'right', 'camera'];
+
+/**
+ * Human labels shown in the View dropdown. The `camera` view is labeled
+ * **Selected** — not "Selected camera" and never the camera's own name — so the
+ * word "Camera" stays reserved for the §5 coverage cameras and the Cameras layer
+ * toggle (spec §2.4).
+ */
 export const VIEW_LABELS: Record<ViewId, string> = {
   perspective: 'Perspective',
   top: 'Top',
   front: 'Front',
   right: 'Right',
+  camera: 'Selected',
 };
 
 /** The view selected on load; never persisted to the scene file (spec §2.4). */
@@ -38,17 +52,32 @@ export const DEFAULT_VIEW: ViewId = 'perspective';
 export const PERSPECTIVE_NEAR = 0.1;
 export const PERSPECTIVE_FAR = 10000;
 
-/** Ortho views are the three axis-aligned elevations; perspective is not. */
+/**
+ * Ortho views are the three axis-aligned elevations. An explicit whitelist, not
+ * `!== 'perspective'` — the `camera` view (§2.4.1) is perspective too.
+ */
 export function isOrthographic(view: ViewId): boolean {
-  return view !== 'perspective';
+  return view === 'top' || view === 'front' || view === 'right';
 }
 
 /**
  * Orbit/rotation is available only in the perspective view; the ortho elevations
- * are locked axis-aligned and offer pan + zoom only (spec §2.4).
+ * are locked axis-aligned and offer pan + zoom only (spec §2.4), and the
+ * `camera` view is locked outright — a drag there aims the camera instead
+ * (§2.4.1, §5.2).
  */
 export function orbitEnabled(view: ViewId): boolean {
   return view === 'perspective';
+}
+
+/**
+ * Whether the view offers *any* orbit-control navigation. The ortho elevations
+ * still pan + zoom; the `camera` view is the one view with the controls fully
+ * disabled, because the viewport *is* the selected camera's image and an orbit
+ * would show coverage that camera does not have (spec §2.4.1).
+ */
+export function navigationEnabled(view: ViewId): boolean {
+  return view !== 'camera';
 }
 
 /**
@@ -67,7 +96,7 @@ interface OrthoAxes {
   heightAxis: 0 | 1 | 2;
 }
 
-const ORTHO_AXES: Record<Exclude<ViewId, 'perspective'>, OrthoAxes> = {
+const ORTHO_AXES: Record<OrthoViewId, OrthoAxes> = {
   top: { dir: [0, 1, 0], up: [0, 0, -1], widthAxis: 0, heightAxis: 2 },
   front: { dir: [0, 0, 1], up: [0, 1, 0], widthAxis: 0, heightAxis: 1 },
   right: { dir: [1, 0, 0], up: [0, 1, 0], widthAxis: 2, heightAxis: 1 },
@@ -134,7 +163,7 @@ export interface OrthoFit {
  * activation (spec §2.4); afterward the view keeps its own pan/zoom.
  */
 export function fitOrtho(
-  view: Exclude<ViewId, 'perspective'>,
+  view: OrthoViewId,
   min: THREE.Vector3,
   max: THREE.Vector3,
   aspect: number,
@@ -166,6 +195,56 @@ export function fitOrtho(
     halfWidth,
     near: 0.01,
     far: distance * 2 + size.length(),
+  };
+}
+
+/**
+ * Padding factor around the selected camera's image in the **Selected** view
+ * (spec §2.4.1) — the counterpart of `FIT_PADDING` for the camera view. Kept as
+ * its own constant because it serves a different purpose: not breathing room
+ * around auto-fit scene bounds, but a deliberate band of context outside the
+ * frame guide showing what a small pan or a wider FOV would gain.
+ */
+export const CAMERA_VIEW_PADDING = 1.15;
+
+export interface CameraViewFit {
+  /** Vertical FOV (degrees) the viewport actually renders at — always ≥ the camera's. */
+  renderFov: number;
+  /**
+   * The frame guide (spec §2.4.1) as fractions of the viewport's width/height,
+   * centered. Expressed as fractions rather than pixels so the DOM overlay is
+   * pure percentages and survives a resize untouched whenever the aspects hold.
+   */
+  guide: { widthFrac: number; heightFrac: number };
+}
+
+/**
+ * Fit the selected camera's image inside the viewport for the **Selected** view
+ * (spec §2.4.1). The camera's own `aspect` rarely matches the viewport's, so
+ * rendering at its exact FOV would either crop the image or fill the viewport
+ * with scene the camera cannot see. Instead the rendered vertical FOV is expanded
+ * until the camera's true image fits with `CAMERA_VIEW_PADDING` on the binding
+ * axis, and the guide rect reports where that true image lands.
+ *
+ * Both outputs come from this one call so the outline and the render can never
+ * disagree (spec §2.4.1). Note the binding axis always lands at exactly
+ * `1 / CAMERA_VIEW_PADDING` of the viewport, whichever axis it is.
+ */
+export function fitCameraView(camFov: number, camAspect: number, viewportAspect: number): CameraViewFit {
+  const safeAspect = viewportAspect > 0 && Number.isFinite(viewportAspect) ? viewportAspect : 1;
+  const safeCamAspect = camAspect > 0 && Number.isFinite(camAspect) ? camAspect : 1;
+
+  // Work in tangent space: the camera's half-extents at unit distance.
+  const camHalfH = Math.tan((camFov * Math.PI) / 360);
+  const camHalfW = camHalfH * safeCamAspect;
+
+  // Grow the rendered vertical half-extent until *both* padded axes fit.
+  const renderHalfH = Math.max(camHalfH * CAMERA_VIEW_PADDING, (camHalfW * CAMERA_VIEW_PADDING) / safeAspect);
+  const renderHalfW = renderHalfH * safeAspect;
+
+  return {
+    renderFov: (Math.atan(renderHalfH) * 360) / Math.PI,
+    guide: { widthFrac: camHalfW / renderHalfW, heightFrac: camHalfH / renderHalfH },
   };
 }
 

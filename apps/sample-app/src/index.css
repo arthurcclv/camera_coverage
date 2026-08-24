@@ -112,6 +112,23 @@ body {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
 }
 
+/* Frame guide for the Selected view (spec §2.4.1): a hairline outline marking
+   the selected camera's true image inside the padded render — the camera's
+   frustum seen head-on, so it takes the selected-camera yellow of §5.3. Centered
+   by the translate; width/height come from the fit as percentages. The region
+   outside is deliberately *not* dimmed — it is legible context showing what a
+   small pan or a wider FOV would gain. Never interactive: a drag here must reach
+   the canvas to aim the camera (§5.2). */
+.camera-frame-guide {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border: 1px solid #ffd23f;
+  pointer-events: none;
+  z-index: 1;
+}
+
 .btn.active {
   background: #2c66c9;
   color: white;
@@ -700,6 +717,15 @@ button.tree-caret:focus-visible {
 }
 .view-menu-row.selected {
   color: #fff;
+}
+/* A view that cannot currently be chosen — the Selected row with no camera
+   selected (spec §2.4.1). Dimmed and inert; the tooltip carries the reason. */
+.view-menu-row.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.view-menu-row.disabled:hover {
+  background: none;
 }
 
 /* Probe rows + panel (spec §5.5, §12.3). */

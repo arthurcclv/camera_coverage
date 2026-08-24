@@ -18,6 +18,11 @@ result. It is a **readable reference for SDK consumers**, not a shipping product
   with 10 CCTV-style cameras.
 - **Move / rotate / re-aim each camera** and change its FOV and detection range
   (far), via in-viewport gizmos or panel sliders.
+- **Look through the selected camera** — the **Selected** view renders the viewport
+  from that camera, framed by an outline marking its true image, so "what does this
+  camera actually see?" is answered directly instead of inferred from the frustum
+  wireframe. In that view a drag **aims** the camera, which is the fastest way to
+  point one at a blind spot you can see.
 - **Run the coverage computation** on demand, or leave **auto-run** on (default)
   so it recomputes shortly after any input change.
 - See coverage as a **color-coded volumetric voxel overlay** in two modes:

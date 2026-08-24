@@ -170,7 +170,16 @@ default" — see DECISIONS.md).
   `exportSceneToDirectory` against a `FileSystemDirectoryHandle` (spec §14.4,
   §14.5), thin wrappers around `sceneFile.ts` + `sceneGeometryBuild.ts`.
 - `viewport.ts` — async `WebGPURenderer` init, orbit + transform controls, lights,
-  grid, render loop.
+  grid, render loop, and the five view cameras of the View selector. The
+  **Selected** view (spec §2.4.1) is driven through `setCameraViewSource` and
+  publishes its frame-guide rect back out via the `onCameraGuide` option, so the
+  outline App draws and the FOV the renderer used come from one `fitCameraView`
+  call and cannot disagree.
+- `viewCameras.ts` — the pure geometry behind the View selector: `ViewId` (five
+  views) and `OrthoViewId` (the three elevations — `Exclude<ViewId,'perspective'>`
+  is *not* that set, since the `camera` view is perspective too), the labels,
+  `isOrthographic`/`orbitEnabled`/`navigationEnabled`, `fitOrtho` for the ortho
+  auto-fit, and `fitCameraView` for the Selected view's rendered FOV + guide rect.
 - `gizmoSet.ts` — the shared spine the four per-entity gizmo sets extend.
   `GizmoSet<E>` owns the keyed `entries` map, the group, the create/update/sweep
   `reconcile` loop, `getAttachTarget`, and `dispose`; subclasses supply
@@ -261,6 +270,12 @@ default" — see DECISIONS.md).
   on-entity + converted rather than a side map.
 - `defaults.ts` — the 10 default CCTV cameras (blank names → display as `Camera N`).
 - `math.ts` — Euler (YXZ, degrees) ↔ quaternion helpers.
+- `aim.ts` — pure aim-drag math for the **Selected** view (spec §2.4.1, §5.2):
+  `aimDelta` maps a pointer delta over the frame guide to a new orientation
+  (mouselook — the aim follows the pointer — at a FOV-derived deg/px), plus
+  `horizontalFov` and the ±89° `clampPitch` shared with the rotation fields. Lives here rather than in `scene/` because it is
+  camera *pose* math composing `math.ts`, not view-framing geometry; the gesture
+  plumbing that calls it is in `scene/sceneView/`.
 
 **UI (`ui/`, presentational React)**
 - `SceneFileControls.tsx` — the "Scene" panel (Load/Save, spec §14.7) atop the

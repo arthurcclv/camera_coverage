@@ -88,3 +88,46 @@ test('a flagged but non-selected camera shows no frustum (spec §5.3)', () => {
   assert.equal((bodyFor(gizmos, 'cam-1').material as THREE.MeshBasicMaterial).color.getHex(), 0xe0524f);
   gizmos.dispose();
 });
+
+test('the camera being rendered through draws neither body nor frustum (spec §2.4.1, §5.3)', () => {
+  const gizmos = new CameraGizmoSet();
+  const a: SceneCamera = { id: 'cam-1', name: '', enabled: true, position: [0, 2, 0], rotation: [0, 0, 0, 1], fov: 60 };
+  const b: SceneCamera = { id: 'cam-2', name: '', enabled: true, position: [3, 2, 0], rotation: [0, 0, 0, 1], fov: 60 };
+
+  // Selected but not rendered through: body + frustum both draw (§5.3).
+  gizmos.update([a, b], 'cam-1');
+  assert.equal(gizmos.getAttachTarget('cam-1')!.visible, true);
+  assert.equal(helperFor(gizmos, 'cam-1').visible, true);
+
+  // Entering the Selected view on cam-1 hides its own body and frustum...
+  gizmos.update([a, b], 'cam-1', new Set(), 'cam-1');
+  assert.equal(gizmos.getAttachTarget('cam-1')!.visible, false, 'own body hidden at the eye point');
+  assert.equal(helperFor(gizmos, 'cam-1').visible, false, 'own frustum hidden at the eye point');
+  // ...while every other camera keeps drawing normally.
+  assert.equal(gizmos.getAttachTarget('cam-2')!.visible, true, 'other cameras stay visible');
+  assert.equal(bodyFor(gizmos, 'cam-2').visible, true);
+
+  // Leaving the view restores it, with its selected colour/scale intact.
+  gizmos.update([a, b], 'cam-1');
+  assert.equal(gizmos.getAttachTarget('cam-1')!.visible, true);
+  assert.equal(helperFor(gizmos, 'cam-1').visible, true);
+  assert.equal(gizmos.getAttachTarget('cam-1')!.children.find((c) => c instanceof THREE.Mesh)!.scale.x, 1.4);
+  gizmos.dispose();
+});
+
+test('suppression is independent of selection and enabled state (spec §2.4.1)', () => {
+  const gizmos = new CameraGizmoSet();
+  const disabled: SceneCamera = { id: 'cam-9', name: '', enabled: false, position: [0, 2, 0], rotation: [0, 0, 0, 1], fov: 60 };
+  // A *disabled* camera may be rendered through — it still has a pose and FOV.
+  gizmos.update([disabled], 'cam-9', new Set(), 'cam-9');
+  assert.equal(gizmos.getAttachTarget('cam-9')!.visible, false);
+  assert.equal(helperFor(gizmos, 'cam-9').visible, false);
+
+  // Suppressing a camera that isn't the selected one hides only that one.
+  const other: SceneCamera = { ...disabled, id: 'cam-8', enabled: true };
+  gizmos.update([disabled, other], 'cam-9', new Set(), 'cam-8');
+  assert.equal(gizmos.getAttachTarget('cam-8')!.visible, false);
+  assert.equal(gizmos.getAttachTarget('cam-9')!.visible, true);
+  assert.equal(helperFor(gizmos, 'cam-9').visible, true, 'selected elsewhere still draws its frustum');
+  gizmos.dispose();
+});

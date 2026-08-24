@@ -25,10 +25,18 @@ const SELECTED_HELPER_COLOR = 0xffd23f;
 const FLAGGED_HELPER_COLOR = 0xe0524f;
 
 export class CameraGizmoSet extends PickableGizmoSet<GizmoEntry> {
+  /**
+   * @param suppressedId A camera to draw **nothing** for — neither body nor
+   *   frustum. Set while the viewport renders *through* that camera in the
+   *   Selected view (spec §2.4.1, §5.3): both are degenerate at the eye point,
+   *   the frustum's edges projecting onto the image borders. Every other camera
+   *   still draws normally.
+   */
   update(
     cameras: SceneCamera[],
     selectedId: string | null,
     flaggedIds: ReadonlySet<string> = new Set(),
+    suppressedId: string | null = null,
   ): void {
     this.reconcile(cameras, (entry, cam) => {
       const { camObj, body, helper } = entry;
@@ -45,6 +53,11 @@ export class CameraGizmoSet extends PickableGizmoSet<GizmoEntry> {
       const flagged = flaggedIds.has(cam.id);
       const selected = cam.id === selectedId;
       const disabled = !cam.enabled;
+      // Rendering through this camera: hide its body (a child of camObj) and its
+      // frustum outright (spec §2.4.1, §5.3). Still coloured/scaled below so the
+      // state is already correct when the view is left.
+      const suppressed = cam.id === suppressedId;
+      camObj.visible = !suppressed;
       const bodyColor = flagged ? FLAGGED_BODY_COLOR : selected ? SELECTED_BODY_COLOR : DEFAULT_BODY_COLOR;
       const helperColor = flagged ? FLAGGED_HELPER_COLOR : selected ? SELECTED_HELPER_COLOR : DEFAULT_HELPER_COLOR;
       (body.material as THREE.MeshBasicMaterial).color.setHex(bodyColor);
@@ -52,8 +65,9 @@ export class CameraGizmoSet extends PickableGizmoSet<GizmoEntry> {
       (helper.material as THREE.LineBasicMaterial).color.setHex(helperColor);
       // Frustum wireframe follows selection alone (spec §5.3): only the selected
       // camera draws one — including a selected *disabled* camera — while every
-      // other camera shows just its (state-colored) body.
-      helper.visible = selected;
+      // other camera shows just its (state-colored) body. The one exception is
+      // the camera being rendered through (spec §2.4.1).
+      helper.visible = selected && !suppressed;
       (body.material as THREE.MeshBasicMaterial).opacity = disabled ? 0.3 : 1;
       (body.material as THREE.MeshBasicMaterial).transparent = disabled;
     });
