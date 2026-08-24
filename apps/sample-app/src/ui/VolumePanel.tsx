@@ -75,7 +75,7 @@ export function VolumePanel({ volume, zones, voxelSize, onChange }: VolumePanelP
         {/* Rotation columns axis-correct: X=pitch, Y=yaw, Z=roll (spec §5.1). */}
         <Vec3Field
           label="Rotation"
-          digits={0}
+          digits={2}
           columns={[
             { label: 'X', value: euler.pitch, min: -89, max: 89, onCommit: (v) => setEuler({ pitch: v }) },
             { label: 'Y', value: euler.yaw, onCommit: (v) => setEuler({ yaw: v }) },

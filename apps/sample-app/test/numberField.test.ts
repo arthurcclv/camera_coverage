@@ -61,10 +61,25 @@ test('an out-of-range fallback is only returned for invalid input, never clamped
 // resolveFieldCommit — the "commit or not" decision (spec §5.2.1).
 
 test('resolveFieldCommit: no commit when the field is untouched, even if the value carries extra precision', () => {
-  // The regression: pitch 45.4 displays "45" at digits=0; focus-then-blur seeds
-  // and returns "45" — comparing against the raw 45.4 prop would spuriously commit.
+  // The regression, at any precision: 45.4 displays "45" at digits=0; focus-then-blur
+  // seeds and returns "45" — comparing against the raw 45.4 prop would spuriously commit.
   assert.equal(resolveFieldCommit('45', 45.4, 0, { min: -89, max: 89 }), null);
   assert.equal(resolveFieldCommit('1.23', 1.23456, 2, {}), null);
+});
+
+test('resolveFieldCommit: rotation fields guard the no-op at 2 decimals (spec §5.2.1)', () => {
+  // Rotation displays 2 decimals: a pitch of 45.001 seeds "45.00", so focus-then-blur
+  // must not commit — the guard compares against the 2-decimal display, not the prop.
+  assert.equal(resolveFieldCommit('45.00', 45.001, 2, { min: -89, max: 89 }), null);
+  // A yaw carrying quat round-trip noise seeds "-30.00" and likewise commits nothing.
+  assert.equal(resolveFieldCommit('-30.00', -29.999999, 2, {}), null);
+  // But an edit inside the newly visible precision is a genuine commit.
+  assert.equal(resolveFieldCommit('45.25', 45, 2, { min: -89, max: 89 }), 45.25);
+});
+
+test('resolveFieldCommit: FOV slider field displays 2 decimals and still commits fractions', () => {
+  assert.equal(resolveFieldCommit('60.00', 60, 2, { min: 10, max: 150 }), null);
+  assert.equal(resolveFieldCommit('42.37', 60, 2, { min: 10, max: 150 }), 42.37);
 });
 
 test('resolveFieldCommit: no commit on invalid/empty input (reverts to current)', () => {

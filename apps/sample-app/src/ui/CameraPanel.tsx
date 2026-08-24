@@ -75,7 +75,7 @@ export function CameraPanel({ camera, flagged, onChange, onRename }: CameraPanel
             is clamped ±89°; yaw/roll are free. */}
         <Vec3Field
           label="Rotation"
-          digits={0}
+          digits={2}
           columns={[
             { label: 'X', value: euler.pitch, min: -89, max: 89, onCommit: (v) => setEuler({ pitch: v }) },
             { label: 'Y', value: euler.yaw, onCommit: (v) => setEuler({ yaw: v }) },
@@ -83,7 +83,7 @@ export function CameraPanel({ camera, flagged, onChange, onRename }: CameraPanel
           ]}
         />
 
-        <Slider label="FOV (vert.)" value={camera.fov} min={10} max={150} step={1} digits={0} onChange={(v) => set({ fov: v })} />
+        <Slider label="FOV (vert.)" value={camera.fov} min={10} max={150} step={1} digits={2} onChange={(v) => set({ fov: v })} />
         <Slider label="Range (far)" value={camera.far ?? 50} min={0.5} max={100} step={0.1} onChange={(v) => set({ far: v })} />
       </div>
     </div>

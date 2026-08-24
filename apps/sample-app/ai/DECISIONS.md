@@ -6,6 +6,25 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Rotation and FOV fields display 2 decimals, like every other pose field
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.2.1. The camera and volume
+rotation `Vec3Field`s and the camera FOV slider were the only numeric fields left at
+`digits={0}`; they now read 2 decimals, matching position, size, and range.
+
+**Why:** the fields already *accepted* fractional degrees (text entry commits the
+exact typed value, and a gizmo drag or an Euler⇄quat round-trip routinely produces
+one), but the readout truncated them — a 45.25° pitch and a 45° pitch were
+indistinguishable in the panel, and re-reading a rotation you had just typed showed a
+different number than you entered. Uniform precision across every pose field also
+removes the "which fields round?" question from the panel.
+
+**Trade-off:** rotations now read `0.00` / `-0.00` rather than `0`, which is noisier
+for the common case of an axis-aligned camera. Accepted — legibility of a value that
+*is* fractional beats tidiness of one that isn't, and `-0.00` is the same sign artifact
+the position fields have always shown. The no-op guard needed no change: it compares
+against `value.toFixed(digits)`, so it simply tightens with the digits.
+
 ## The thickness slider's cap (30 m) is decoupled from a new section's default (5 m)
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.2. `MAX_SECTION_THICKNESS`
@@ -110,8 +129,8 @@ Decisions worth recording:
   `Slider` consume it, so the subtle caret/no-op handling has a single home. The one
   axis the two field kinds differ on is a `seed: 'display' | 'full'` prop.
 - **Slider fields seed the full stored value on focus; vector fields seed the rounded
-  display.** A slider value can hold precision the readout hides (a typed FOV 42.37 in a
-  0-decimal field). Re-focusing seeds that full value via `seedFieldValue`, trimmed to
+  display.** A slider value can hold precision the readout hides (a typed FOV 42.375 in a
+  2-decimal field). Re-focusing seeds that full value via `seedFieldValue`, trimmed to
   ≤6 decimals with trailing zeros stripped — lossless for real edits, and it also hides
   float noise from a viewport drag (`0.30000000000000004 → "0.3"`). Vector fields keep
   the rounded seed so their no-op guard (compare-against-displayed) is unchanged.
@@ -119,8 +138,8 @@ Decisions worth recording:
   affordance the slider step denies, so the committed value is the parsed number clamped
   to `[min, max]` and nothing more. **Integer sliders are the exception:** an `integer`
   slider (zone/box octree levels) rounds after clamping, because a fractional level is
-  meaningless downstream. FOV also has `step=1`/`digits=0` but is *not* integer — the two
-  are indistinguishable to the component, so the caller declares `integer` explicitly.
+  meaningless downstream. FOV also has `step=1` but is *not* integer — step alone doesn't
+  imply it, so the caller declares `integer` explicitly.
   The no-op re-check happens *after* rounding, so typing `2.4` at level 2 marks nothing
   stale.
 - **`seedFieldValue` is a pure function in `numberField.ts`**, unit-tested at the same
@@ -159,8 +178,9 @@ Decisions worth recording:
   whether a focused field's raw string should write at all, returning `null` for a no-op.
   Crucially it compares the raw string against the field's **displayed** value
   (`value.toFixed(digits)`), not the higher-precision stored value — otherwise a
-  focus-then-blur on a rotation field showing "45" (stored 45.4° from a quat round-trip)
-  would spuriously commit 45 and mark the run stale on a zero-edit interaction. **Why a
+  focus-then-blur on a rotation field showing "45.00" (stored 45.001° from a quat
+  round-trip) would spuriously commit 45 and mark the run stale on a zero-edit
+  interaction. **Why a
   pure helper:** it makes the only interesting logic unit-testable under `node --test`
   (`test/numberField.test.ts`) without a DOM harness — the `Vec3Field` component and the
   three panels are thin glue, matching the existing "logic in a pure module" pattern

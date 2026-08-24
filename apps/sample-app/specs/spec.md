@@ -524,8 +524,8 @@ Shared behavior for every numeric text field:
   degeneracy, §5.1) and volume **size ≥ the per-axis floor** (`sampling_volumes.md` §5)
   are clamped; **position, yaw, and roll are unbounded** — any finite value is accepted
   (the former slider min/max on those were arbitrary UI extents and are dropped).
-- On **focus**, seed the field with the **rounded display value** (position/size to 2
-  decimals, rotation to 0). The no-op guard compares the raw string against that
+- On **focus**, seed the field with the **rounded display value** — **2 decimals** for
+  every vector field (position, rotation, size). The no-op guard compares the raw string against that
   displayed value, so an untouched focus/blur carrying higher precision from a quat
   round-trip or gizmo drag does not spuriously commit.
 
@@ -543,9 +543,9 @@ Shared behavior for every numeric text field:
   re-editing a value carrying extra precision — or float noise from a viewport drag —
   is lossless and clean. The no-op guard still holds via the value-equality check (a
   seeded full-precision string that parses back to the stored value commits nothing).
-- **Unfocused display precision** matches the former readout — the slider's `digits`
-  (FOV and the integer sliders to 0 decimals, the metric sliders to their existing
-  precision).
+- **Unfocused display precision** is the slider's `digits`: **FOV to 2 decimals**, the
+  whole-unit sliders (zone level, box level, overlay hue) to 0, the metric sliders to
+  their existing precision.
 
 The parse → clamp → revert decision **and** the focus-seed formatting are **pure
 functions** independent of React (`ui/numberField.ts`), so they are unit-tested directly
