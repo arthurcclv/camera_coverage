@@ -12,6 +12,7 @@ import {
   computeSectionCells,
   computeSectionStats,
   DEFAULT_CLIP_RANGE,
+  DEFAULT_SECTION_THICKNESS,
   defaultFootprintForOrientation,
   defaultRangeForOrientation,
   defaultSection,
@@ -117,17 +118,26 @@ test('collapseAxisExtent reads the world AABB along the orientation normal', () 
   assert.deepEqual(collapseAxisExtent([0, -1, 0], [4, 3, 2], 'vertical-z'), { min: 0, max: 2 });
 });
 
-test('defaultRangeForOrientation returns the full extent when it fits within the thickness cap', () => {
-  // Y span is 4 m, under the 5 m cap, so it's returned unclamped.
+test('defaultRangeForOrientation returns the full extent when it fits within the default thickness', () => {
+  // Y span is 4 m, under the 5 m default, so it's returned unclamped.
   assert.deepEqual(defaultRangeForOrientation([0, -1, 0], [4, 3, 2], 'horizontal'), { min: -1, max: 3 });
 });
 
-test('defaultRangeForOrientation clamps to MAX_SECTION_THICKNESS, centered on the axis (spec §13.2)', () => {
-  // Y span is 20 m (worldMin.y=-10, worldMax.y=10), well over the 5 m cap;
-  // center stays 0, thickness clamps to exactly MAX_SECTION_THICKNESS.
+test('defaultRangeForOrientation clamps to DEFAULT_SECTION_THICKNESS, centered on the axis (spec §13.2)', () => {
+  // Y span is 20 m (worldMin.y=-10, worldMax.y=10), well over the 5 m default;
+  // center stays 0, thickness clamps to exactly DEFAULT_SECTION_THICKNESS.
   const { min, max } = defaultRangeForOrientation([0, -10, 0], [4, 10, 2], 'horizontal');
   assert.equal((min + max) / 2, 0);
-  assert.equal(max - min, MAX_SECTION_THICKNESS);
+  assert.equal(max - min, DEFAULT_SECTION_THICKNESS);
+});
+
+test('the default thickness is independent of the 30 m slider cap (spec §13.2)', () => {
+  // The slider reaches 30 m, but a new section starts at the 5 m default even
+  // when the collapse axis is thick enough to allow more.
+  assert.equal(MAX_SECTION_THICKNESS, 30);
+  assert.ok(DEFAULT_SECTION_THICKNESS < MAX_SECTION_THICKNESS);
+  const { min, max } = defaultRangeForOrientation([0, 0, 0], [4, 25, 2], 'horizontal');
+  assert.equal(max - min, DEFAULT_SECTION_THICKNESS);
 });
 
 test('defaultSection is Horizontal, full (clamped) Y extent, full X×Z footprint, mean aggregation, enabled (spec §5.5, §13.2, §13.9)', () => {
@@ -163,12 +173,12 @@ test('defaultFootprintForOrientation is the FULL (uncapped) in-plane extent per 
   assert.deepEqual(defaultFootprintForOrientation(wMin, wMax, 'vertical-z'), { minA: 0, maxA: 4, minB: -1, maxB: 3 });
 });
 
-test('footprint default is uncapped, unlike the 5 m-capped thickness (spec §13.2)', () => {
-  // A 20 m span: thickness caps at 5, footprint keeps the full 20.
+test('footprint default is uncapped, unlike the 5 m default thickness (spec §13.2)', () => {
+  // A 20 m span: thickness starts at 5, footprint keeps the full 20.
   const fp = defaultFootprintForOrientation([0, 0, 0], [20, 20, 20], 'horizontal');
   assert.equal(fp.maxA - fp.minA, 20);
   const range = defaultRangeForOrientation([0, 0, 0], [20, 20, 20], 'horizontal');
-  assert.equal(range.max - range.min, MAX_SECTION_THICKNESS);
+  assert.equal(range.max - range.min, DEFAULT_SECTION_THICKNESS);
 });
 
 test('inPlaneExtent + footprintSliderMax give the per-axis slider max (spec §13.2)', () => {

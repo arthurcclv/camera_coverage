@@ -150,7 +150,13 @@ export function sectionCenterB(section: Pick<Section, 'minB' | 'maxB'>): number 
 
 /** Thickness slider bounds (spec §13.2). */
 export const MIN_SECTION_THICKNESS = 0.1;
-export const MAX_SECTION_THICKNESS = 5;
+export const MAX_SECTION_THICKNESS = 30;
+
+/**
+ * A new section's default thickness (spec §13.2) — deliberately independent of
+ * `MAX_SECTION_THICKNESS`: sections start as thin slabs the slider can widen.
+ */
+export const DEFAULT_SECTION_THICKNESS = 5;
 
 /** Footprint (width/height) slider min bound (spec §13.2); the max is per-axis, see `footprintSliderMax`. */
 export const MIN_SECTION_FOOTPRINT = 0.1;
@@ -192,9 +198,10 @@ export function defaultFootprintForOrientation(
 
 /**
  * The collapse axis's world extent for `orientation`, centered and clamped to
- * `MAX_SECTION_THICKNESS` (spec §13.2, §5.5) — the workspace AABB is usually
- * thicker than the thickness slider allows, so "full extent" means as thick as
- * the slider permits, centered on the axis, rather than the raw AABB span.
+ * `DEFAULT_SECTION_THICKNESS` (spec §13.2, §5.5) — the workspace AABB is usually
+ * thicker than a new section should start, so "full extent" means at most the
+ * default thickness, centered on the axis, rather than the raw AABB span. The
+ * slider can then widen it up to `MAX_SECTION_THICKNESS`.
  */
 export function defaultRangeForOrientation(
   worldMin: Vec3,
@@ -203,7 +210,7 @@ export function defaultRangeForOrientation(
 ): { min: number; max: number } {
   const { min, max } = collapseAxisExtent(worldMin, worldMax, orientation);
   const center = (min + max) / 2;
-  const half = Math.min(max - min, MAX_SECTION_THICKNESS) / 2;
+  const half = Math.min(max - min, DEFAULT_SECTION_THICKNESS) / 2;
   return { min: center - half, max: center + half };
 }
 

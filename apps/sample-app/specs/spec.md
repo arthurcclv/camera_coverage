@@ -1053,12 +1053,13 @@ center; the viewport drag (§13.8) positions it — the two never overlap.
   choosing the collapse axis per §13.1. Changing orientation **resets** both the thickness
   range and the in-plane footprint to their defaults for the new axes (below): the in-plane
   axes swap, so carried-over bounds would be meaningless.
-- **Thickness** — a single slider, **0.1–5 m**, along the normal. Changing it keeps the
+- **Thickness** — a single slider, **0.1–30 m**, along the normal. Changing it keeps the
   slab's **center** (`(min + max) / 2`) fixed and grows/shrinks `[min, max]` symmetrically
   around it. A new section defaults to the collapse axis's full workspace-AABB extent,
-  **capped to 5 m** and centered on that axis (so on an axis whose extent already fits
-  within 5 m, the default is the true full extent; otherwise it's a 5 m slab centered on
-  the axis).
+  **capped to a 5 m default thickness** — independent of the slider's 30 m maximum — and
+  centered on that axis (so on an axis whose extent already fits within 5 m, the default is
+  the true full extent; otherwise it's a 5 m slab centered on the axis, which the slider
+  can then widen up to 30 m).
 - **Width & height** — two sliders sizing the footprint, one per in-plane axis (`axisA`,
   `axisB`). Each ranges **0.1 m → the workspace-AABB extent along that axis** and, like
   thickness, keeps the footprint's **center on that axis** fixed while growing/shrinking its

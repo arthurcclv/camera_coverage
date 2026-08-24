@@ -6,6 +6,27 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The thickness slider's cap (30 m) is decoupled from a new section's default (5 m)
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.2. `MAX_SECTION_THICKNESS`
+rose from 5 m to 30 m so a slab can aggregate across a whole room, and
+`defaultRangeForOrientation` now clamps to a separate
+`DEFAULT_SECTION_THICKNESS = 5` instead of to the slider's max.
+
+**Why the split:** the two numbers had been one constant, which read as economical
+until the cap moved. `min(axisExtent, cap)` with a 30 m cap makes every new section
+in the default room (~20.6 × 6.6 × 20.6 m workspace) span its full collapse-axis
+extent — a horizontal section would open as the entire floor-to-ceiling volume
+rather than a slab, so the slab reading of a section, and the two outline planes
+that convey it, would be lost on creation. Keeping the default at 5 m preserves
+what a new section looks like today; the cap is now purely a ceiling on what the
+user can widen it to. This also supersedes the "capped at 5 m" trade-off recorded
+in *Section range control: a single thickness slider* below.
+
+**Trade-off:** two constants where a reader might expect one, so a future change to
+"how thick can a section be" has to decide which of the two it means. The doc
+comments on both constants name the distinction to keep that decision explicit.
+
 ## The Selected view renders through the selected camera, and its drag aims it
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4.1 (+ §5.2 for the gesture,
@@ -375,7 +396,7 @@ behavior; real callers always pass a full `Section`.
 
 **Defaults & back-compat.** A new section (and an orientation switch) defaults the
 footprint to the **full** workspace-AABB extent on both in-plane axes — uncapped, unlike
-the 5 m-capped thickness — so it looks identical to the old full-workspace slab until
+the thickness, which defaults to 5 m — so it looks identical to the old full-workspace slab until
 shrunk. Scene files omit-tolerant: a section with no `minA/maxA/minB/maxB` parses to
 `NaN` and `resolveSectionFootprints` fills the full extent once the imported geometry's
 AABB is built (`sceneIO`), so pre-feature files load unchanged. No format-version bump.
@@ -902,10 +923,12 @@ next time.
 ## Section range control: a single thickness slider, not dual min/max handles
 
 **Decision:** `SectionPanel`'s range control is one `Slider` for **thickness**
-(0.1–5 m). Changing it keeps the slab's center (`(min+max)/2`) fixed and grows
-`[min, max]` symmetrically; position is changed only by the viewport drag
-(§13.8), never by this panel. `defaultRangeForOrientation` likewise caps a new
-section's (or newly-reoriented section's) default extent to 5 m, centered on
+(0.1–30 m; originally 0.1–5 m — see *The thickness slider's cap (30 m) is
+decoupled from a new section's default (5 m)* at the top of this file). Changing
+it keeps the slab's center (`(min+max)/2`) fixed and grows `[min, max]`
+symmetrically; position is changed only by the viewport drag (§13.8), never by
+this panel. `defaultRangeForOrientation` likewise caps a new section's (or
+newly-reoriented section's) default extent to 5 m, centered on
 the axis, instead of the raw workspace-AABB span. **Why:** an earlier iteration
 used a dual-handle min/max slider (first over the raw workspace extent, then
 over a fixed ±10 m window relative to the slab's own live-recomputed center) —
@@ -918,9 +941,10 @@ one edge silently changed where the *other* edge's displayed offset read on the
 next render, which is correct but easy to misread as a bug. A single thickness
 value sidesteps both problems entirely: there's only one number, it can't
 misrepresent position as a side effect, and its bounds are simple and constant.
-**Trade-off:** thickness is capped at 5 m — a slab that needs to be thicker (or
-positioned so its default would have exceeded that) isn't reachable from this
-control; only the viewport drag moves it, and only within [0.1, 5] m thick.
+**Trade-off:** thickness is capped — a slab that needs to be thicker isn't
+reachable from this control, and position is moved only by the viewport drag. The
+cap was 5 m when this was written and is now 30 m (see the entry at the top of
+this file); the default remains 5 m.
 
 ## Sections read retained run results, via their own retained-chunk store
 
