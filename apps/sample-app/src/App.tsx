@@ -44,7 +44,28 @@ import {
   disposeGeometryBuild,
   type GeometryBuild,
 } from './scene/sceneGeometryBuild.ts';
-import { exportSceneToDirectory, importSceneFromDirectory } from './scene/sceneIO.ts';
+import {
+  AssetCopyError,
+  copyAssets,
+  ensureWritePermission,
+  exportSceneToDirectory,
+  findExistingAssets,
+  importSceneFromDirectory,
+  sceneJsonExists,
+} from './scene/sceneIO.ts';
+import {
+  SAVED_STATUS_MS,
+  SCENE_PICKER_ID,
+  describeAssetCopyFailure,
+  describeOverwritePrompt,
+  describeSaveFailure,
+  describeSceneFileStatus,
+  nextSaveTarget,
+  planAssetCopy,
+  resolveSaveAction,
+  type LastSave,
+  type SaveIntent,
+} from './scene/saveTarget.ts';
 import { SceneView, type SceneViewState, type TransformChange } from './scene/sceneView/sceneView.ts';
 import { initSceneState, sceneReducer } from './scene/sceneReducer.ts';
 import { useEngine } from './engine/useEngine.ts';
@@ -245,6 +266,13 @@ export function App() {
   // Scene-file import/export state (spec §14.7, §14.8).
   const [sceneError, setSceneError] = useState<string | null>(null);
   const [sceneIOBusy, setSceneIOBusy] = useState(false);
+  // The save target (spec §14.5): the folder the current scene was opened from
+  // (or last saved to via Save As…), so a plain Save round-trips back there
+  // instead of following the browser's last-used directory. Session-only — a
+  // reload returns to the boot scene with no target (§14.1).
+  const [saveTarget, setSaveTarget] = useState<FileSystemDirectoryHandle | null>(null);
+  const [lastSave, setLastSave] = useState<LastSave | null>(null);
+  const savedStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileSystemAccessAvailable = useMemo(() => typeof window !== 'undefined' && 'showDirectoryPicker' in window, []);
 
   const selectedCameraId = selection?.kind === 'camera' ? selection.id : null;
@@ -698,10 +726,34 @@ export function App() {
     [coverageRun],
   );
 
+  // The transient "Saved to <folder>" status (§14.7) is the only signal a silent
+  // save gives; drop the pending revert if we unmount first.
+  useEffect(
+    () => () => {
+      if (savedStatusTimerRef.current != null) clearTimeout(savedStatusTimerRef.current);
+    },
+    [],
+  );
+
+  /**
+   * Show "Saved to <folder>" for a moment, then fall back to naming the target
+   * (spec §14.7).
+   */
+  const flashSavedStatus = useCallback((saved: LastSave) => {
+    if (savedStatusTimerRef.current != null) clearTimeout(savedStatusTimerRef.current);
+    setLastSave(saved);
+    savedStatusTimerRef.current = setTimeout(() => {
+      savedStatusTimerRef.current = null;
+      setLastSave(null);
+    }, SAVED_STATUS_MS);
+  }, []);
+
   const handleImportScene = useCallback(async () => {
     let dir: FileSystemDirectoryHandle;
     try {
-      dir = await window.showDirectoryPicker({ mode: 'read' });
+      // Anchored to the current target so Load opens where the scene lives, not
+      // wherever a picker was last used in this origin (§14.5).
+      dir = await window.showDirectoryPicker({ mode: 'read', id: SCENE_PICKER_ID, startIn: saveTarget ?? undefined });
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return; // user cancelled (§14.8)
       setSceneError(describeSceneError(err));
@@ -721,35 +773,106 @@ export function App() {
         volumes: imported.volumes,
         useZones: imported.useZones,
       });
+      // The scene now lives in this folder, so Save writes back here (§14.5).
+      setSaveTarget((target) => nextSaveTarget(target, { kind: 'imported', folder: dir }));
+      setLastSave(null);
     } catch (err) {
-      // Nothing above this point touched app state, so the current scene is
-      // left completely untouched on failure (spec §14.4, §14.8).
+      // Nothing above this point touched app state — the current scene *and* the
+      // save target are left completely untouched on failure (spec §14.4, §14.8).
       setSceneError(describeSceneError(err));
     } finally {
       setSceneIOBusy(false);
     }
-  }, [applyScene]);
+  }, [applyScene, saveTarget]);
 
-  const handleExportScene = useCallback(async () => {
-    let dir: FileSystemDirectoryHandle;
-    try {
-      dir = await window.showDirectoryPicker({ mode: 'readwrite' });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      setSceneError(describeSceneError(err));
-      return;
-    }
-    setSceneIOBusy(true);
-    try {
-      const current: Scene = { geometry: geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones };
-      await exportSceneToDirectory(dir, current);
-      setSceneError(null);
-    } catch (err) {
-      setSceneError(describeSceneError(err));
-    } finally {
-      setSceneIOBusy(false);
-    }
-  }, [geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones]);
+  /**
+   * Save (spec §14.5): with a target, writes `scene.json` straight back into it;
+   * with none — or on Save As… — picks a folder first and adopts it. A picked
+   * folder that already holds a scene or referenced assets is confirmed before
+   * being replaced, and a save into a *different* folder copies the scene's
+   * referenced assets there first, so the destination is self-contained.
+   */
+  const handleSaveScene = useCallback(
+    async (intent: SaveIntent) => {
+      const target = saveTarget;
+      const action = resolveSaveAction(target != null, intent);
+      let dir: FileSystemDirectoryHandle;
+      // Assets to copy, and the folder to copy them from — empty for an in-place
+      // save, since the bytes are already there.
+      let assetSrcs: string[] = [];
+      let copyFrom: FileSystemDirectoryHandle | null = null;
+      // `action.kind === 'write'` already implies a target; re-narrowing keeps the
+      // picker as the fallback rather than trusting an assertion.
+      if (action.kind === 'write' && target != null) {
+        dir = target;
+        // First statement of the await chain, so the click still counts as the
+        // user activation `requestPermission` needs (§14.5).
+        let granted: boolean;
+        try {
+          granted = await ensureWritePermission(dir);
+        } catch (err) {
+          setSceneError(describeSaveFailure(dir.name, describeSceneError(err)));
+          return;
+        }
+        if (!granted) {
+          // Target kept, so a retry or Save As… is one click away (§14.8).
+          setSceneError(describeSaveFailure(dir.name, 'write permission was denied'));
+          return;
+        }
+      } else {
+        try {
+          dir = await window.showDirectoryPicker({ mode: 'readwrite', id: SCENE_PICKER_ID, startIn: target ?? undefined });
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') return; // cancelled (§14.8)
+          setSceneError(describeSceneError(err));
+          return;
+        }
+        // Picking the folder the scene already lives in is an in-place save: no
+        // copy, and nothing to warn about replacing (§14.5).
+        const inPlace = target != null && (await dir.isSameEntry(target));
+        if (!inPlace) {
+          // The target is the asset source: `gltf` geometry can only arrive by
+          // import (§14.9 forbids authoring), and import always sets a target.
+          assetSrcs = target == null ? [] : planAssetCopy(geometryObjects);
+          copyFrom = assetSrcs.length > 0 ? target : null;
+        }
+        // The directory picker gives no overwrite warning of its own, so a folder
+        // we didn't open is confirmed before its scene or assets are replaced (§14.5).
+        if (action.confirmIfExists && !inPlace) {
+          const prompt = describeOverwritePrompt(dir.name, {
+            sceneExists: await sceneJsonExists(dir),
+            assetClashes: (await findExistingAssets(dir, assetSrcs)).length,
+          });
+          if (prompt != null && !window.confirm(prompt)) return; // nothing written, target unchanged (§14.8)
+        }
+      }
+
+      setSceneIOBusy(true);
+      try {
+        const current: Scene = { geometry: geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones };
+        // Assets first: a destination left without a scene.json is visibly
+        // incomplete, whereas one with a scene.json missing its assets is a
+        // trap that only fails on the next import (§14.5).
+        if (copyFrom != null) await copyAssets(copyFrom, dir, assetSrcs);
+        await exportSceneToDirectory(dir, current);
+        setSaveTarget((prev) => nextSaveTarget(prev, { kind: 'saved', folder: dir }));
+        setSceneError(null);
+        flashSavedStatus({ assetsCopied: copyFrom == null ? 0 : assetSrcs.length });
+      } catch (err) {
+        setSceneError(
+          err instanceof AssetCopyError
+            ? describeAssetCopyFailure(err.src, err.reason)
+            : describeSaveFailure(dir.name, describeSceneError(err)),
+        );
+      } finally {
+        setSceneIOBusy(false);
+      }
+    },
+    [saveTarget, flashSavedStatus, geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones],
+  );
+
+  const handleSave = useCallback(() => void handleSaveScene('save'), [handleSaveScene]);
+  const handleSaveAs = useCallback(() => void handleSaveScene('saveAs'), [handleSaveScene]);
 
   const handleRun = useCallback(async () => {
     // Snapshot the scene "generation": if `applyScene` (import/reset) bumps
@@ -890,8 +1013,10 @@ export function App() {
           fileSystemAccessAvailable={fileSystemAccessAvailable}
           busy={sceneIOBusy}
           error={sceneError}
+          status={describeSceneFileStatus(saveTarget, lastSave)}
           onImport={handleImportScene}
-          onExport={handleExportScene}
+          onSave={handleSave}
+          onSaveAs={handleSaveAs}
         />
         <div className="panel hierarchy-panel">
           <SceneHierarchy

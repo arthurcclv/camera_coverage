@@ -13,15 +13,82 @@ import type { Scene } from './sceneModel.ts';
 
 const SCENE_JSON_NAME = 'scene.json';
 
-async function resolveAssetFromDirectory(dir: FileSystemDirectoryHandle, src: string): Promise<ArrayBuffer> {
+/**
+ * Walks a folder-relative asset path (spec §14.2, already validated safe on
+ * import) to its file handle. `create` makes the intermediate folders and the
+ * file itself, for copying into a Save As… destination (§14.5).
+ */
+async function fileHandleAt(dir: FileSystemDirectoryHandle, src: string, create: boolean): Promise<FileSystemFileHandle> {
   const segments = src.split('/');
   let current = dir;
   for (let i = 0; i < segments.length - 1; i++) {
-    current = await current.getDirectoryHandle(segments[i]);
+    current = await current.getDirectoryHandle(segments[i], { create });
   }
-  const fileHandle = await current.getFileHandle(segments[segments.length - 1]);
-  const file = await fileHandle.getFile();
+  return current.getFileHandle(segments[segments.length - 1], { create });
+}
+
+async function resolveAssetFromDirectory(dir: FileSystemDirectoryHandle, src: string): Promise<ArrayBuffer> {
+  const file = await (await fileHandleAt(dir, src, false)).getFile();
   return file.arrayBuffer();
+}
+
+/** A referenced asset that couldn't be copied, carrying which one and why (§14.8). */
+export class AssetCopyError extends Error {
+  constructor(
+    readonly src: string,
+    readonly reason: string,
+  ) {
+    super(`Couldn't copy "${src}": ${reason}`);
+    this.name = 'AssetCopyError';
+  }
+}
+
+function copyFailureReason(err: unknown): string {
+  if (err instanceof DOMException && err.name === 'NotFoundError') return 'not found in the source folder';
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+/**
+ * Which of `srcs` the destination folder already holds — the asset half of the
+ * overwrite confirmation (spec §14.5).
+ */
+export async function findExistingAssets(dir: FileSystemDirectoryHandle, srcs: readonly string[]): Promise<string[]> {
+  const existing: string[] = [];
+  for (const src of srcs) {
+    try {
+      await fileHandleAt(dir, src, false);
+      existing.push(src);
+    } catch {
+      // Absent (or unreadable) — either way this save wouldn't be replacing it.
+    }
+  }
+  return existing;
+}
+
+/**
+ * Copies referenced assets from the scene's source folder into a Save As…
+ * destination, at the same relative paths (spec §14.5). Runs **before**
+ * `scene.json` is written, and throws `AssetCopyError` on the first failure so
+ * the caller can abandon the save with no scene file written — already-copied
+ * bytes stay put, since undoing them could delete a file this copy legitimately
+ * overwrote. Streams each file rather than buffering it, for large GLBs.
+ */
+export async function copyAssets(
+  from: FileSystemDirectoryHandle,
+  to: FileSystemDirectoryHandle,
+  srcs: readonly string[],
+): Promise<void> {
+  for (const src of srcs) {
+    try {
+      const file = await (await fileHandleAt(from, src, false)).getFile();
+      const writable = await (await fileHandleAt(to, src, true)).createWritable();
+      // pipeTo closes the destination on success and aborts it on failure.
+      await file.stream().pipeTo(writable);
+    } catch (err) {
+      throw new AssetCopyError(src, copyFailureReason(err));
+    }
+  }
 }
 
 /**
@@ -56,6 +123,32 @@ export async function importSceneFromDirectory(dir: FileSystemDirectoryHandle): 
   // extent, resolvable only now that the geometry's world bounds are built (§14.3).
   const sections = resolveSectionFootprints(parsed.scene.sections, build.worldMin, build.worldMax);
   return { scene: { ...parsed.scene, sections }, build };
+}
+
+/**
+ * Whether a folder already holds a `scene.json` — the overwrite check for a
+ * freshly picked folder (spec §14.5). A folder we can't even probe (permission,
+ * gone) reads as "no scene": the write that follows raises the real error.
+ */
+export async function sceneJsonExists(dir: FileSystemDirectoryHandle): Promise<boolean> {
+  try {
+    await dir.getFileHandle(SCENE_JSON_NAME);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Requests write access on a directory handle picked read-only, from the
+ * caller's user activation (spec §14.5) — import never asks to edit files, so
+ * the first save is where the prompt belongs. Already-granted handles resolve
+ * without prompting again.
+ */
+export async function ensureWritePermission(dir: FileSystemDirectoryHandle): Promise<boolean> {
+  const descriptor = { mode: 'readwrite' } as const;
+  if ((await dir.queryPermission(descriptor)) === 'granted') return true;
+  return (await dir.requestPermission(descriptor)) === 'granted';
 }
 
 /**

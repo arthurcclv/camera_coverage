@@ -78,8 +78,9 @@ Everything else stays in `App.tsx` `useState`: `geometryObjects` (the scene-file
 source of truth, spec §14.1) + `room` (its built `GeometryBuild`), overlay
 options, `voxelSize` (debounced 250 ms), summary, `autoRun`, transform
 mode/space, gizmo visibility, `sectionsVisible` (viewport master toggle), probe
-queries, `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`,
-and inspector split height. The retained-chunk stores and the run-generation
+queries, `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`/
+`saveTarget`/`lastSave` (§14.5 — session-only, never persisted), and inspector
+split height. The retained-chunk stores and the run-generation
 guard live on one `coverageRun` (`useMemo(() => new CoverageRun())`, see
 `scene/coverageRun.ts`); the three derived reads (`sectionCellGrids`,
 `zoneCoverage`, `probeQueries`) call its `sectionCells`/`zoneCoverage`/
@@ -168,7 +169,22 @@ default" — see DECISIONS.md).
   unit-tested.
 - `sceneIO.ts` — the only impure scene-file I/O: `importSceneFromDirectory`/
   `exportSceneToDirectory` against a `FileSystemDirectoryHandle` (spec §14.4,
-  §14.5), thin wrappers around `sceneFile.ts` + `sceneGeometryBuild.ts`.
+  §14.5), thin wrappers around `sceneFile.ts` + `sceneGeometryBuild.ts`. Also the
+  save-time probes `sceneJsonExists` / `findExistingAssets` (what a picked
+  destination would replace) and `ensureWritePermission` (read handle → readwrite
+  on first save), and `copyAssets` — the Save As… asset copy, which streams each
+  referenced GLB from the source folder to the same relative path in the
+  destination (creating folders as needed) and throws `AssetCopyError` (carrying
+  `src` + `reason`) on the first failure so the caller can abandon the save before
+  writing `scene.json`. One private `fileHandleAt` walks a relative asset path for
+  both import and copy.
+- `saveTarget.ts` — pure save-target logic (spec §14.5, §14.7): `resolveSaveAction`
+  (write silently vs. show a picker, and whether an overwrite needs confirming),
+  `nextSaveTarget` (fold an import/save/failure/cancel outcome into the target),
+  `planAssetCopy` (the deduped referenced-`src` list a Save As… must copy), and
+  the status/prompt/error strings. Generic over the handle type — only `.name` is
+  read — so `test/saveTarget.test.ts` needs no File System Access API. App.tsx
+  holds the handle and does the awaits; every decision lives here.
 - `viewport.ts` — async `WebGPURenderer` init, orbit + transform controls, lights,
   grid, render loop, and the five view cameras of the View selector. The
   **Selected** view (spec §2.4.1) is driven through `setCameraViewSource` and
@@ -278,9 +294,10 @@ default" — see DECISIONS.md).
   plumbing that calls it is in `scene/sceneView/`.
 
 **UI (`ui/`, presentational React)**
-- `SceneFileControls.tsx` — the "Scene" panel (Load/Save, spec §14.7) atop the
-  left panel, above the hierarchy; hidden entirely where the File System Access
-  API is unavailable.
+- `SceneFileControls.tsx` — the "Scene" panel (Load / Save / Save As… plus the
+  save-target status line, spec §14.7) atop the left panel, above the hierarchy;
+  hidden entirely where the File System Access API is unavailable. Presentational
+  only — the status string comes from `scene/saveTarget.ts`.
 - `SceneHierarchy.tsx` — tree view, add menu, duplicate/delete context menu, per-kind rows.
 - `CameraPanel.tsx` — selected-camera editor: Position + Rotation as grouped
   numeric text fields (`Vec3Field`, §5.2.1); FOV / range (far) stay sliders.

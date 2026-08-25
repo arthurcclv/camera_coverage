@@ -1364,8 +1364,8 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   (`cameras/defaults.ts`) carry **blank** names, so they display as `Camera N`.
 - The startup scene is **constructed in code** as a `Scene` from today's defaults
   (`buildRoom.ts` geometry + `cameras/defaults.ts`); no folder is opened at boot (the
-  File System Access API requires a user gesture). `defaultScene()` is the single
-  source of the boot state.
+  File System Access API requires a user gesture), and there is **no save target**
+  (§14.5). `defaultScene()` is the single source of the boot state.
 - Import **fully replaces** the current `Scene` (§14.4); it never merges.
 
 ### 14.2 Folder layout & asset resolution
@@ -1484,14 +1484,56 @@ Sketch:
    clear error is surfaced (§14.8). There is never a half-loaded scene — silently
    dropping an occluder would understate coverage.
 
-### 14.5 Export
+### 14.5 Export (Save / Save As…)
 
-- Serializes the current `Scene` to `scene.json` and writes it back into the chosen
+- Serializes the current `Scene` to `scene.json` and writes it back into a scene
   folder **in place** through the directory handle (a true round-trip).
-- Export writes **only `scene.json`** — GLB/GLTF bytes are *referenced*, expected to
-  already exist under `assets/`. A `gltf` object whose `src` is absent from the folder
-  is a **dangling reference** until the file is placed there (and will fail a later
-  import, §14.8). Bundling/embedding assets is out of scope (§14.9).
+- The app tracks a **save target** — the directory handle of the folder the current
+  scene is associated with. A successful **import** (§14.4) sets the target to the
+  imported folder; a **failed** import leaves it untouched. The target is
+  **session-only**: never persisted, and a page reload returns to the boot state with
+  no target (§14.1) — a restored target beside the default room would turn one Save
+  into silently overwriting a real scene.
+- **Save** writes `scene.json` into the target folder with no picker — a true
+  round-trip back to where the scene was opened, rather than to whichever folder was
+  saved to last. With **no** target, Save first opens the folder picker and adopts the
+  chosen folder as the target.
+- **Save As…** always opens the picker and, on a successful write, adopts the chosen
+  folder as the new target.
+- **Write permission** — import picks `mode: 'read'`; write access is requested
+  **lazily on the first save** (`requestPermission({ mode: 'readwrite' })`, from the
+  click's user activation), so viewing a scene never asks to edit files. Once granted,
+  the handle stays writable for the session and later saves are silent.
+- **Overwrite confirmation** — a write to a folder chosen from a picker **in that same
+  interaction** (Save As…, or the no-target Save fallback) confirms before replacing an
+  existing `scene.json`; cancelling writes nothing and leaves the target unchanged. A
+  write to an already-established target never asks. (The directory picker, unlike
+  `showSaveFilePicker`, gives no overwrite warning of its own.) The confirmation covers
+  assets too: it reports whether the destination already holds a `scene.json`, how many
+  referenced assets it would replace, or both, and OK replaces all of them.
+- **Picker anchoring** — both pickers (Load, Save As…) pass `startIn: <target>` when a
+  target exists, plus a stable `id` so the app keeps its own remembered-directory
+  bucket instead of following the last folder used anywhere in the origin.
+- An in-place **Save** writes **only `scene.json`** — the GLB/GLTF bytes are already in
+  the folder. A `gltf` object whose `src` is absent from the folder is a **dangling
+  reference** and will fail a later import (§14.8); it also aborts a Save As…, which
+  cannot copy a file that isn't there. Bundling/embedding asset bytes into `scene.json`
+  stays out of scope (§14.9) — copies are ordinary files.
+- **Assets follow a Save As…** — a save into a folder that is *not* the current target
+  copies every `gltf` asset the scene references (§14.2) from the target folder to the
+  same relative path under the destination, creating intermediate folders as needed, so
+  the new folder is a self-contained scene. Only referenced `src` paths are copied, and
+  each is copied once; unreferenced files under the source's `assets/` are left behind
+  (a Save As… therefore also prunes). Bytes are re-read from the target folder at save
+  time — nothing is retained in memory after import (§14.4) — which is why the target
+  doubles as the asset source. Picking the current target in Save As… *is* an in-place
+  save (`isSameEntry`): no copy, no confirmation.
+- **Order** — every asset copies **before** `scene.json` is written. Any copy failure
+  (source file gone, read error, write/quota failure) aborts the save with an error
+  naming the asset: no `scene.json` is written and the target is unchanged (§14.8).
+  Already-copied bytes are left in place — rolling them back could delete a file the
+  copy legitimately overwrote. A destination with no `scene.json` is visibly incomplete;
+  one with a `scene.json` that can't import is a trap.
 
 ### 14.6 Geometry rendering & collision
 
@@ -1514,8 +1556,13 @@ Sketch:
 
 ### 14.7 UI controls
 
-- **Load** (import) and **Save** (export) actions in a **"Scene"** panel at the
-  top of the left panel (§2.2), above the scene hierarchy.
+- **Load** (import), **Save**, and **Save As…** (export, §14.5) actions in a
+  **"Scene"** panel at the top of the left panel (§2.2), above the scene hierarchy.
+- A status line under the actions names the current save target (`Folder: <name>`, or
+  that no folder is chosen — only the handle's leaf `name` is available, never a full
+  path). After a successful save it briefly reads `Saved to <name>` — or
+  `Saved to <name> — N assets copied` when a Save As… copied assets (§14.5): a silent
+  write needs an acknowledgement, since no dialog closes to signal it.
 - Where the File System Access API is unavailable, the panel shows an
   explanatory hint instead of the actions — there is no scene-file control in
   that case (no in-app "reset to default"; reloading the page restores the
@@ -1533,7 +1580,12 @@ Sketch:
 | `volume.zoneId` referencing no zone, or non-positive `size` | abort, keep current scene, show error |
 | Unsafe `src` (absolute / URL / `..` / outside folder) | abort, keep current scene, show error |
 | Referenced GLB missing or fails to parse | abort, keep current scene, show error |
-| Export write denied / fails | keep in-memory scene, show error |
+| Export write fails | keep in-memory scene **and the target**, show error |
+| Write permission denied on first save | keep in-memory scene and the target, show error |
+| Target folder renamed / deleted / unmounted | keep in-memory scene and the target, show error (Save As… redirects) |
+| User cancels the overwrite confirmation | no-op, nothing written, target unchanged |
+| Referenced asset missing from the source folder on Save As… | abort before writing `scene.json`, keep target, show error naming the asset |
+| Asset copy fails (read, write, or quota) | abort before writing `scene.json`, keep target, show error naming the asset |
 
 ### 14.9 Out of scope for this feature
 

@@ -6,6 +6,94 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Save writes back to the folder the scene was opened from, and the target is session-only
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §14.5, §14.7. The app now tracks a
+**save target** — the folder a successful import (or Save As…) established — and plain
+**Save** writes `scene.json` into it with no picker. `Save As…` picks a folder and
+retargets; both pickers pass `startIn: <target>` and a stable `id`.
+
+**Why:** neither picker used to pass `startIn` or `id`, so both fell back to Chrome's
+per-origin "last directory used by any picker". Saving to a scratch folder once made it
+the default destination for every later save, and the round-trip a user actually wants —
+open a scene, edit, save it back — was two dialogs and a chance to misfile the file.
+The target makes "where does Save write?" answerable without opening a dialog to find
+out.
+
+**Trade-off:** the target is deliberately **not** persisted, even though directory
+handles are structured-cloneable and could live in IndexedDB. A reload restores the
+*boot* scene (§14.1) but would restore a target pointing at a real scene folder — one
+click of Save would then overwrite that scene with the default room. Persisting the
+target is only coherent alongside persisting the scene, which reverses §14.1's
+"no folder is opened at boot". So a reload costs one re-pick; that beats a data-loss
+footgun.
+
+**Also decided here:**
+
+- **Write permission is requested lazily, on the first save** — import keeps
+  `mode: 'read'`, so opening a scene to look at it never asks for permission to edit
+  files. `ensureWritePermission` runs as the first `await` in the Save handler, inside
+  the click's user activation.
+- **Overwrite confirmation keys off the picker, not the button.** Any write to a folder
+  chosen from a picker in that same interaction confirms if `scene.json` exists;
+  an established target never does. Keying it off the *button* would have left the
+  boot-state Save fallback (Save with no target → picker) unguarded — the one path most
+  likely to drop the default room on top of someone's real scene. The directory picker,
+  unlike `showSaveFilePicker`, warns about nothing itself. `window.confirm` is used
+  deliberately: the app has no modal component, and building one for a single string
+  isn't proportionate.
+- **A failed save keeps the target** (§14.8) rather than clearing it or immediately
+  reopening the picker: a re-mounted drive or a re-granted permission then just works on
+  retry, and one accidental "don't allow" doesn't discard a good target.
+- **A silent Save needs a visible acknowledgement.** Removing the dialog removed the
+  only success signal, so the Scene panel's status line names the target and flashes
+  "Saved to <folder>". Full dirty-state tracking ("unsaved changes") was rejected as
+  much larger than this change — it needs every edit path to mark the scene modified.
+  Only the handle's leaf `name` is available, so the line can never show a full path.
+
+## Save As… copies the scene's referenced assets, so the destination is self-contained
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §14.5. A save into a folder that
+isn't the current target copies every `gltf` asset the scene references from the target
+folder to the same relative path in the destination, before `scene.json` is written.
+
+**Why:** export used to write `scene.json` alone, so a Save As… into a fresh folder
+produced a scene file that could not be reopened — every `gltf` `src` was a dangling
+reference (§14.5) to a file still sitting in the original folder. "Save this scene
+somewhere else" only means something if the somewhere-else is loadable.
+
+**Why the target is the asset source:** nothing retains the GLB bytes — `buildGltfPieces`
+hands each `ArrayBuffer` to `GLTFLoader` and drops it — so a copy has to re-read from
+disk. The save target is exactly the folder the current scene's assets live in (import
+sets it; Save As… retargets only *after* a successful write), so no second handle is
+needed. A scene with no target provably has no assets to copy: `gltf` objects can only
+arrive via import (§14.9 forbids in-app geometry authoring), and import always sets a
+target.
+
+**Trade-offs:**
+
+- **Referenced paths only, deduplicated** — not the whole `assets/` folder. Follows the
+  request ("files being referenced"), and makes a Save As… prune assets the scene no
+  longer uses. The cost is that a file the user *thinks* of as part of the scene but
+  that nothing references is left behind.
+- **Assets copy before `scene.json`, and any failure aborts the save.** A destination
+  with no `scene.json` is visibly incomplete; one holding a `scene.json` whose assets
+  are missing looks complete and fails only on the next import. Already-copied bytes are
+  deliberately *not* rolled back — deleting them could remove a file the copy had
+  legitimately overwritten.
+- **Existing assets in the destination are overwritten, but disclosed first.** The
+  single overwrite confirmation now reports the `scene.json` and/or the count of
+  referenced assets it would replace. Skipping clashes instead would have been
+  non-destructive but silently wrong — the saved scene would reopen with whatever
+  same-named mesh already lived there. Faithfulness beats preserving a file the user
+  never asked to keep, provided it's stated before the write.
+- **Picking the current target in Save As… is an in-place save** (`isSameEntry`): no
+  copy, no confirmation. Copying a folder onto itself has nothing to do, and confirming
+  the replacement of the scene you already have open is noise.
+- Streaming (`file.stream().pipeTo(writable)`) rather than buffering each GLB, since
+  scene assets are routinely tens of megabytes. The existing spinner covers the wait;
+  per-file progress was not worth new UI.
+
 ## Rotation and FOV fields display 2 decimals, like every other pose field
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.2.1. The camera and volume
