@@ -14,14 +14,22 @@ coverage statistics, and a compact octree result for visualization.
 |---|---|---|
 | `packages/camera-coverage-sdk` | `@linkervision/camera-coverage-sdk` | The engine. WebGPU compute kernel (BVH ray occlusion) with a CPU reference backend; scene preprocessing in Rust→WASM with a pure-TS fallback; runs in a Web Worker. |
 | `apps/sample-app` | `@linkervision/camera-coverage-sample-app` | Vite/React/Three.js demo: an enclosed room with movable CCTV cameras, a volumetric coverage overlay, probes, section heatmaps, and zones. |
+| `apps/splat-camera-export` | `@linkervision/splat-camera-export` | Vite/React/PlayCanvas tool: loads a **3D Gaussian Splat** capture of a real site, imports a `scene.json` camera layout, and exports one rendered image per camera. |
 
-The app consumes the SDK by package name via the workspace symlink.
+The apps consume the SDK by package name via the workspace symlink —
+`sample-app` uses the engine, while `splat-camera-export` only borrows its `Vec3`/`Quat`
+types.
+
+The two apps answer complementary questions: `sample-app` *how much of the volume is
+covered*, `splat-camera-export` *what each camera actually sees*. A `scene.json` written by
+the first is the input to the second.
 
 ## Getting started
 
 ```bash
-npm install          # at the repo root — wires up both workspaces
-npm run dev -w @linkervision/camera-coverage-sample-app   # open the demo
+npm install          # at the repo root — wires up all three workspaces
+npm run dev -w @linkervision/camera-coverage-sample-app   # open the coverage demo
+npm run dev -w @linkervision/splat-camera-export          # open the splat export tool
 npm test -w @linkervision/camera-coverage-sdk             # engine test suite
 ```
 
@@ -61,8 +69,9 @@ engine.dispose();
 
 ## Documentation
 
-- Behavior is defined by each package's spec — `packages/camera-coverage-sdk/specs/spec.md`
-  and `apps/sample-app/specs/spec.md`. These are the source of truth.
+- Behavior is defined by each package's spec — `packages/camera-coverage-sdk/specs/spec.md`,
+  `apps/sample-app/specs/spec.md`, and `apps/splat-camera-export/specs/spec.md`. These are
+  the source of truth.
 - `packages/camera-coverage-sdk/README.md` maps spec sections to modules and
   records the interpretations chosen where the spec was ambiguous.
 - Deeper orientation lives in each package's `ai/` directory (`DESIGN.md`,
