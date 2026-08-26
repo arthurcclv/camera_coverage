@@ -6,6 +6,51 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Hierarchy reordering is a hand-rolled pointer drag over the existing arrays — no order field, no DnD library
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.5.1.
+
+**Why no `order` field, and no format bump.** The tree is *derived* from the canonical
+arrays (`buildSceneTree`) and `serializeScene` writes those arrays in order, so display
+order already round-trips through `scene.json`. Adding an explicit `order` per entity
+would introduce a second source of truth that has to be kept consistent with the array on
+every add/delete/duplicate/import — for zero gain. Reordering a row is therefore just a
+splice, and `formatVersion` stays `2`. The cost is that §14.3 now *guarantees* the
+`volumes` array's zone-interleaving is preserved, which was previously only an accident of
+`addVolume` appending.
+
+**Why hand-rolled pointer events over `@dnd-kit`.** dnd-kit's real value-add is keyboard
+reordering, screen-reader announcements, auto-scroll, and collision detection. We
+deliberately declined the keyboard path (the tree has no keyboard navigation to hang it
+on — see below), and every remaining decision is custom: within-group-only validity, a
+zone dragging as a subtree, no-indicator-means-no-op, and a fixed insertion line rather
+than live reflow. That left the library supplying ~40 KB and a sortable model built for
+flat or explicitly-nested lists, most of which we'd be overriding. ~200 lines of
+`pointerdown → threshold → pointermove → pointerup` is the smaller total.
+
+**Why the action carries `beforeId`, not `toIndex`.** For cameras/probes/sections/zones
+the two are equivalent. For volumes they are not: a zone's rows are a *filtered* view of a
+zone-interleaved global array, so an index is ambiguous about which basis it's in — and
+that's precisely where the bug would live. `{ kind, id, beforeId | null }` is declarative
+and the reducer resolves the position itself.
+
+**Why reordering marks nothing stale.** Coverage results are keyed by entity id, not array
+position, and the camera/volume *sets* are unchanged — so array order cannot affect any
+computed output. It sits in the same class as `renameEntity`.
+
+**Why no keyboard equivalent.** A genuine keyboard reorder needs a focusable tree with
+roving tabindex and arrow-key navigation; that is the whole keyboard-navigation project,
+not a bolt-on. A shortcut that works only when something happens to be selected would fire
+from anywhere in the app (including the 3D viewport) and read as half-built. Documented as
+an explicit limitation in §5.5 instead.
+
+**Why the insertion line rather than live reflow.** Reflowing the list under the cursor
+means the row rects being hit-tested move while you're hit-testing against them — the
+classic jitter source in hand-rolled sortables. The dragged row dims in place and the list
+holds still until the drop commits.
+
+---
+
 ## "Place on surface" tests only the geometry, places the raw hit point, and names its supported kinds in one list
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4.2. A one-shot toolbar tool: arm it,

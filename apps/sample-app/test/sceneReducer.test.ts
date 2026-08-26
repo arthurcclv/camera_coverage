@@ -227,6 +227,89 @@ test('markStale latches only after a run', () => {
   assert.equal(run(base({ hasRunOnce: true, stale: false }), { type: 'markStale' }).stale, true);
 });
 
+// --- reorderEntity (spec §5.5.1) -------------------------------------------
+test('reorderEntity moves a camera before a sibling', () => {
+  const start = base({ cameras: [cam('cam-1'), cam('cam-2'), cam('cam-3')] });
+  const s = run(start, { type: 'reorderEntity', kind: 'camera', id: 'cam-3', beforeId: 'cam-1' });
+  assert.deepEqual(s.cameras.map((c) => c.id), ['cam-3', 'cam-1', 'cam-2']);
+});
+
+test('reorderEntity with a null beforeId moves the row last', () => {
+  const start = base({ cameras: [cam('cam-1'), cam('cam-2'), cam('cam-3')] });
+  const s = run(start, { type: 'reorderEntity', kind: 'camera', id: 'cam-1', beforeId: null });
+  assert.deepEqual(s.cameras.map((c) => c.id), ['cam-2', 'cam-3', 'cam-1']);
+});
+
+test('reorderEntity handles probes, sections and zones the same way', () => {
+  const start = base({
+    probes: [probe('probe-1'), probe('probe-2')],
+    sections: [section('section-1'), section('section-2')],
+    zones: [zone('zone-1'), zone('zone-2')],
+  });
+  const s = run(
+    start,
+    { type: 'reorderEntity', kind: 'probe', id: 'probe-2', beforeId: 'probe-1' },
+    { type: 'reorderEntity', kind: 'section', id: 'section-2', beforeId: 'section-1' },
+    { type: 'reorderEntity', kind: 'zone', id: 'zone-2', beforeId: 'zone-1' },
+  );
+  assert.deepEqual(s.probes.map((p) => p.id), ['probe-2', 'probe-1']);
+  assert.deepEqual(s.sections.map((x) => x.id), ['section-2', 'section-1']);
+  assert.deepEqual(s.zones.map((z) => z.id), ['zone-2', 'zone-1']);
+});
+
+test('reorderEntity permutes a volume within its own zone only', () => {
+  // Interleaved across zones, as appending on create naturally produces.
+  const start = base({
+    zones: [zone('zone-1'), zone('zone-2')],
+    volumes: [volume('volume-1', 'zone-1'), volume('volume-2', 'zone-2'), volume('volume-3', 'zone-1')],
+  });
+  const s = run(start, { type: 'reorderEntity', kind: 'volume', id: 'volume-3', beforeId: 'volume-1' });
+  assert.deepEqual(s.volumes.map((v) => v.id), ['volume-3', 'volume-2', 'volume-1']);
+  // zone-2's volume never moved.
+  assert.equal(s.volumes[1], start.volumes[1]);
+});
+
+test('reorderEntity never reparents a volume across zones', () => {
+  const start = base({
+    zones: [zone('zone-1'), zone('zone-2')],
+    volumes: [volume('volume-1', 'zone-1'), volume('volume-2', 'zone-2')],
+  });
+  const s = run(start, { type: 'reorderEntity', kind: 'volume', id: 'volume-1', beforeId: 'volume-2' });
+  assert.deepEqual(s.volumes.map((v) => v.id), ['volume-1', 'volume-2']);
+  assert.equal(s.volumes[0].zoneId, 'zone-1');
+});
+
+test('reorderEntity marks neither stale nor sampling-dirty, and keeps the selection', () => {
+  const start = base({
+    cameras: [cam('cam-1'), cam('cam-2')],
+    zones: [zone('zone-1')],
+    volumes: [volume('volume-1', 'zone-1'), volume('volume-2', 'zone-1')],
+    selection: { kind: 'camera', id: 'cam-2' },
+    stale: false,
+    samplingDirty: false,
+    hasRunOnce: true,
+  });
+  const s = run(
+    start,
+    { type: 'reorderEntity', kind: 'camera', id: 'cam-2', beforeId: 'cam-1' },
+    // A volume move is the case that would otherwise dirty sampling.
+    { type: 'reorderEntity', kind: 'volume', id: 'volume-2', beforeId: 'volume-1' },
+  );
+  assert.deepEqual(s.cameras.map((c) => c.id), ['cam-2', 'cam-1']);
+  assert.deepEqual(s.volumes.map((v) => v.id), ['volume-2', 'volume-1']);
+  assert.equal(s.stale, false);
+  assert.equal(s.samplingDirty, false);
+  assert.deepEqual(s.selection, { kind: 'camera', id: 'cam-2' });
+});
+
+test('reorderEntity is a no-op for an unknown id or a position that changes nothing', () => {
+  const start = base({ cameras: [cam('cam-1'), cam('cam-2')] });
+  const unknown = run(start, { type: 'reorderEntity', kind: 'camera', id: 'nope', beforeId: 'cam-1' });
+  assert.equal(unknown.cameras, start.cameras);
+  const noop = run(start, { type: 'reorderEntity', kind: 'camera', id: 'cam-1', beforeId: 'cam-2' });
+  assert.equal(noop.cameras, start.cameras);
+});
+
 // --- sceneReplaced ---------------------------------------------------------
 test('sceneReplaced resets flags, forces sampling re-apply, keeps collapse, selects first camera', () => {
   const start = base({ stale: true, hasRunOnce: true, collapsedIds: new Set(['group:cameras']) });

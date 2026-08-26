@@ -261,6 +261,15 @@ default" — see DECISIONS.md).
   `buildSceneTree` / `flattenVisible`. Zone nodes are both selectable and
   expandable (their volume children); `flattenVisible` treats any node with a
   non-empty `childIds` as expandable, not just groups.
+- `reorder.ts` — pure drag-reorder logic (spec §5.5.1). Two halves: `siblingRows` /
+  `insertionTargetAt` turn a pointer Y plus measured row extents into "insert before
+  this sibling" (or null → illegal drop), and `moveBefore` / `moveVolumeBefore` do
+  the array splice the reducer applies. `moveVolumeBefore` is the subtle one — the
+  global `volumes` array interleaves zones, so it permutes a zone's volumes among
+  the slots they already occupy and leaves every other element identical. Both
+  splices return the *input array reference* on a no-op, which is how the reducer
+  stays a cheap identity for illegal drops. No DOM here; the pointer plumbing lives
+  in `SceneHierarchy.tsx`.
 - `entityDuplication.ts` — pure "Duplicate" context-menu logic (spec §5.5):
   `nextFreeId` (shared with `App.tsx`'s add handlers) plus `duplicateCamera`/
   `Probe`/`Section`/`Volume`/`Zone`, each returning a deep verbatim copy with a
@@ -303,7 +312,11 @@ default" — see DECISIONS.md).
   save-target status line, spec §14.7) atop the left panel, above the hierarchy;
   hidden entirely where the File System Access API is unavailable. Presentational
   only — the status string comes from `scene/saveTarget.ts`.
-- `SceneHierarchy.tsx` — tree view, add menu, duplicate/delete context menu, per-kind rows.
+- `SceneHierarchy.tsx` — tree view, add menu, duplicate/delete context menu, per-kind
+  rows, and `useDragReorder` — the pointer plumbing for drag-to-reorder (§5.5.1):
+  the 4px threshold, window move/up listeners attached on pointerdown, Escape-cancel,
+  the rAF edge-auto-scroll loop, and swallowing the click that would otherwise select
+  after a drop. Every geometric decision is delegated to `scene/reorder.ts`.
 - `CameraPanel.tsx` — selected-camera editor: Position + Rotation as grouped
   numeric text fields (`Vec3Field`, §5.2.1); FOV / range (far) stay sliders.
 - `ProbePanel.tsx` — probe position (grouped text field) + visibility readout + stale hint.

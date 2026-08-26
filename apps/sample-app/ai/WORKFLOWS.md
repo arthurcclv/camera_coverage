@@ -68,6 +68,13 @@ Then add a test — for the reducer transition and/or the pure function.
   Existing pattern to follow: `coverageOverlay.test.ts`, `viewportSelection.test.ts`,
   `volumetric.test.ts`.
 - Every change ships with a test.
+- **Pointer-interaction features:** extract the geometry into a pure function that
+  takes plain numbers, and test *that*. `scene/reorder.ts` is the pattern —
+  `insertionTargetAt` takes a pointer Y plus row extents as data, so the midpoint and
+  adjacency rules (where the bugs are) test without a DOM. What stays manual is only
+  the event wiring: **verify the drag threshold, Escape-cancel, and edge auto-scroll
+  in `npm run dev`** — jsdom has no layout, so `getBoundingClientRect` would return
+  zeros and any test of those would be testing its own stubs.
 
 ## Running against a local SDK change
 

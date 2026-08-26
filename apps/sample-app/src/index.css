@@ -500,6 +500,9 @@ body {
   max-height: 240px;
   overflow-y: auto;
   scrollbar-gutter: stable;
+  /* Positioning context for the drag insertion line (§5.5.1), which is placed in
+     this element's scroll-content space. */
+  position: relative;
 }
 
 .tree-row {
@@ -527,6 +530,22 @@ body {
 .tree-row.group {
   color: #c7cdd6;
   font-weight: 500;
+}
+
+/* Drag-to-reorder (§5.5.1): the dragged row dims in place — the list itself does
+   not reflow — and a 2px accent line marks where it will land, inset to the target
+   row's indent depth. */
+.tree-row.dragging {
+  opacity: 0.4;
+}
+.tree-insertion-line {
+  position: absolute;
+  right: 6px;
+  height: 2px;
+  margin-top: -1px;
+  background: #2c66c9;
+  border-radius: 1px;
+  pointer-events: none;
 }
 
 /* Shared by the leaf spacer (span) and the expand/collapse control (button);

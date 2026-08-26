@@ -171,6 +171,13 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   `.tree-row-toggle` **enabled checkbox** (checked = the zone contributes to the
   visualized marked set), reusing the camera enable-toggle control. Sections use the
   same checkbox for their per-heatmap enabled state.
+- **Tree drag-reorder** (`.tree-row.dragging`, `.tree-insertion-line`): while a row
+  is dragged to reorder it (§5.5.1) the source row **dims in place** (opacity 0.4)
+  and the list does **not** reflow; a 2 px accent (`#2c66c9`) line, absolutely
+  positioned in `.tree`'s scroll-content space and **inset to the target row's indent
+  depth** (`8 + depth * 14` px, matching the row padding), marks where it will land.
+  The line's absence is the "you can't drop here" cue — there is deliberately no
+  separate rejection state. `.tree` therefore carries `position: relative`.
 - **Select / text input** (`.select`, `.text-input`): match the numeric-input
   chrome (dark field, subtle border, 4 px radius) — the volume zone-reassign
   dropdown and the editable zone name.
@@ -198,8 +205,13 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   reading content — don't push important text into them.
 - **Pointer targets:** thin visual affordances get larger hit areas (the 8 px
   divider grip has a 3 px visible bar; the 5 px drag threshold in
-  `viewportSelection` prevents accidental deselect). Maintain that split when
-  adding thin controls.
+  `viewportSelection` prevents accidental deselect, and the hierarchy's 4 px
+  reorder threshold keeps a shaky click on a row a *selection*, not a drag).
+  Maintain that split when adding thin controls.
+- **Known gap:** hierarchy drag-reorder (§5.5.1) is **mouse/touch only** — the tree
+  has no keyboard navigation to hang a keyboard reorder on, so there is no
+  non-pointer equivalent. Documented in the spec rather than half-built; adding it
+  means building roving-tabindex tree navigation first.
 - **Motion:** the only animation is the spinner; keep new motion minimal and
   non-essential.
 

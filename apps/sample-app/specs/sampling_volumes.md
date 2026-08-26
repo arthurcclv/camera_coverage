@@ -275,6 +275,13 @@ Zones                         (group umbrella — passive; expand/collapse only)
   - **Volume** — adds a 1 m cube at the workspace center into the **target zone**
     (the selected zone, or the selected volume's zone, or the first zone; creating
     "Zone 1" first if none exist), auto-selected. Marks stale (§4.2).
+- **Reordering.** Zone rows reorder among themselves and volume rows among their
+  own zone's volumes, by drag (`spec.md` §5.5.1). A zone drags as a **subtree** —
+  its volumes move with it, and the gaps between another zone's volumes are not
+  legal drop positions for a zone. Dragging **never** moves a volume between zones;
+  that is the volume panel's `zoneId` control (§6.1). Reordering permutes the
+  `zones`/`volumes` arrays, so it round-trips in the scene file and — unlike every
+  other volume edit — does **not** mark the result stale.
 - **Deleting.** Right-click → **Delete**. Deleting a **volume** removes it (and
   marks stale). Deleting a **zone** removes the zone **and all its volumes** (marks
   stale if it had any). Deleting the selected entity clears the selection.
@@ -284,7 +291,8 @@ Zones                         (group umbrella — passive; expand/collapse only)
   §8.1) → Auto-run recomputes (§8). Creating an empty zone, renaming a zone, and
   **enabling/disabling a zone** do **not** mark stale — the enabled union is a pure
   client-side re-filter of the retained masks (§7.3, §8), exactly like a section's
-  visibility.
+  visibility. **Reordering** a zone or volume row does not mark stale either: it
+  permutes an array whose order is display-only and leaves the marked set identical.
 
 ---
 

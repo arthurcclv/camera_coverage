@@ -88,6 +88,44 @@ test('serializeScene . parseSceneFile round-trips', () => {
   assert.deepEqual(reserialized, doc);
 });
 
+test('array order is the hierarchy order and round-trips verbatim (spec §5.5.1, §14.3)', () => {
+  const doc = validDoc();
+  doc.cameras = [
+    { ...doc.cameras[0], id: 'cam-1' },
+    { ...doc.cameras[0], id: 'cam-2' },
+    { ...doc.cameras[0], id: 'cam-3' },
+  ];
+  // A zone-interleaved volumes array — what appending on create produces (§14.3).
+  doc.zones = [
+    { id: 'zone-1', name: 'West wing', enabled: true },
+    { id: 'zone-2', name: 'East wing', enabled: true },
+  ];
+  doc.volumes = [
+    { ...doc.volumes[0], id: 'volume-1', zoneId: 'zone-1' },
+    { ...doc.volumes[0], id: 'volume-2', zoneId: 'zone-2' },
+    { ...doc.volumes[0], id: 'volume-3', zoneId: 'zone-1' },
+  ];
+
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  // Read preserves order — including the interleaving.
+  assert.deepEqual(parsed.scene.cameras.map((c) => c.id), ['cam-1', 'cam-2', 'cam-3']);
+  assert.deepEqual(parsed.scene.volumes.map((v) => v.id), ['volume-1', 'volume-2', 'volume-3']);
+
+  // A reorder (as the reducer performs it) survives a write/read cycle, so no
+  // separate order field is needed.
+  const reordered = {
+    ...parsed.scene,
+    cameras: [parsed.scene.cameras[2], parsed.scene.cameras[0], parsed.scene.cameras[1]],
+  };
+  const reread = parseSceneFile(serializeScene(reordered));
+  assert.equal(reread.ok, true);
+  if (!reread.ok) return;
+  assert.deepEqual(reread.scene.cameras.map((c) => c.id), ['cam-3', 'cam-1', 'cam-2']);
+  assert.deepEqual(reread.scene.volumes.map((v) => v.id), ['volume-1', 'volume-2', 'volume-3']);
+});
+
 test('parseSceneFile leaves a missing footprint as NaN; resolveSectionFootprints defaults it to full extent (spec §14.3)', () => {
   const doc = validDoc();
   // A file written before finite footprints: no minA/maxA/minB/maxB.

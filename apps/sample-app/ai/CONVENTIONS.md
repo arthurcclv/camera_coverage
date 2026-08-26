@@ -35,6 +35,13 @@ Grouped by layer:
   structures styled by class in `index.css`. Inline SVG icons live in `App.tsx`.
 - **Accessibility:** semantic roles are used — `tree`/`treeitem`/`group`, `menu`,
   `radiogroup`, `separator`, and `aria-expanded`/`aria-selected`.
+- **Pointer gestures** (the panel divider, hierarchy drag-reorder): the geometry goes
+  in a pure module that takes plain numbers; the component keeps only the plumbing.
+  Window `pointermove`/`pointerup` listeners are attached **imperatively inside
+  `pointerdown`** and removed on up/cancel — not declared as an effect — so an
+  unstarted gesture costs nothing and one that leaves the element still tracks. Those
+  listeners close over pointerdown-time values, so anything they need that can change
+  mid-gesture (the current rows, the latest callback) is mirrored into a ref.
 
 ## Naming
 

@@ -9,8 +9,13 @@
  *
  * The panel header carries the "+" add-entity menu; right-clicking a camera,
  * probe, section, zone, or volume row opens a Duplicate/Delete context menu.
+ *
+ * Rows also **drag to reorder within their own group** (spec §5.5.1) via
+ * `useDragReorder` below. That hook owns only the pointer plumbing — threshold,
+ * window listeners, Escape, auto-scroll; every geometric decision lives in the pure
+ * `scene/reorder.ts`, which is where the tests are.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { SceneCamera } from '../cameras/camera.ts';
 import type { Probe } from '../scene/probeVisibility.ts';
@@ -28,6 +33,12 @@ import {
   type RenderRow,
   type SceneNode,
 } from '../scene/sceneTree.ts';
+import {
+  insertionTargetAt,
+  type InsertionTarget,
+  type ReorderableKind,
+  type RowBox,
+} from '../scene/reorder.ts';
 
 export interface SceneHierarchyProps {
   cameras: SceneCamera[];
@@ -67,6 +78,8 @@ export interface SceneHierarchyProps {
   onDuplicateSection(id: string): void;
   onDuplicateZone(id: string): void;
   onDuplicateVolume(id: string): void;
+  /** Drag-reorder within a group (§5.5.1): move `id` before `beforeId`, or last when null. */
+  onReorder(kind: ReorderableKind, id: string, beforeId: string | null): void;
 }
 
 type DeletableKind = 'camera' | 'probe' | 'section' | 'zone' | 'volume';
@@ -83,6 +96,249 @@ const ORIENTATION_SHORT: Record<Section['orientation'], string> = {
   'vertical-x': 'VX',
   'vertical-z': 'VZ',
 };
+
+/** Pointer travel that arms a drag; below it, the press is a plain click (§5.5.1). */
+const DRAG_THRESHOLD_PX = 4;
+/** Edge band that auto-scrolls the tree while dragging, and its top speed (§5.5.1). */
+const AUTOSCROLL_ZONE_PX = 24;
+const AUTOSCROLL_MAX_PX_PER_FRAME = 14;
+/** Row indent, matching the `paddingLeft: 8 + depth * 14` the rows render with. */
+const INDENT_BASE_PX = 8;
+const INDENT_STEP_PX = 14;
+
+interface DragState {
+  nodeId: string;
+  kind: ReorderableKind;
+  entityId: string;
+  /** Resolved drop position, or null when the pointer is over an illegal spot. */
+  target: InsertionTarget | null;
+  /** Insertion line placement in the tree's scroll-content space, or null. */
+  line: { top: number; left: number } | null;
+}
+
+interface PressState {
+  nodeId: string;
+  kind: ReorderableKind;
+  entityId: string;
+  startX: number;
+  startY: number;
+  armed: boolean;
+}
+
+/** The reorderable kind + entity id behind a row, or null for a group header. */
+function reorderableTarget(node: SceneNode): { kind: ReorderableKind; entityId: string } | null {
+  switch (node.kind) {
+    case 'camera':
+      return { kind: 'camera', entityId: node.cameraId };
+    case 'probe':
+      return { kind: 'probe', entityId: node.probeId };
+    case 'section':
+      return { kind: 'section', entityId: node.sectionId };
+    case 'zone':
+      return { kind: 'zone', entityId: node.zoneId };
+    case 'volume':
+      return { kind: 'volume', entityId: node.volumeId };
+    default:
+      return null;
+  }
+}
+
+/** Measure every rendered row's vertical extent, in viewport coordinates. */
+function measureRows(tree: HTMLElement): Map<string, RowBox> {
+  const boxes = new Map<string, RowBox>();
+  for (const el of tree.querySelectorAll<HTMLElement>('li[data-node-id]')) {
+    const nodeId = el.dataset.nodeId;
+    if (!nodeId) continue;
+    const r = el.getBoundingClientRect();
+    boxes.set(nodeId, { nodeId, top: r.top, bottom: r.bottom });
+  }
+  return boxes;
+}
+
+/**
+ * Drag-to-reorder for the hierarchy tree (spec §5.5.1). Owns only the pointer
+ * plumbing — the threshold, window listeners, Escape, and the auto-scroll loop.
+ * Every geometric decision (which slot, whether the drop is legal, where the line
+ * goes) is delegated to the pure `scene/reorder.ts`, which is where the tests live.
+ *
+ * Window-level move/up listeners are attached on pointerdown rather than declared
+ * as an effect, so a press that never crosses the threshold costs nothing and a
+ * drag that leaves the panel still tracks.
+ */
+function useDragReorder(
+  rows: RenderRow[],
+  onReorder: (kind: ReorderableKind, id: string, beforeId: string | null) => void,
+) {
+  const treeRef = useRef<HTMLUListElement | null>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+
+  // Refs mirror what the imperatively-attached listeners need, since they close
+  // over the values present at pointerdown.
+  const pressRef = useRef<PressState | null>(null);
+  const pointerYRef = useRef(0);
+  const rafRef = useRef(0);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const onReorderRef = useRef(onReorder);
+  onReorderRef.current = onReorder;
+  const dragRef = useRef<DragState | null>(null);
+  const setDragBoth = useCallback((next: DragState | null) => {
+    dragRef.current = next;
+    setDrag(next);
+  }, []);
+
+  /** Re-run the hit-test at the current pointer Y and refresh the insertion line. */
+  const refreshTarget = useCallback(() => {
+    const press = pressRef.current;
+    const tree = treeRef.current;
+    if (!press?.armed || !tree) return;
+    const boxes = measureRows(tree);
+    const target = insertionTargetAt(pointerYRef.current, rowsRef.current, boxes, press.nodeId);
+    // Viewport Y → the tree's scroll-content space, where the line is positioned.
+    const treeRect = tree.getBoundingClientRect();
+    const line =
+      target === null
+        ? null
+        : {
+            top: target.lineY - treeRect.top + tree.scrollTop,
+            left: INDENT_BASE_PX + target.depth * INDENT_STEP_PX,
+          };
+    // Pointermove fires far more often than the line moves; skip the re-render
+    // (of every row) when nothing visible actually changed.
+    const prev = dragRef.current;
+    const same = (a: number | string | null | undefined, b: number | string | null | undefined) =>
+      (a ?? null) === (b ?? null);
+    if (
+      prev?.nodeId === press.nodeId &&
+      same(prev.target?.beforeNodeId, target?.beforeNodeId) &&
+      same(prev.line?.top, line?.top) &&
+      same(prev.line?.left, line?.left)
+    ) {
+      return;
+    }
+    setDragBoth({ nodeId: press.nodeId, kind: press.kind, entityId: press.entityId, target, line });
+  }, [setDragBoth]);
+
+  /** rAF loop: scroll the tree while the pointer sits in an edge band (§5.5.1). */
+  const autoScrollTick = useCallback(() => {
+    const tree = treeRef.current;
+    if (!pressRef.current?.armed || !tree) return;
+    const rect = tree.getBoundingClientRect();
+    const y = pointerYRef.current;
+    const overTop = rect.top + AUTOSCROLL_ZONE_PX - y;
+    const underBottom = y - (rect.bottom - AUTOSCROLL_ZONE_PX);
+    // Speed ramps with how far into the band the pointer is.
+    let dy = 0;
+    if (overTop > 0) dy = -Math.min(1, overTop / AUTOSCROLL_ZONE_PX) * AUTOSCROLL_MAX_PX_PER_FRAME;
+    else if (underBottom > 0) dy = Math.min(1, underBottom / AUTOSCROLL_ZONE_PX) * AUTOSCROLL_MAX_PX_PER_FRAME;
+    if (dy !== 0) {
+      const before = tree.scrollTop;
+      tree.scrollTop = before + dy;
+      if (tree.scrollTop !== before) refreshTarget();
+    }
+    rafRef.current = requestAnimationFrame(autoScrollTick);
+  }, [refreshTarget]);
+
+  const endDrag = useCallback(
+    (commit: boolean) => {
+      const press = pressRef.current;
+      const current = dragRef.current;
+      pressRef.current = null;
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      setDragBoth(null);
+      if (commit && press?.armed && current?.target) {
+        onReorderRef.current(press.kind, press.entityId, current.target.beforeId);
+      }
+    },
+    [setDragBoth],
+  );
+  const endDragRef = useRef(endDrag);
+  endDragRef.current = endDrag;
+
+  const onRowPointerDown = useCallback(
+    (ev: React.PointerEvent, node: SceneNode) => {
+      if (ev.button !== 0) return;
+      const target = reorderableTarget(node);
+      if (!target) return; // group headers are not draggable (§5.5.1)
+      // The enabled checkbox and the expand caret keep their own behavior.
+      if ((ev.target as HTMLElement).closest('input, button')) return;
+
+      pressRef.current = {
+        nodeId: node.id,
+        kind: target.kind,
+        entityId: target.entityId,
+        startX: ev.clientX,
+        startY: ev.clientY,
+        armed: false,
+      };
+
+      const onMove = (e: PointerEvent) => {
+        const press = pressRef.current;
+        if (!press) return;
+        pointerYRef.current = e.clientY;
+        if (!press.armed) {
+          const moved = Math.hypot(e.clientX - press.startX, e.clientY - press.startY);
+          if (moved < DRAG_THRESHOLD_PX) return;
+          press.armed = true;
+          rafRef.current = requestAnimationFrame(autoScrollTick);
+        }
+        // Once armed, suppress text selection / native drag for the rest of the gesture.
+        e.preventDefault();
+        refreshTarget();
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onCancel);
+        // A completed drag must not also select the row (§5.5.1: selection is
+        // untouched). The click that follows pointerup is swallowed once, in the
+        // capture phase; the timeout releases the guard if no click arrives (the
+        // pointer came up over a different element).
+        if (pressRef.current?.armed) {
+          const swallow = (e: MouseEvent) => {
+            e.stopPropagation();
+            e.preventDefault();
+            release();
+          };
+          const release = () => {
+            window.removeEventListener('click', swallow, true);
+            clearTimeout(timer);
+          };
+          const timer = setTimeout(release, 0);
+          window.addEventListener('click', swallow, true);
+        }
+        endDragRef.current(true);
+      };
+      const onCancel = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onCancel);
+        endDragRef.current(false);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onCancel);
+    },
+    [autoScrollTick, refreshTarget],
+  );
+
+  // Escape aborts an in-flight drag and the row stays put (§5.5.1), mirroring the
+  // armed-placement cancel (§2.4.2). Mounted only while dragging.
+  useEffect(() => {
+    if (!drag) return;
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') endDragRef.current(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [drag]);
+
+  // A drag can't outlive the component (or a scene swap that unmounts rows).
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+
+  return { treeRef, drag, onRowPointerDown };
+}
 
 function dotColor(rate: number | undefined, flagged: boolean): string {
   if (flagged) return '#ff7d7d';
@@ -120,6 +376,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
 
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const { treeRef, drag, onRowPointerDown } = useDragReorder(rows, props.onReorder);
 
   // Close either popover on any outside interaction (spec §5.5 menus are transient).
   useEffect(() => {
@@ -185,12 +442,14 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
         </div>
       </div>
 
-      <ul className="tree" role="tree">
+      <ul className="tree" role="tree" ref={treeRef}>
         {rows.map((row) => (
           <TreeRow
             key={row.node.id}
             row={row}
             selected={row.node.id === selectedNodeId}
+            dragging={drag?.nodeId === row.node.id}
+            onPointerDown={onRowPointerDown}
             rateById={rateById}
             flaggedIds={props.flaggedIds}
             probeSeenCounts={props.probeSeenCounts}
@@ -206,6 +465,16 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             onContextMenu={openContextMenu}
           />
         ))}
+        {drag?.line && (
+          // The 2px accent insertion line (§5.5.1), inset to the target row's
+          // indent depth so it reads which level the row will land at.
+          <li
+            role="presentation"
+            aria-hidden="true"
+            className="tree-insertion-line"
+            style={{ top: drag.line.top, left: drag.line.left }}
+          />
+        )}
       </ul>
 
       {contextMenu && (
@@ -252,6 +521,9 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
 interface TreeRowProps {
   row: RenderRow;
   selected: boolean;
+  /** This row is the one currently being dragged — it dims in place (§5.5.1). */
+  dragging: boolean;
+  onPointerDown(ev: React.PointerEvent, node: SceneNode): void;
   rateById: Map<string, number>;
   flaggedIds: Set<string>;
   probeSeenCounts: Map<string, number | null>;
@@ -315,6 +587,7 @@ function TreeRow(props: TreeRowProps) {
     isGroup ? 'group' : '',
     selected ? 'selected' : '',
     enabled ? '' : 'disabled',
+    props.dragging ? 'dragging' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -326,7 +599,9 @@ function TreeRow(props: TreeRowProps) {
       aria-selected={isGroup ? undefined : selected}
       aria-expanded={hasChildren ? !collapsed : undefined}
       className={className}
+      data-node-id={node.id}
       style={{ paddingLeft: 8 + depth * 14 }}
+      onPointerDown={(ev) => props.onPointerDown(ev, node)}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
     >

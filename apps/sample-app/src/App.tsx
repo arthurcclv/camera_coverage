@@ -68,7 +68,7 @@ import {
   type SaveIntent,
 } from './scene/saveTarget.ts';
 import { SceneView, type SceneViewState, type TransformChange } from './scene/sceneView/sceneView.ts';
-import { initSceneState, sceneReducer } from './scene/sceneReducer.ts';
+import { initSceneState, sceneReducer, type EntityKind } from './scene/sceneReducer.ts';
 import { useEngine } from './engine/useEngine.ts';
 
 import {
@@ -752,6 +752,13 @@ export function App() {
     dispatch({ type: 'duplicateEntity', kind: 'zone', id });
   }, []);
 
+  // Hierarchy drag-reorder (spec §5.5.1). Array order is the display order and
+  // round-trips in the scene file, so this is a pure splice: no recompute, no
+  // stale/sampling-dirty, and the selection is deliberately left alone.
+  const handleReorder = useCallback((kind: EntityKind, id: string, beforeId: string | null) => {
+    dispatch({ type: 'reorderEntity', kind, id, beforeId });
+  }, []);
+
   // --- scene file: import / export / reset (spec §14) ------------------------
   // Replaces the whole Scene at once: geometry, cameras, probes, sections, plus
   // every derived/retained-run bit of state, so nothing from the outgoing scene
@@ -1126,6 +1133,7 @@ export function App() {
             onDuplicateSection={handleDuplicateSection}
             onDuplicateZone={handleDuplicateZone}
             onDuplicateVolume={handleDuplicateVolume}
+            onReorder={handleReorder}
           />
         </div>
         <div

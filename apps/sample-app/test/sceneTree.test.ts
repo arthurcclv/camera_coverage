@@ -231,3 +231,39 @@ test('flattenVisible expands a zone into its volumes, and a collapsed zone hides
   const collapsed = flattenVisible(nodes, new Set([nodeIdForZone('zone-1')]));
   assert.equal(collapsed.some((r) => r.node.kind === 'volume'), false);
 });
+
+test('the tree follows array order, so a reorder shows up as a row reorder (§5.5.1)', () => {
+  const cameras = [cam('cam-1'), cam('cam-2'), cam('cam-3')];
+  const before = flattenVisible(buildSceneTree(cameras, [], [], [], []), new Set());
+  assert.deepEqual(
+    before.filter((r) => r.node.kind === 'camera').map((r) => r.node.id),
+    [nodeIdForCamera('cam-1'), nodeIdForCamera('cam-2'), nodeIdForCamera('cam-3')],
+  );
+
+  // The reducer's splice: cam-3 moved to the front.
+  const after = flattenVisible(
+    buildSceneTree([cameras[2], cameras[0], cameras[1]], [], [], [], []),
+    new Set(),
+  );
+  assert.deepEqual(
+    after.filter((r) => r.node.kind === 'camera').map((r) => r.node.id),
+    [nodeIdForCamera('cam-3'), nodeIdForCamera('cam-1'), nodeIdForCamera('cam-2')],
+  );
+});
+
+test('a zone renders only its own volumes, in their array order, ignoring interleaving', () => {
+  const zones = [zone('zone-1'), zone('zone-2')];
+  // Interleaved, as appending on create produces (§14.3).
+  const volumes = [volume('volume-1', 'zone-1'), volume('volume-2', 'zone-2'), volume('volume-3', 'zone-1')];
+  const rows = flattenVisible(buildSceneTree([], [], [], zones, volumes), new Set());
+  assert.deepEqual(
+    rows.filter((r) => r.node.kind === 'zone' || r.node.kind === 'volume').map((r) => r.node.id),
+    [
+      nodeIdForZone('zone-1'),
+      nodeIdForVolume('volume-1'),
+      nodeIdForVolume('volume-3'),
+      nodeIdForZone('zone-2'),
+      nodeIdForVolume('volume-2'),
+    ],
+  );
+});

@@ -76,6 +76,7 @@ apps/sample-app/
       heatmapLegend.ts     Turbo colormap + hue ramp + legend-scale builders (section camera-count/blind + coverage-fraction + coverage-overlay hue modes) (§13.5, §13.6, §9)
       sectionGizmos.ts     per-section heatmap plane + faint bound outlines + transform target (§13.5, §13.8)
       sceneTree.ts         scene hierarchy node model + derivation (camera + probe + section + zone/volume) (§5.5)
+      reorder.ts           hierarchy drag-reorder: pointer hit-test → insertion target + array splice (§5.5.1)
       samplingVolumes.ts   zone/volume model + OBB math + BVH seeding + marked filter + per-zone aggregation (sampling_volumes.md)
       samplingVolumeGizmos.ts  per-volume wireframe boxes + transform target (sampling_volumes.md §5)
     cameras/
@@ -87,7 +88,7 @@ apps/sample-app/
       SectionPanel.tsx     selected-section orientation + range + aggregation editor (§13.6)
       VolumePanel.tsx      selected-volume position/rotation/size + zone reassign (sampling_volumes.md §6.1)
       ZonePanel.tsx        selected-zone name + member count + per-zone stats (sampling_volumes.md §6.2)
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones umbrella, enable/visibility toggle, add "+" menu, duplicate/delete context menu) (§5.5)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones umbrella, enable/visibility toggle, add "+" menu, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
       OverlayControls.tsx  overlay mode + intensity scale + resolution slider
       ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones visibility checkboxes (§2.4)
       ViewSelector.tsx     top-middle View dropdown: Perspective/Top/Front/Right camera selection (§2.4)
@@ -727,8 +728,9 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   (when any **zone** exists — including an empty one) a passive **"Zones"** umbrella
   over **selectable+expandable zone nodes**, each holding its volume children
   (`sampling_volumes.md` §4.1) — the first
-  user-created sub-groups (all other groups are auto-derived by type). No reordering,
-  reparenting beyond this one level (future).
+  user-created sub-groups (all other groups are auto-derived by type). Rows are
+  **reorderable by drag within their own group** (§5.5.1); **reparenting** by drag is not
+  offered — a volume changes zone from its panel instead (`sampling_volumes.md` §6.1).
 - **Rows.** A generic `TreeRow` renders indentation, the expand caret, label,
   selection highlight, and click routing; kind-specific content is dispatched on
   `node.kind`. Camera rows keep the existing checkbox toggle (§5.4), coverage dot,
@@ -795,7 +797,43 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   (§15).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
   `aria-expanded`/`aria-selected`; interaction is mouse-driven (no keyboard tree
-  navigation yet).
+  navigation yet, and no keyboard equivalent for drag-reordering, §5.5.1).
+
+### 5.5.1 Reordering rows (drag and drop)
+
+A row is **dragged to reorder it within its own group**. Draggable kinds: **camera**,
+**probe**, **section**, **zone**, and **volume**. The four root group headers are **not**
+draggable — they are auto-derived by type and their order (Cameras → Probes → Sections →
+Zones) is fixed.
+
+- **Order is array order.** The tree is derived from the canonical arrays (§5.5), so
+  reordering a row **is** a reorder of that entity's array — `cameras`, `probes`,
+  `sections`, `zones`, or `volumes`. It therefore **round-trips in the scene file** with no
+  new field and no format-version bump (§14.3). A **volume** is reordered **within the
+  slots its own zone's volumes already occupy** in the (zone-interleaved) `volumes` array;
+  no other element moves.
+- **Within-group only.** A drop is legal only among the dragged row's **siblings**. There
+  is **no reparenting** — dragging never changes a volume's `zoneId` (that is the volume
+  panel's job, `sampling_volumes.md` §6.1). While the pointer is anywhere else, **no
+  insertion line is shown** and releasing is a **no-op**.
+- **A zone drags as a subtree.** Legal drop positions for a zone are **zone boundaries** —
+  before another zone, or after that zone's last visible volume row — never between another
+  zone's volumes. A zone's volumes **move with it**.
+- **Grip and threshold.** The **whole row** initiates the drag, except its enabled checkbox
+  and its expand caret. The drag arms only once the pointer moves **4 px**; a press below
+  the threshold is an ordinary **click that selects** (§5.5). **Escape** cancels an
+  in-flight drag and the row returns to its original position, mirroring the
+  armed-placement cancel (§2.4.2).
+- **Feedback.** The dragged row **dims in place**; a **2 px accent insertion line**, inset
+  to the target row's indent depth, marks where the row will land. There is no floating
+  ghost row, and the list does not reflow until the drop commits.
+- **Auto-scroll.** While dragging, a pointer within **24 px** of the hierarchy's top or
+  bottom edge scrolls the tree continuously (speed ramping with proximity), so a row can be
+  moved beyond the visible pane (§2.2).
+- **No side effects.** Reordering **never changes the selection** (the detail panel and the
+  viewport gizmo stay put) and **never marks the result stale or sampling-dirty** (§8.1) —
+  array order is presentation-only, like a rename (§5.6). It is **not undoable** (the app
+  has no undo, §2.4.2); a stray drag is recovered by dragging back.
 
 ### 5.6 Camera name
 
@@ -896,7 +934,9 @@ zone's deletion, or the `useZones` toggle changes. A run applies
 it), then `setCameras` + `compute`, then recomputes per-zone summaries — no re-init
 needed (only a `voxelSize` change requires that). **Enabling/disabling a zone** or
 **renaming a zone** never marks stale — they re-filter/relabel client-side
-(`sampling_volumes.md` §7.2, §7.3, §8).
+(`sampling_volumes.md` §7.2, §7.3, §8). **Reordering** a hierarchy row (§5.5.1) likewise
+never marks stale or sampling-dirty: it permutes an array whose order is display-only, and
+results are keyed by entity id, not array position.
 
 ---
 
@@ -1537,6 +1577,13 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   key and reads back as its default). Adding `name` is back-compatible, so there is
   **no format-version bump** (still `2`), exactly like `clipRange`/`clipSectionId`/the
   camera `enabled` flag.
+- **Array order is significant.** The order of `cameras`, `probes`, `sections`, `zones`,
+  and `volumes` is the **hierarchy display order** (§5.5), preserved verbatim on read and
+  write. Drag-reordering (§5.5.1) rewrites these arrays in place; there is no separate
+  order field and none is needed, so reordering is **not** a format change (still `2`). A
+  `volumes` array may **interleave zones** — volumes always append on create — and the
+  reader/writer preserve that interleaving exactly; a zone's row order is the order of its
+  own volumes within the array, ignoring the others.
 - **`clipSectionId`** — which section clips (§13.9), a scene-level `string | null`.
   **Optional on read**, defaulting to `null`; an id that names no loaded section is
   coerced to `null`. Older files (and files with no clip) load unclipped — **no
@@ -1728,8 +1775,9 @@ Sketch:
   in-app is out of scope.
 - Auto-persisting layouts across reloads (localStorage / autosave); explicit
   scene-file import/export is §14.
-- Scene-hierarchy: further entity types (lights, meshes), user-created groups,
-  reordering/reparenting, keyboard navigation.
+- Scene-hierarchy: further entity types (lights, meshes), user-created groups beyond
+  zones, **reparenting by drag**, reordering the root type groups, and keyboard navigation
+  / keyboard reordering. (Drag **reordering within a group** shipped, §5.5.1.)
 - Probes: richer per-camera detail (distance / angle), sub-voxel visibility (a true
   per-point ray cast instead of reusing the voxel mask), and sightlines for
   non-selected probes.

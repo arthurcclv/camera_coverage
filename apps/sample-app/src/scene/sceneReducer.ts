@@ -18,8 +18,9 @@
  * enable, but not rename, §5.6) marks stale; a volume, `useZones`, or `zoneId`
  * edit marks stale and sampling-dirty; a probe or section edit, any rename,
  * adding an empty zone, and deleting or duplicating an empty zone mark neither
- * (§12.5, §13.4). `stale` only latches once a run has happened (`hasRunOnce`);
- * `samplingDirty` latches regardless.
+ * (§12.5, §13.4). A hierarchy **reorder** (§5.5.1) marks neither either — array
+ * order is display-only. `stale` only latches once a run has happened
+ * (`hasRunOnce`); `samplingDirty` latches regardless.
  */
 import type { CameraConfig, Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 import type { SceneCamera } from '../cameras/camera.ts';
@@ -36,6 +37,7 @@ import {
   duplicateZone,
   nextFreeId,
 } from './entityDuplication.ts';
+import { moveBefore, moveVolumeBefore } from './reorder.ts';
 import type { TransformChange } from './sceneView/types.ts';
 
 // Defaults for a camera spawned from the "+" menu (spec §5.5), matching the
@@ -76,6 +78,8 @@ export type SceneAction =
   | { type: 'addVolume'; position: Vec3 }
   | { type: 'deleteEntity'; kind: EntityKind; id: string }
   | { type: 'duplicateEntity'; kind: EntityKind; id: string }
+  /** Hierarchy drag-reorder (§5.5.1): move `id` before sibling `beforeId`, or last when null. */
+  | { type: 'reorderEntity'; kind: EntityKind; id: string; beforeId: string | null }
   | { type: 'changeCamera'; id: string; patch: Partial<CameraConfig> }
   | { type: 'changeProbe'; id: string; position: Vec3 }
   | { type: 'changeSection'; id: string; patch: Partial<Section> }
@@ -257,6 +261,29 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
             ...(copy.volumes.length > 0 ? samplingInput(state) : null),
           };
         }
+      }
+      return state;
+    }
+
+    // Hierarchy drag-reorder (§5.5.1). Order *is* the persistence — these arrays
+    // serialize in order (§14.3) — so a reorder is just a splice. It marks neither
+    // `stale` nor `samplingDirty`: array order is display-only and results are
+    // keyed by entity id, not position (§8.1). Selection is untouched, so the
+    // detail panel and the viewport gizmo stay put. `moveBefore`/`moveVolumeBefore`
+    // return the input array on a no-op, so an illegal or null move is identity.
+    case 'reorderEntity': {
+      const { kind, id, beforeId } = action;
+      switch (kind) {
+        case 'camera':
+          return { ...state, cameras: moveBefore(state.cameras, id, beforeId) };
+        case 'probe':
+          return { ...state, probes: moveBefore(state.probes, id, beforeId) };
+        case 'section':
+          return { ...state, sections: moveBefore(state.sections, id, beforeId) };
+        case 'zone':
+          return { ...state, zones: moveBefore(state.zones, id, beforeId) };
+        case 'volume':
+          return { ...state, volumes: moveVolumeBefore(state.volumes, id, beforeId) };
       }
       return state;
     }
