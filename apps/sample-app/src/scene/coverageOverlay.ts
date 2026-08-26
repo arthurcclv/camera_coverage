@@ -85,6 +85,17 @@ export function popcount32(x: number): number {
   return (((v + (v >> 4)) & 0x0f0f0f0f) * 0x01010101) >> 24;
 }
 
+/**
+ * Cameras that see a voxel: popcount across **every** `CAM_WORDS` mask word (§9).
+ * Counting word 0 alone would drop cameras at index ≥ 32, so voxels seen only by
+ * those cameras would read as blind (SDK spec §7.1, §9.5).
+ */
+export function popcountWords(words: Uint32Array): number {
+  let n = 0;
+  for (let w = 0; w < words.length; w++) n += popcount32(words[w]);
+  return n;
+}
+
 export class CoverageOverlay {
   private readonly renderer = new VoxelVolumetricRenderer();
   readonly object = this.renderer.object;
@@ -124,12 +135,17 @@ export class CoverageOverlay {
     this.rebuild();
   }
 
-  /** Append a streamed ChunkResult's valid leaves. Assumes camWords === 1 (<=32 cameras). */
+  /**
+   * Append a streamed ChunkResult's valid leaves. Decodes the leaf's full
+   * `maskWords` (all `CAM_WORDS` words), so it stays correct above 32 cameras;
+   * `maskWords` is accessor-owned scratch, so it is reduced to `camCount` here
+   * rather than retained (§9).
+   */
   addChunk(result: ChunkResult): void {
     const acc = accessor(result);
     const [ox, oy, oz] = result.origin;
     const vs = result.voxelSize;
-    acc.forEachLeaf((min, size, mask, valid) => {
+    acc.forEachLeaf((min, size, _mask, valid, maskWords) => {
       if (!valid) return;
       const world = size * vs;
       this.leaves.push({
@@ -137,7 +153,7 @@ export class CoverageOverlay {
         cy: oy + min[1] * vs + world / 2,
         cz: oz + min[2] * vs + world / 2,
         size: world,
-        camCount: popcount32(mask),
+        camCount: popcountWords(maskWords),
       });
     });
     this.rebuild();

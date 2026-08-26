@@ -231,7 +231,10 @@ default" — see DECISIONS.md).
   is the only depth writer, so it draws first and the depth test resolves the rest
   per viewpoint (spec §9, §13.5). See DECISIONS.md's transparent-layer draw-order entry.
 - `coverageOverlay.ts` — maps `ChunkResult` leaves → volumetric voxels per mode;
-  hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`).
+  hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`) and
+  `popcountWords`, which counts across all `CAM_WORDS` words. The app's only
+  `forEachLeaf` caller: it must read the callback's `maskWords`, never the word-0
+  `mask`, or cameras at index ≥ 32 vanish from the overlay (see DECISIONS.md).
 - `sectionHeatmap.ts` — `Section` model, retained-chunk store, cross-chunk column
   aggregation, texture-data + stats generation, the section-legend visibility
   predicate (`sectionLegendVisible`, §13.6/§13.9), plus

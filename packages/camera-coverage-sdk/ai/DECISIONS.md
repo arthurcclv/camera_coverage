@@ -6,6 +6,23 @@ decisions at the top when you add to this file.
 
 ---
 
+## `forEachLeaf` carries the full mask via a scratch `maskWords` buffer
+
+**Why:** the callback's `mask` parameter is a single `number`, so it could only
+ever carry word 0 — cameras 0–31. Every consumer that popcounted a leaf or tested
+"seen by no camera" silently dropped cameras at index ≥ 32 (the sample app's
+coverage overlay rendered such voxels as blind spots while the engine's own
+statistics, which read all words, stayed correct). `getMaskWord` was the only
+correct path, but using it means per-voxel queries, throwing away the leaf merging
+that `forEachLeaf` exists for. **Decision:** add a fifth callback argument
+`maskWords: Uint32Array` of length `CAM_WORDS`, and compute the `maxDepth`
+majority key over the full word tuple rather than word 0 (§9.5). `mask` keeps its
+word-0 meaning so single-word callers are untouched. **Trade-off:** `maskWords` is
+an accessor-owned buffer **reused across invocations** — retaining a leaf requires
+copying it. Chosen over allocating per leaf because traversals run to millions of
+leaves per chunk; the alternative (making `mask` a `Uint32Array`) would have been
+the same hazard plus a breaking change for every existing caller.
+
 ## Spec is the source of truth; README records interpretations
 
 Behavior is defined in `specs/spec.md`, and the README collects the concrete

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { coverageFraction, hueToRgb } from '../src/scene/coverageOverlay.ts';
+import { accessor, type ChunkResult } from '@linkervision/camera-coverage-sdk';
+import { coverageFraction, hueToRgb, popcountWords } from '../src/scene/coverageOverlay.ts';
 
 test('voxel seen by all involved cameras has coverage fraction 1', () => {
   assert.equal(coverageFraction(4, 4), 1);
@@ -23,6 +24,46 @@ test('fraction is clamped to [0, 1] when camCount exceeds the denominator', () =
 
 test('zero involved cameras does not divide by zero', () => {
   assert.equal(coverageFraction(0, 0), 0);
+});
+
+// --- Camera count above 32 cameras (§9, SDK spec §7.1/§9.5) -----------------
+
+test('popcountWords counts every mask word, not just word 0', () => {
+  assert.equal(popcountWords(new Uint32Array([0b1011])), 3);
+  // cameras 32 and 34 only — word 0 empty
+  assert.equal(popcountWords(new Uint32Array([0, 0b101])), 2);
+  assert.equal(popcountWords(new Uint32Array([0xffffffff, 0xffffffff])), 64);
+  assert.equal(popcountWords(new Uint32Array([0, 0, 0, 0])), 0);
+});
+
+/** Dense 2×1×1 chunk: voxel 0 seen by camera 33 only, voxel 1 blind. */
+function highCameraChunk(): ChunkResult {
+  const visibility = new Uint32Array([0, 0b10, 0, 0]); // 2 voxels × camWords 2
+  const validity = new Uint32Array([0b11]); // both valid
+  return {
+    chunkId: 0,
+    encoding: 'dense',
+    dims: [2, 1, 1],
+    origin: [0, 0, 0],
+    voxelSize: 1,
+    camWords: 2,
+    mode: 1,
+    visibility,
+    validity,
+    stats: { validCount: 2, coveredCount: 1, visibleCount: [] },
+  };
+}
+
+test('a voxel seen only by a camera at index >= 32 is not read as a blind spot', () => {
+  // Regression: the overlay used forEachLeaf's word-0 `mask`, so voxels covered
+  // only by cameras 32+ got camCount 0 — invisible in Coverage mode and drawn as
+  // false blind spots in Blind spots mode.
+  const counts: number[] = [];
+  accessor(highCameraChunk()).forEachLeaf((_min, _size, _mask, valid, maskWords) => {
+    if (valid) counts.push(popcountWords(maskWords));
+  });
+  assert.deepEqual(counts, [1, 0], 'voxel 0 is seen by one camera; voxel 1 is blind');
+  assert.ok(coverageFraction(counts[0], 40) > 0, 'covered voxel renders with intensity');
 });
 
 // --- Overlay color (spec §9.2): hue → hsl(hue,100%,50%) RGB -----------------

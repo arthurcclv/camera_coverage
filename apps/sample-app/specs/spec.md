@@ -956,9 +956,15 @@ coverage-overlay mode of the shared bottom-right legend widget (§13.6); it show
 no section legend is up and the overlay is visible.
 
 Voxels are extracted from streamed `ChunkResult`s using
-`accessor(result).forEachLeaf((min, size, mask, valid) => …)` and fed into the
-renderer incrementally as chunks arrive. Each valid leaf becomes one voxel at world
+`accessor(result).forEachLeaf((min, size, mask, valid, maskWords) => …)` and fed into
+the renderer incrementally as chunks arrive. Each valid leaf becomes one voxel at world
 position `min` with edge `size`; `intensity` and `color` depend on the active mode.
+
+The overlay derives each leaf's camera count from **`maskWords`** — every one of the
+`CAM_WORDS` words (SDK spec §9.5) — not from the single-word `mask` argument. Reading
+`mask` alone would silently drop cameras at index ≥ 32, rendering voxels seen only by
+those cameras as blind. Because `maskWords` is accessor-owned scratch, the overlay
+reduces it to a scalar camera count at traversal time and retains only that.
 
 When zones are active, the overlay is filtered to the **enabled-zones marked set**
 (`sampling_volumes.md` §7.3): a valid voxel is drawn only if its center falls in the
@@ -979,11 +985,11 @@ renderer's per-voxel inputs:
 
 - **Coverage** — the default. **Every valid voxel** is fed. `color` = the
   user-selected **overlay color** (§9.2); `intensity` = the voxel's **coverage
-  fraction** (`popcount(mask) / involvedCameraCount`, 0..1, §16). Well-covered
+  fraction** (`popcount(maskWords) / involvedCameraCount`, 0..1, §16). Well-covered
   regions glow bright/solid; weakly covered regions are faint; blind spots
   (fraction 0) contribute nothing and are invisible. This shows **where coverage
   is**.
-- **Blind spots** — **only blind-spot voxels** (`mask == 0`, valid) are fed.
+- **Blind spots** — **only blind-spot voxels** (every word of `maskWords` is 0, valid) are fed.
   `color` = the same user-selected **overlay color**; `intensity` = 1 (a fixed full
   value, since coverage fraction is 0 here and would otherwise render nothing).
   Uncovered space glows against the scene. This shows **where coverage is absent** —
@@ -1802,7 +1808,9 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
 - **Coverage fraction** — for one voxel, `popcount(mask) / involvedCameraCount`: the
   share of the enabled ("involved") cameras that can see it. Ranges 0 (blind spot)
   to 1 (seen by every enabled camera). Normalized, not a raw count. In the Coverage
-  visualization mode (§9.1) it maps to the renderer's per-voxel intensity.
+  visualization mode (§9.1) it maps to the renderer's per-voxel intensity. The
+  `popcount` is taken over **all** `CAM_WORDS` mask words (SDK spec §7.1), so it
+  stays correct above 32 enabled cameras.
 - **Blind spot** — a valid free-space voxel that no enabled camera sees (coverage
   fraction 0). Invisible in the Coverage mode; surfaced by the dedicated Blind spots
   mode (§9.1) and numerically in the stats panel (§10).

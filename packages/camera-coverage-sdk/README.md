@@ -66,6 +66,8 @@ const summary = await engine.compute({
   onChunkDone: (chunkId, result) => {
     const acc = accessor(result);                        // encoding-agnostic
     const visible = acc.getMask(0, 5, 0) & 1;            // camera 0 visibility bit
+    // getMask / forEachLeaf's `mask` are word 0 (cameras 0-31); above 32 cameras
+    // use acc.getMaskWord(i, j, k, c >> 5) or forEachLeaf's `maskWords` (§7.1)
     // acc.forEachLeaf(...) → merged cubes for instanced rendering / LOD
   },
 });

@@ -6,6 +6,27 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The coverage overlay decodes `maskWords`, and every mask consumer must
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §9, §9.1, §16.
+
+**Why.** `CoverageOverlay.addChunk` built each leaf's `camCount` from
+`popcount32(mask)`, where `mask` is `forEachLeaf`'s **word 0** — cameras 0–31 only.
+Above 32 enabled cameras that silently dropped every camera from index 32 up:
+voxels seen only by those cameras got `camCount === 0`, so Coverage mode rendered
+them at intensity 0 (invisible) and Blind spots mode drew them as **false blind
+spots**. The overall coverage rate looked correct throughout, because that number
+comes from `CoverageSummary` (engine Pass 3, which reads all words) — which is what
+made the bug hard to spot. **Decision:** the overlay reads the SDK's `maskWords`
+argument through a new `popcountWords()` helper, and reduces it to a scalar
+`camCount` at traversal time since `maskWords` is accessor-owned scratch.
+
+**Rule for new code:** anything decoding a camera mask iterates `camWords`. The
+other consumers already did (`probeVisibility.ts`, `sectionHeatmap.ts`,
+`samplingVolumes.ts` all loop via `getMaskWord`); the overlay was the one holdout
+because it is the only `forEachLeaf` caller in the app. `popcount32` remains
+exported for callers that genuinely hold a single word.
+
 ## Hierarchy reordering is a hand-rolled pointer drag over the existing arrays — no order field, no DnD library
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.5.1.

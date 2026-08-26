@@ -94,6 +94,14 @@ through buffer layouts, WGSL `override` constants, and the SVO merge key. Camera
 `c` → `word = c >> 5`, `bit = c & 31`, stable across chunks. Never assume a single
 `u32` mask.
 
+The `VoxelAccessor` surface has two shapes here, and picking the wrong one is a
+silent correctness bug rather than a type error: `getMask()` and `forEachLeaf`'s
+`mask` argument are **word 0 only**, while `getMaskWord(i, j, k, word)` and
+`forEachLeaf`'s `maskWords` argument cover all `CAM_WORDS` words. Anything that
+popcounts, tests "blind", or tests a specific camera bit must use the latter —
+otherwise it works up to 32 cameras and quietly drops the rest. `maskWords` is
+accessor-owned scratch reused per leaf; reduce it to a scalar or copy it.
+
 ## Off-thread execution
 
 `src/worker/{host,client,entry,protocol}.ts` implement a `VisibilityEngine`-shaped

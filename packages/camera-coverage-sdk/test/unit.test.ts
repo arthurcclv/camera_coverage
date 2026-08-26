@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { cleanMesh } from '../src/geometry/mesh.ts';
 import { buildBvh } from '../src/geometry/bvh.ts';
 import { occluded } from '../src/kernel.ts';
-import { buildSvo, svoAccessor, type DenseChunk } from '../src/svo.ts';
+import { buildSvo, svoAccessor, type DenseChunk, type VoxelAccessor } from '../src/svo.ts';
 import { denseAccessor } from '../src/results.ts';
 import { prepareCamera, packCameras, camWords, pointInFrustum, CAMERA_STRUCT_F32 } from '../src/camera.ts';
 import { box, wallZ, LOOK_NEG_Z } from './helpers.ts';
@@ -174,4 +174,101 @@ test('forEachLeaf reconstructs the mask field within extent', () => {
       for (let i = 0; i < dims[0]; i++) {
         assert.equal(recon[i + dims[0] * (j + dims[1] * k)], acc.getMask(i, j, k));
       }
+});
+
+// --- forEachLeaf above 32 cameras (§7.1, §9.5) ------------------------------
+
+/** Reconstruct every mask word from forEachLeaf and compare against getMaskWord. */
+function assertForEachLeafCarriesAllWords(acc: VoxelAccessor, dims: Vec3, cw: number): void {
+  const [nx, ny, nz] = dims;
+  const recon = new Int32Array(nx * ny * nz * cw).fill(-1);
+  acc.forEachLeaf((min, size, mask, _valid, maskWords) => {
+    assert.equal(maskWords.length, cw, 'maskWords carries CAM_WORDS words');
+    assert.equal(mask, maskWords[0] >>> 0, 'mask argument stays word 0');
+    // Copy immediately: maskWords is accessor-owned scratch (§9.5).
+    const words = Array.from(maskWords, (v) => v >>> 0);
+    for (let dz = 0; dz < size; dz++)
+      for (let dy = 0; dy < size; dy++)
+        for (let dx = 0; dx < size; dx++) {
+          const i = min[0] + dx, j = min[1] + dy, k = min[2] + dz;
+          if (i >= nx || j >= ny || k >= nz) continue;
+          const li = i + nx * (j + ny * k);
+          for (let w = 0; w < cw; w++) recon[li * cw + w] = words[w];
+        }
+  });
+  for (let k = 0; k < nz; k++)
+    for (let j = 0; j < ny; j++)
+      for (let i = 0; i < nx; i++) {
+        const li = i + nx * (j + ny * k);
+        for (let w = 0; w < cw; w++) {
+          assert.equal(
+            recon[li * cw + w] >>> 0,
+            acc.getMaskWord(i, j, k, w) >>> 0,
+            `forEachLeaf word ${w} @ ${i},${j},${k}`,
+          );
+        }
+      }
+}
+
+// Regression: voxels seen only by cameras at index >= 32 have word 0 == 0, so a
+// consumer reading only the `mask` argument rendered them as blind spots.
+const HIGH_CAM_DIMS: Vec3 = [16, 16, 16];
+const highCamDense = () =>
+  denseFromFn(HIGH_CAM_DIMS, 2, (i, j, k) => {
+    if (i < 5) return { mask: [0, 0], valid: k >= 2 }; // blind everywhere
+    if (i < 11) return { mask: [0, 0x00000005], valid: true }; // cameras 32 & 34 ONLY
+    return { mask: [0b11, 0x80000000], valid: true }; // cameras 0,1 and 63
+  });
+
+test('forEachLeaf carries all CAM_WORDS words (SVO/palette encoding)', () => {
+  const dense = highCamDense();
+  const svo = buildSvo(0, dense);
+  assert.ok(svo, 'blocky pattern must compress to an SVO');
+  assertForEachLeafCarriesAllWords(svoAccessor(svo!), HIGH_CAM_DIMS, 2);
+});
+
+test('forEachLeaf carries all CAM_WORDS words (dense encoding)', () => {
+  const dense = highCamDense();
+  const acc = denseAccessor(HIGH_CAM_DIMS, 2, dense.visibility, dense.validity);
+  assertForEachLeafCarriesAllWords(acc, HIGH_CAM_DIMS, 2);
+});
+
+test('forEachLeaf reports voxels seen only by cameras >= 32 as covered', () => {
+  const dense = highCamDense();
+  const svo = buildSvo(0, dense);
+  const acc = svo ? svoAccessor(svo) : denseAccessor(HIGH_CAM_DIMS, 2, dense.visibility, dense.validity);
+  let highOnlyVoxels = 0;
+  acc.forEachLeaf((min, size, mask, valid, maskWords) => {
+    if (!valid) return;
+    if (mask !== 0) return; // word 0 empty …
+    let anyHigh = 0;
+    for (let w = 1; w < maskWords.length; w++) anyHigh |= maskWords[w];
+    if (anyHigh === 0) return; // … and genuinely blind
+    highOnlyVoxels += size * size * size;
+  });
+  assert.ok(highOnlyVoxels > 0, 'the fixture has voxels covered only by cameras 32+');
+});
+
+test('maxDepth majority key is taken over all words, not word 0', () => {
+  // Every voxel is blind in word 0; the majority is camera 32 with a minority of
+  // camera 33. A word-0-only majority would bucket both as "0" and approximate the
+  // subtree as fully blind. maxDepth 4 reports 16³ nodes — exactly the chunk
+  // extent, so the single reported node is internal and takes the majority path.
+  const dims: Vec3 = [16, 16, 16];
+  const dense = denseFromFn(dims, 2, (i, j, k) => ({
+    mask: [0, i < 2 && j < 2 && k < 2 ? 0x2 : 0x1],
+    valid: true,
+  }));
+  const svo = buildSvo(0, dense);
+  assert.ok(svo, 'blocky pattern must produce an SVO');
+  let leaves = 0;
+  svoAccessor(svo!).forEachLeaf((min, size, mask, valid, maskWords) => {
+    leaves++;
+    assert.deepEqual([...min], [0, 0, 0]);
+    assert.equal(size, 16);
+    assert.equal(mask, 0, 'word 0 is empty');
+    assert.equal(maskWords[1] >>> 0, 0x1, 'camera 32 survives the LOD approximation');
+    assert.equal(valid, true);
+  }, 4);
+  assert.equal(leaves, 1, 'maxDepth traversal reported the extent as one node');
 });

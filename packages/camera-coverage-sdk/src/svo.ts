@@ -197,8 +197,21 @@ export interface VoxelAccessor {
   getMask(i: number, j: number, k: number): number; // visibility word 0
   getMaskWord(i: number, j: number, k: number, word: number): number;
   isValid(i: number, j: number, k: number): boolean;
+  /**
+   * LOD traversal (§9.5). `mask` is **word 0 only** (cameras 0–31), kept for
+   * callers written against the single-word layout; `maskWords` carries all
+   * `CAM_WORDS` words and is what any caller must read to stay correct above 32
+   * cameras. `maskWords` is accessor-owned scratch, reused across invocations —
+   * valid only for the duration of the call; copy it if the leaf is retained.
+   */
   forEachLeaf(
-    cb: (min: Vec3, size: number, mask: number, valid: boolean) => void,
+    cb: (
+      min: Vec3,
+      size: number,
+      mask: number,
+      valid: boolean,
+      maskWords: Uint32Array,
+    ) => void,
     maxDepth?: number,
   ): void;
 }
@@ -240,23 +253,24 @@ export function svoAccessor(svo: SvoChunk): VoxelAccessor {
     },
     forEachLeaf(cb, maxDepth) {
       const [nx, ny, nz] = dims;
+      // Accessor-owned scratch (§9.5): refilled per leaf, never handed out twice.
+      const words = new Uint32Array(camWords);
       const walk = (node: number, x: number, y: number, z: number, level: number) => {
         const size = 1 << (level + 1); // voxels covered per axis at this node
         if (x >= nx || y >= ny || z >= nz) return; // padded region — skip entirely
         const isLeaf = nodeChild[node] === LEAF;
         const atMaxDepth = maxDepth !== undefined && depth - 1 - level >= maxDepth;
         if (isLeaf || atMaxDepth) {
-          let mask: number;
           let valid: boolean;
           if (isLeaf) {
-            mask = maskWordAt(node, 0);
+            for (let w = 0; w < camWords; w++) words[w] = maskWordAt(node, w);
             valid = nodeValid[node] === 1;
           } else {
             const maj = majorityLeaf(svo, node);
-            mask = maj.mask;
+            words.set(maj.mask);
             valid = maj.valid;
           }
-          cb([x, y, z], size, mask, valid);
+          cb([x, y, z], size, words[0] >>> 0, valid, words);
           return;
         }
         const half = size >> 1;
@@ -272,15 +286,26 @@ export function svoAccessor(svo: SvoChunk): VoxelAccessor {
   };
 }
 
-/** Majority (by covered-voxel weight) leaf key of a subtree, for LOD approximation. */
-function majorityLeaf(svo: SvoChunk, root: number): { mask: number; valid: boolean } {
+/**
+ * Majority (by covered-voxel weight) leaf key of a subtree, for LOD approximation.
+ * Buckets on the **full** CAM_WORDS-word key (§9.5) — keying on word 0 alone would
+ * bias the approximation toward cameras 0–31.
+ */
+function majorityLeaf(svo: SvoChunk, root: number): { mask: number[]; valid: boolean } {
   const { nodeChild, nodeValid, camWords, palette, nodeKey } = svo;
-  const counts = new Map<string, { w: number; mask: number; valid: boolean }>();
+  const maskAt = (node: number): number[] => {
+    if (!palette) return [nodeKey[node] >>> 0];
+    const base = nodeKey[node] * camWords;
+    const out = new Array<number>(camWords);
+    for (let w = 0; w < camWords; w++) out[w] = palette[base + w] >>> 0;
+    return out;
+  };
+  const counts = new Map<string, { w: number; mask: number[]; valid: boolean }>();
   const walk = (node: number, weight: number) => {
     if (nodeChild[node] === LEAF) {
-      const mask = palette ? palette[nodeKey[node] * camWords] >>> 0 : nodeKey[node];
+      const mask = maskAt(node);
       const valid = nodeValid[node] === 1;
-      const key = mask + ':' + (valid ? 1 : 0);
+      const key = mask.join(',') + ':' + (valid ? 1 : 0);
       const e = counts.get(key);
       if (e) e.w += weight;
       else counts.set(key, { w: weight, mask, valid });
@@ -289,7 +314,7 @@ function majorityLeaf(svo: SvoChunk, root: number): { mask: number; valid: boole
     }
   };
   walk(root, 1 << 24);
-  let best = { w: -1, mask: 0, valid: false };
+  let best = { w: -1, mask: new Array<number>(camWords).fill(0), valid: false };
   for (const e of counts.values()) if (e.w > best.w) best = e;
   return { mask: best.mask, valid: best.valid };
 }

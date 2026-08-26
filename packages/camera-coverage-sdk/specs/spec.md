@@ -356,7 +356,9 @@ fn getKey(i, j, k):
 
 **LOD traversal (visualization only)**:
 
-`forEachLeaf(callback, maxDepth?)` traverses depth-first: on reaching a leaf it reports `(min, size, mask, valid)` — an axis-aligned cube with edge length `2^(depth - level)` voxels. If `maxDepth` is given, internal nodes reached at that depth are reported as approximate leaves using their subtree's majority key. Visualization adjusts `maxDepth` by camera distance to obtain LOD, entirely skipping padded regions and subtrees excluded by the filter.
+`forEachLeaf(callback, maxDepth?)` traverses depth-first: on reaching a leaf it reports `(min, size, mask, valid, maskWords)` — an axis-aligned cube with edge length `2^(depth - level)` voxels. If `maxDepth` is given, internal nodes reached at that depth are reported as approximate leaves using their subtree's majority key. Visualization adjusts `maxDepth` by camera distance to obtain LOD, entirely skipping padded regions and subtrees excluded by the filter.
+
+The `mask` argument carries **word 0 only** (cameras 0–31) and is retained for callers written against the single-word layout. `maskWords` is a `Uint32Array` of length `CAM_WORDS` carrying the **complete** mask; callers that must be correct for `numCameras > 32` — anything that popcounts a leaf, tests "seen by no camera", or tests a specific camera bit — **must** read `maskWords`, never `mask`. `maskWords` is a **scratch buffer owned by the accessor and reused across callback invocations**: it is valid only for the duration of that call, and a caller that retains a leaf must copy it. The majority key used for `maxDepth` approximation is computed over the **full `CAM_WORDS`-word key**, so LOD approximation is not biased toward the first 32 cameras.
 
 **Mode 2 (palette indirection)**:
 
@@ -580,11 +582,18 @@ interface ChunkResult {
 
 // Downstream code always reads through the accessor, unaware of the encoding
 interface VoxelAccessor {
-  getMask(i: number, j: number, k: number): number;   // visibility word
+  getMask(i: number, j: number, k: number): number;   // visibility word 0 (cameras 0..31)
+  getMaskWord(i: number, j: number, k: number, word: number): number;  // any word (§7.1)
   isValid(i: number, j: number, k: number): boolean;
   // LOD traversal (§9.5): reports merged cubes; degrades to per-voxel reporting for dense encoding
   forEachLeaf(
-    cb: (min: [number, number, number], size: number, mask: number, valid: boolean) => void,
+    cb: (
+      min: [number, number, number],
+      size: number,
+      mask: number,            // word 0 only — use maskWords when numCameras > 32
+      valid: boolean,
+      maskWords: Uint32Array,  // CAM_WORDS words; accessor-owned scratch, copy if retained
+    ) => void,
     maxDepth?: number
   ): void;
 }

@@ -72,12 +72,16 @@ export function denseAccessor(
       return ((validity[idx >> 5] >>> (idx & 31)) & 1) === 1;
     },
     forEachLeaf(cb) {
+      // Accessor-owned scratch (§9.5): refilled per voxel, never handed out twice.
+      const words = new Uint32Array(camWords);
       for (let k = 0; k < nz; k++)
         for (let j = 0; j < ny; j++)
           for (let i = 0; i < nx; i++) {
             const idx = li(i, j, k);
             const valid = ((validity[idx >> 5] >>> (idx & 31)) & 1) === 1;
-            cb([i, j, k], 1, visibility[idx * camWords] >>> 0, valid);
+            const base = idx * camWords;
+            for (let w = 0; w < camWords; w++) words[w] = visibility[base + w] >>> 0;
+            cb([i, j, k], 1, words[0] >>> 0, valid, words);
           }
     },
   };
