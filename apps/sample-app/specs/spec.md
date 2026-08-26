@@ -155,7 +155,10 @@ Overlays sit over the 3D viewport itself (independent of the side panels): a
 **orientation-axis indicator** at its bottom-left and the floating
 heatmap legend at its bottom-right (§13.6):
 
-- **Top-left** — transform controls for the selected entity (§5.2):
+- **Top-left** — tools for the selected entity (§5.2), laid out as **two groups**
+  separated by a wider gap than the buttons within a group carry: the **transform**
+  group (mode + space) and the **placement** group (**Place on surface**). The gap
+  is the grouping — there is no divider rule.
   - Transform **mode** toggle: **Move** / **Rotate** / **Scale** icon buttons,
     switching `TransformControls`'s mode. Each shows its name as a tooltip on hover
     and is highlighted ("active") when its mode is current. **Scale** is a
@@ -170,6 +173,12 @@ heatmap legend at its bottom-right (§13.6):
     glyph for Global) and the tooltip names the current space and the action
     (e.g. "Local space — click for global"). Defaults to **Local**. Always
     enabled, independent of selection, and shared by both Move and Rotate.
+  - **Place on surface** — a one-shot placement tool: arm it, then click the scene
+    geometry to set the selected entity's position to the point clicked. Its own
+    group, separated from the transform buttons above. Enabled **only** for the
+    selection kinds that carry a position — a **camera** or a **probe** — and
+    disabled for a section, a zone, a sampling volume, or an empty selection.
+    Highlighted ("active") while armed. Specified in §2.4.2.
 - **Top-middle** — a **View selector** dropdown that chooses which camera the
   viewport renders through. The button shows the current view's name and a
   chevron and opens a menu (same interaction model as the layer dropdown below —
@@ -321,7 +330,104 @@ one-click escape hatch.
 
 The **top-left transform toolbar** (§2.4) stays **enabled** in this view even
 though no `TransformControls` gizmo is drawn; the mode and space it sets simply
-take effect on returning to another view.
+take effect on returning to another view. **Place on surface** (§2.4.2) is the one
+top-left tool that is not merely deferred here: it is live in this view, and is the
+sole exception to the inert-click rule above.
+
+### 2.4.2 Place on surface
+
+A one-shot placement tool in the top-left toolbar's second group (§2.4): **arm it,
+then click the scene geometry, and the selected entity's position becomes the point
+clicked**. It exists because positioning by gizmo drag or by typing coordinates
+both make "put this camera on *that* wall" an indirect exercise — the geometry
+already knows where its surfaces are, so a click can name one directly.
+
+**Supported kinds.** Only the selection kinds that carry a `position` are
+placeable: a **camera** (§5) and a **probe** (§12). A section is a set of bounds
+rather than a point (§13.1), a zone has no transform at all, and a sampling
+volume's `position` is its box *centre* — placing it on a surface would bury half
+the box below that surface — so all three leave the button **disabled**. The
+supported set is a single named list in the code, not a condition spelled out at
+each use site, and widening it is a deliberate edit that every consumer must be
+updated for.
+
+**Arming.** Clicking the button arms the tool; it is **one-shot**, disarming as
+soon as a placement succeeds. While armed:
+
+- The `TransformControls` gizmo is **detached**, so the whole viewport is
+  placement surface with no dead zone around the selected entity and no ambiguity
+  about whether a drag near it moves it or aims the ray. It re-attaches on disarm.
+- The pointer shows a **crosshair** over the viewport, and the button is
+  highlighted ("active").
+- Viewport clicks **do not select or deselect** — the §5.2 pick and the
+  deselect-on-miss rule are both suspended for the duration.
+- **Orbit, pan, and zoom keep working**, so the surface to click can be brought
+  into view. The §5.2 click-vs-drag threshold still applies: a click that concludes
+  a drag past the threshold places nothing.
+
+Besides a successful placement, the tool disarms on **re-clicking the button**, on
+**any change to the selection** (including its being cleared, or the entity being
+deleted — otherwise the next click would move an entity the user is no longer
+looking at), and on **Escape**. Escape pressed while a numeric text field (§5.2.1)
+holds focus reverts that field only and leaves the tool armed, since Escape is
+already that field's revert key.
+
+**The hit test.** The armed click casts a ray through the active camera and tests
+it against the **scene geometry only** (§4.1, §14.6). Gizmos — camera bodies, probe
+markers, volume boxes, section planes — and the coverage overlay are **transparent
+to the ray**, so a camera body standing in front of a wall never blocks placement
+on that wall. Geometry is rendered double-sided (§14.6), so a wall's far face is a
+valid target: the tool places on whichever surface is actually visible from the
+current viewpoint.
+
+When a section is **clipping** the geometry (§13.9), intersections lying outside
+the clip band are **discarded** and the nearest surviving intersection wins. The
+rule is that only what can be *seen* can be clicked; without it the ray would land
+on surfaces the clip has hidden and the resulting position would appear to come
+from nowhere.
+
+**A miss is a no-op.** A click that hits no eligible surface — empty space, or only
+clipped-away geometry — places nothing, leaves the selection untouched, and leaves
+the tool **armed**, so the user can simply click again. A mis-aim is not a command.
+
+**The result.** The position written is the **raw intersection point**, with no
+offset along the surface normal, and **only** the position: rotation is never
+touched, so a camera placed on a wall keeps the orientation it had and is aimed
+afterwards by the Rotate gizmo, the §5.2 aim drag, or the panel fields. Two
+consequences are **accepted deliberately** rather than corrected:
+
+- A position lying exactly on a surface can, through floating-point error, resolve
+  to the geometry's interior, self-occluding the camera's rays and yielding little
+  or no coverage for it; the analogous probe lands in an obstacle voxel and reads
+  as invalid (§12.2). The fix in both cases is a small manual nudge in the panel.
+- The app has **no undo**, so a stray armed click must be recovered from by
+  retyping the position. One-shot arming is what keeps that window narrow.
+
+The edit is applied through the **same path as any other position edit** of that
+entity, so the established recompute coupling holds unchanged: placing a camera
+marks the coverage result **stale** (§5.4, §8.1); placing a probe does **not**
+(§12.5).
+
+**Availability across views.** The tool works in **all five views** (§2.4),
+including **Selected** (§2.4.1). It is safe there precisely because placement never
+changes the selection, so it cannot eject the view back to Perspective — the reason
+clicks are otherwise inert in that view.
+
+An active Selected view always implies a selected **camera** (§2.4.1), so the only
+entity placeable from it is **the camera being rendered through**: clicking a
+surface mounts that camera onto the spot, and the view immediately jumps to the new
+vantage point, since the viewport *is* that camera's image. Aiming first and then
+clicking the wall the camera already faces is the most direct way to mount a camera
+where it can see a particular area. A probe can never be placed from this view —
+selecting one reverts the viewport to Perspective before the tool could fire.
+
+While the tool is armed in the Selected view a drag still aims the camera (§5.2),
+and the click-vs-drag threshold — which that view otherwise has no use for —
+applies again so that an aim drag places nothing.
+
+Whether the tool is armed is **transient viewport state**, like the transform mode
+and the layer toggles: never written to the scene file (§14), and never armed on
+load.
 
 ---
 
@@ -450,7 +556,9 @@ for **both**:
   body — camera, probe, *or* volume — clears the current selection, detaching the
   TransformControls gizmo). Only a genuine click deselects: a click that concludes a
   camera-orbit or TransformControls drag (pointer moved past a small threshold between
-  press and release) is ignored and leaves the selection unchanged.
+  press and release) is ignored and leaves the selection unchanged. Both the pick and
+  the deselect are **suspended** while the **Place on surface** tool is armed (§2.4.2),
+  which consumes viewport clicks for placement instead.
 - **Panel fields** edit the selected camera. **Position** (X/Y/Z) and **rotation**
   (X/Y/Z = pitch/yaw/roll, §5.1) are each a **grouped row of three numeric text
   fields** (§5.2.1). **FOV** and **Range (far)** — the detection range / far frustum
@@ -464,6 +572,10 @@ for **both**:
 - **TransformControls** gizmo (translate + rotate modes, in Local or Global space
   per the §2.4 space toggle) on the selected camera in the viewport, kept in
   two-way sync with the panel.
+- **Place on surface** (§2.4.2) — the third way to set position, alongside the
+  panel fields and the gizmo: arm the toolbar tool, then click the scene geometry
+  to move the camera to the point clicked. Position only, and available for a
+  selected camera or probe (§12) only.
 - **Aiming from the camera's own view.** In the **Selected** view (§2.4.1)
   the viewport is the selected camera's image and there is no gizmo, so the
   viewport interactions above are replaced:
@@ -481,13 +593,17 @@ for **both**:
   - The rotation is written **continuously during the drag**, through the same path
     as a `TransformControls` drag: the panel's rotation fields tick live (§5.2.1)
     and the result is marked stale (§8.1) exactly as any other camera rotation
-    edit. Position is not editable from this view — it stays with the panel fields
-    and the gizmo in the other views.
+    edit. A drag never writes position; the only way to change position from this
+    view is the **Place on surface** tool (§2.4.2), which is live here — otherwise
+    position stays with the panel fields and the gizmo in the other views.
   - **Viewport clicks change nothing** in this view: there is no picking, and —
     unlike the deselect rule above — a click on empty space does **not** deselect,
     which would otherwise eject the view back to Perspective (§2.4.1). Selection
     changes come from the scene hierarchy (§5.5). Because clicks are inert there
-    is no click-vs-drag threshold to apply: any pointer movement aims.
+    is no click-vs-drag threshold to apply: any pointer movement aims. The single
+    exception is while **Place on surface** is armed (§2.4.2): a click then places,
+    so the click-vs-drag threshold applies again for the duration and an aim drag
+    places nothing.
 
 ### 5.2.1 Numeric text-field editing
 
@@ -954,7 +1070,8 @@ When a probe is selected (§5.2), the left panel shows, in place of the camera p
   result stale (§12.1, §5.6);
 - **position X / Y / Z** as a grouped row of numeric text fields (§5.2.1) — a point
   has no orientation, so there is no rotation or FOV. Editing position follows §5.2.1
-  but, like dragging the marker, **never marks the result stale** (§12.5);
+  but, like dragging the marker or placing the probe with **Place on surface**
+  (§2.4.2), **never marks the result stale** (§12.5);
 - a **visibility readout** against the enabled cameras of the retained run:
   - a summary line **"Seen by K of N cameras"** (N = that run's enabled-camera count),
   - one row per enabled camera marked **visible (✓)** or **not visible (–)**, decoded

@@ -41,7 +41,7 @@ import { CoverageOverlay, type OverlayOptions } from '../coverageOverlay.ts';
 import { threeSpace, type TransformSpace } from '../transformSpace.ts';
 import { axisMapping, type ClipBand, type Section, type SectionCellGrid } from '../sectionHeatmap.ts';
 import { clipBandPlanes, setGeometryClippingPlanes, type GeometryBuild } from '../sceneGeometryBuild.ts';
-import { selectionAfterClick, type PointerPos, type Selection } from '../viewportSelection.ts';
+import { isClick, selectionAfterClick, type PointerPos, type Selection } from '../viewportSelection.ts';
 import type { MarkedFilter, SamplingVolume } from '../samplingVolumes.ts';
 import type { SceneCamera } from '../../cameras/camera.ts';
 import type { Probe } from '../probeVisibility.ts';
@@ -49,6 +49,7 @@ import type { ChunkResult } from '@linkervision/camera-coverage-sdk';
 import type { ViewId } from '../viewCameras.ts';
 
 import { nearestHit, type PickCandidate } from './pick.ts';
+import { surfaceHit } from './surfaceHit.ts';
 import { floorVolumeSize, sectionBoundsFromCenters } from './transformReadback.ts';
 import type { GizmoAttachable, GizmoPicker } from '../gizmoSet.ts';
 import type { TransformChange } from './types.ts';
@@ -90,6 +91,11 @@ export interface SceneViewState {
   clipBand: ClipBand | null;
   /** Sightlines from the selected probe to the cameras that see it, or null (§12.4); `useMemo`. */
   sightlines: { from: Vec3; targets: Vec3[] } | null;
+  /**
+   * Whether the "Place on surface" tool is armed (spec §2.4.2). While armed a
+   * click places instead of selecting, and the TransformControls gizmo detaches.
+   */
+  placing: boolean;
 }
 
 type SelectionKind = NonNullable<Selection>['kind'];
@@ -122,6 +128,7 @@ export class SceneView {
   private prev: SceneViewState | null = null;
   private selectHandler: ((selection: Selection) => void) | null = null;
   private transformHandler: ((change: TransformChange) => void) | null = null;
+  private placeHandler: ((point: Vec3) => void) | null = null;
 
   /**
    * In-flight aim drag in the Selected view (spec §2.4.1, §5.2). The orientation
@@ -181,13 +188,18 @@ export class SceneView {
     this.onPointerMove = (ev) => this.moveAim(ev);
     this.onPointerUp = (ev) => this.endAim(ev);
     this.onClick = (ev) => {
+      // An armed "Place on surface" click is consumed for placement (spec §2.4.2).
+      // This precedes the Selected-view return below because placement is live in
+      // that view too, and precedes the pick because an armed click never selects
+      // or deselects.
+      if (this.prev?.placing) {
+        this.placeFromClick(ev);
+        return;
+      }
       // Viewport clicks change nothing in the Selected view: no picking, and no
       // deselect-on-miss — which would eject the view to Perspective (spec §2.4.1).
       if (this.prev?.activeView === 'camera') return;
-      const rect = viewport.renderer.domElement.getBoundingClientRect();
-      this.pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-      this.pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-      this.raycaster.setFromCamera(this.pointer, viewport.activeCamera);
+      this.setRayFromEvent(ev);
       // Nearest hit across cameras, probes, and volumes (spec §5.2, §12.4;
       // `sampling_volumes.md` §5). Hidden camera gizmos are not clickable (spec
       // §2.4). Zones/sections have no viewport body.
@@ -237,6 +249,15 @@ export class SceneView {
   /** Register the callback for a resolved TransformControls drag (spec §12.4, §13.8). */
   onTransform(handler: (change: TransformChange) => void): void {
     this.transformHandler = handler;
+  }
+
+  /**
+   * Register the callback for a resolved "Place on surface" hit (spec §2.4.2).
+   * Only the world point is emitted — which entity it applies to is App's to
+   * decide from its own selection, so SceneView stays out of the entity kinds.
+   */
+  onPlace(handler: (point: Vec3) => void): void {
+    this.placeHandler = handler;
   }
 
   /** Clear the coverage overlay's retained chunks before a new run (spec §9, §14.4). */
@@ -304,9 +325,10 @@ export class SceneView {
     }
 
     // --- TransformControls attach per selection kind (spec §12.4, §13.8), with
-    // `activeView` in the diff because the Selected view detaches (§2.4.1) ------
-    if (!prev || prev.selection !== next.selection || prev.activeView !== next.activeView) {
-      this.attachForSelection(next.selection, next.activeView);
+    // `activeView` in the diff because the Selected view detaches (§2.4.1) and
+    // `placing` because an armed placement tool detaches too (§2.4.2) -----------
+    if (!prev || prev.selection !== next.selection || prev.activeView !== next.activeView || prev.placing !== next.placing) {
+      this.attachForSelection(next.selection, next.activeView, next.placing);
     }
 
     // --- TransformControls mode (spec §12.4, §13.8): [transformMode, selection] -
@@ -371,6 +393,33 @@ export class SceneView {
     this.sectionGizmos.dispose();
     this.volumeGizmos.dispose();
     this.viewport.dispose();
+  }
+
+  /** Point the shared raycaster at an event's position in the viewport. */
+  private setRayFromEvent(ev: MouseEvent): void {
+    const rect = this.viewport.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.viewport.activeCamera);
+  }
+
+  /**
+   * Resolve an armed click to a point on the scene geometry and emit it (spec
+   * §2.4.2). Only `room.group` is tested, so gizmos and the coverage overlay are
+   * transparent to the ray; the clip band filters hidden hits (`surfaceHit.ts`).
+   *
+   * The click-vs-drag threshold applies here as it does to a pick — including in
+   * the Selected view, whose aim drag (§2.4.1) must place nothing. A miss emits
+   * nothing at all, which is what leaves the tool armed for another try: App only
+   * disarms on a delivered point.
+   */
+  private placeFromClick(ev: MouseEvent): void {
+    if (!isClick(this.down, { x: ev.clientX, y: ev.clientY })) return;
+    const room = this.prev?.room;
+    if (!room) return;
+    this.setRayFromEvent(ev);
+    const point = surfaceHit(this.raycaster.intersectObject(room.group, true), this.prev?.clipBand ?? null);
+    if (point) this.placeHandler?.(point);
   }
 
   /** The camera the Selected view is rendering through, or null (spec §2.4.1). */
@@ -482,10 +531,12 @@ export class SceneView {
    * §12.4, §13.8; `sampling_volumes.md` §5). A zone is a container with no
    * viewport body, so selecting one detaches.
    */
-  private attachForSelection(selection: Selection, activeView: ViewId): void {
+  private attachForSelection(selection: Selection, activeView: ViewId, placing: boolean): void {
     // The Selected view shows no gizmo: it would be attached to the very camera
     // being rendered through, so its handles would surround the viewer (§2.4.1).
-    if (activeView === 'camera') {
+    // An armed placement tool detaches too, so the whole viewport is clickable
+    // surface with no dead zone around the selected entity (§2.4.2).
+    if (activeView === 'camera' || placing) {
       this.viewport.transformControls.detach();
       return;
     }

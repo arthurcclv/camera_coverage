@@ -126,10 +126,12 @@ default" — see DECISIONS.md).
   the `SceneView` class: it constructs and owns the viewport + all gizmo sets +
   the overlay, wires the pick raycaster and the pointer/`objectChange` listeners,
   and presents `create` · `sync(SceneViewState)` · `onSelect` · `onTransform` ·
-  `resetCoverage`/`addCoverageChunk` · `dispose`. `sync` diffs each snapshot field
-  by reference and fans it out to the objects below; drags come back as resolved
-  `onTransform` events, clicks as resolved `onSelect`. The decision logic it owns
-  is pure and unit-tested: `pick.ts` (`nearestHit`), `transformReadback.ts`
+  `onPlace` · `resetCoverage`/`addCoverageChunk` · `dispose`. `sync` diffs each
+  snapshot field by reference and fans it out to the objects below; drags come back
+  as resolved `onTransform` events, clicks as resolved `onSelect`, and an armed
+  "Place on surface" hit as an `onPlace` world point. The decision logic it owns
+  is pure and unit-tested: `pick.ts` (`nearestHit`), `surfaceHit.ts` (`surfaceHit`
+  — the placement ray's clip-band-aware nearest hit), `transformReadback.ts`
   (`floorVolumeSize`, `sectionBoundsFromCenters`), plus `types.ts`
   (`SceneViewState`, `TransformChange`). The gizmo/overlay/viewport modules below
   are its internal parts — App never touches them directly.
@@ -278,6 +280,9 @@ default" — see DECISIONS.md).
   disabled zones. Extends `PickableGizmoSet`.
 - `viewportSelection.ts` — pure click-vs-drag + unified selection decision.
 - `transformSpace.ts` — pure local/global ↔ Three.js space mapping + icon/tooltip.
+- `placement.ts` — pure "Place on surface" tool logic (spec §2.4.2): the
+  `PLACEABLE_KINDS` list (the one place the supported kinds are named), the
+  `canPlace` narrowing predicate over it, and the button tooltip.
 
 **Cameras (`cameras/`)**
 - `camera.ts` — the `SceneCamera` entity (`CameraConfig` + editable `name`), its
@@ -368,3 +373,14 @@ attaches no gizmo (it's a container, absent from the attach registry). Which zon
 are **enabled** (contribute to the visualized marked set) is decoupled from
 selection — driven by a per-zone **enabled checkbox** in the hierarchy row
 (independent per zone, like cameras/sections), not by selecting a zone.
+
+The selection also gates the **Place on surface** tool (spec §2.4.2): the kinds
+that carry a `position` — camera and probe — are named once in
+`scene/placement.ts`'s `PLACEABLE_KINDS`, and `canPlace` narrows `Selection` to
+them, so App's placement handler switches exhaustively and widening the list is a
+compile error until every consumer handles the new kind. While the tool is armed
+(`SceneViewState.placing`) the gizmo detaches and a viewport click is consumed for
+placement instead of selection: it raycasts only `room.group`, resolves through
+`surfaceHit`, and comes back to App as an `onPlace(point)` that App applies with
+the ordinary `changeCamera`/`changeProbe` action — so the tool inherits each kind's
+existing stale semantics rather than restating them.

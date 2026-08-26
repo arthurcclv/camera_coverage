@@ -90,6 +90,11 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
 
 - **Rhythm:** multiples of ~4/6 px. Column & panel padding `12px`; panel card
   padding `10px 12px`; standard gap `12px` between panels, `6–8px` within rows.
+- **Toolbar grouping:** the viewport's top-left toolbar is a flex row of
+  `.toolbar-group` children — `12px` between groups, `6px` within one, reusing the
+  between/within pair above. The gap *is* the grouping: no divider rule, so nothing
+  extra is painted over the 3D scene. Add a tool by putting it in the group it
+  belongs to, or opening a new group — never by hanging a margin off one button.
 - **Radius:** `4px` (inputs, menu items, small chips) · `6px` (buttons, rows,
   banners, menus) · `8px` (panel cards) · `999px` (pill badges).
 - **Layout:** three columns in a full-viewport flex row — left inspector `340px`
@@ -133,6 +138,11 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   the square viewport toolbar buttons (inline SVG icons live in `App.tsx`; the
   layer-menu glyphs live in `ViewportLayerMenu.tsx`).
   `.segmented` groups buttons into an equal-width segmented control.
+- **Armed viewport tool:** a toolbar button that puts the viewport into a
+  click-to-act mode carries `.active` + `aria-pressed`, and the viewport itself
+  changes cursor — `.viewport.placing canvas { cursor: crosshair }` for "Place on
+  surface". Two signals, one in the toolbar and one under the pointer, because the
+  toolbar is not where the user is looking when the mode matters.
 - **Layer menu** (`.layer-menu`, a `.menu` popover): the top-right eye button
   (`.icon-btn`) opens a checklist of layer-visibility rows (`.layer-menu-row`:
   checkbox + glyph + label). Toggling keeps the menu open; it closes on

@@ -35,6 +35,7 @@ import {
   toggleSpace,
   type TransformSpace,
 } from './scene/transformSpace.ts';
+import { canPlace, placeTooltip } from './scene/placement.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
@@ -164,6 +165,21 @@ function GlobeIcon() {
   );
 }
 
+// "Place on surface" icon (spec §2.4.2): a crosshair over a receding ground
+// plane — the click target on the surface it lands on.
+function PlaceIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 20h18l-4-6H7z" />
+      <circle cx="12" cy="8" r="3" />
+      <line x1="12" y1="1" x2="12" y2="4" />
+      <line x1="12" y1="12" x2="12" y2="15" />
+      <line x1="5" y1="8" x2="8" y2="8" />
+      <line x1="16" y1="8" x2="19" y2="8" />
+    </svg>
+  );
+}
+
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -242,6 +258,9 @@ export function App() {
   const [autoRun, setAutoRun] = useState(true);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [transformSpace, setTransformSpace] = useState<TransformSpace>(DEFAULT_TRANSFORM_SPACE);
+  // Whether "Place on surface" is armed (spec §2.4.2). Transient viewport state,
+  // never persisted; one-shot, so a delivered hit clears it.
+  const [placing, setPlacing] = useState(false);
   const [gizmosVisible, setGizmosVisible] = useState(true);
   // Master show/hide-all for the sampling-volume gizmos (viewport toolbar, spec
   // §2.4). Purely visual — independent of `useZones` and per-zone enabled state.
@@ -388,6 +407,34 @@ export function App() {
     dispatch({ type: 'transformApplied', change });
   }, []);
 
+  // Apply a "Place on surface" hit (spec §2.4.2): the clicked point becomes the
+  // selected entity's position, routed through the same action any other position
+  // edit uses — so a camera placement marks the result stale (§5.4, §8.1) and a
+  // probe placement does not (§12.5), with no rule restated here. The tool is
+  // one-shot, so a delivered point disarms it; a miss emits nothing at all and
+  // leaves it armed.
+  const applyPlacement = useCallback(
+    (point: Vec3) => {
+      if (!canPlace(selection)) return;
+      switch (selection.kind) {
+        case 'camera':
+          dispatch({ type: 'changeCamera', id: selection.id, patch: { position: point } });
+          break;
+        case 'probe':
+          dispatch({ type: 'changeProbe', id: selection.id, position: point });
+          break;
+        default: {
+          // Exhaustive over PLACEABLE_KINDS: widening that list fails to compile
+          // here until the new kind is given its own action (spec §2.4.2).
+          const unhandled: never = selection.kind;
+          throw new Error(`unhandled placeable kind: ${String(unhandled)}`);
+        }
+      }
+      setPlacing(false);
+    },
+    [selection],
+  );
+
   // --- SceneView: the imperative Three.js bridge, created once (spec §2.3).
   // `WebGPURenderer.init()` is async, so creation runs in an async IIFE with a
   // cancel guard. App pushes state in through one `sync()` effect below and gets
@@ -509,18 +556,47 @@ export function App() {
       voxelSize,
       clipBand,
       sightlines,
+      placing,
     }),
     [
       room, cameras, probes, sections, volumes, selection, engine.state.flaggedCameras,
       sectionCellGrids, enabledZoneIds, markedFilter, overlayOptions, transformMode,
       transformSpace, activeView, gizmosVisible, zonesVisible, sectionsVisible, stale,
-      voxelSize, clipBand, sightlines,
+      voxelSize, clipBand, sightlines, placing,
     ],
   );
 
   useEffect(() => {
     viewRef.current?.sync(sceneViewState);
   }, [sceneViewState, viewportReady]);
+
+  // The placement handler closes over the current selection, so it re-registers
+  // on its own rather than joining the create-once mount effect above (spec §2.4.2).
+  useEffect(() => {
+    viewRef.current?.onPlace(applyPlacement);
+  }, [applyPlacement, viewportReady]);
+
+  // Disarm "Place on surface" whenever the selection changes or is cleared (spec
+  // §2.4.2) — including a deleted entity — so an armed click can never move an
+  // entity the user has moved on from.
+  useEffect(() => {
+    setPlacing(false);
+  }, [selection]);
+
+  // Escape cancels an armed placement (spec §2.4.2). Mounted only while armed, and
+  // it ignores keys aimed at a form field, where Escape is already the numeric
+  // fields' revert key (§5.2.1).
+  useEffect(() => {
+    if (!placing) return;
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Escape') return;
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest('input, select, textarea, [contenteditable="true"]')) return;
+      setPlacing(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [placing]);
 
   // Unified enable/disable for the hierarchy row checkboxes (spec §5.4, §13, §7.3):
   // a camera (compute participation), a section (heatmap on/off), or a zone
@@ -1110,49 +1186,66 @@ export function App() {
         </div>
       </div>
       <div className="viewport-col">
-        <div className="viewport" ref={containerRef}>
+        <div className={`viewport${placing ? ' placing' : ''}`} ref={containerRef}>
+          {/* Top-left toolbar (spec §2.4): two groups — transform, then placement —
+              separated by the wider between-group gap. */}
           <div className="viewport-toolbar">
-            <button
-              type="button"
-              className={`btn secondary icon-btn${selection?.kind === 'probe' || transformMode === 'translate' ? ' active' : ''}`}
-              title="Move"
-              aria-label="Move"
-              aria-pressed={selection?.kind === 'probe' || transformMode === 'translate'}
-              onClick={() => setTransformMode('translate')}
-            >
-              <MoveIcon />
-            </button>
-            <button
-              type="button"
-              className={`btn secondary icon-btn${selection?.kind !== 'probe' && transformMode === 'rotate' ? ' active' : ''}`}
-              title="Rotate"
-              aria-label="Rotate"
-              aria-pressed={selection?.kind !== 'probe' && transformMode === 'rotate'}
-              disabled={selection?.kind === 'probe'}
-              onClick={() => setTransformMode('rotate')}
-            >
-              <RotateIcon />
-            </button>
-            <button
-              type="button"
-              className={`btn secondary icon-btn${selection?.kind === 'volume' && transformMode === 'scale' ? ' active' : ''}`}
-              title="Scale"
-              aria-label="Scale"
-              aria-pressed={selection?.kind === 'volume' && transformMode === 'scale'}
-              disabled={selection?.kind !== 'volume'}
-              onClick={() => setTransformMode('scale')}
-            >
-              <ScaleIcon />
-            </button>
-            <button
-              type="button"
-              className="btn secondary icon-btn"
-              title={spaceTooltip(transformSpace)}
-              aria-label={spaceTooltip(transformSpace)}
-              onClick={() => setTransformSpace((s) => toggleSpace(s))}
-            >
-              {spaceIconKind(transformSpace) === 'box' ? <BoxIcon /> : <GlobeIcon />}
-            </button>
+            <div className="toolbar-group">
+              <button
+                type="button"
+                className={`btn secondary icon-btn${selection?.kind === 'probe' || transformMode === 'translate' ? ' active' : ''}`}
+                title="Move"
+                aria-label="Move"
+                aria-pressed={selection?.kind === 'probe' || transformMode === 'translate'}
+                onClick={() => setTransformMode('translate')}
+              >
+                <MoveIcon />
+              </button>
+              <button
+                type="button"
+                className={`btn secondary icon-btn${selection?.kind !== 'probe' && transformMode === 'rotate' ? ' active' : ''}`}
+                title="Rotate"
+                aria-label="Rotate"
+                aria-pressed={selection?.kind !== 'probe' && transformMode === 'rotate'}
+                disabled={selection?.kind === 'probe'}
+                onClick={() => setTransformMode('rotate')}
+              >
+                <RotateIcon />
+              </button>
+              <button
+                type="button"
+                className={`btn secondary icon-btn${selection?.kind === 'volume' && transformMode === 'scale' ? ' active' : ''}`}
+                title="Scale"
+                aria-label="Scale"
+                aria-pressed={selection?.kind === 'volume' && transformMode === 'scale'}
+                disabled={selection?.kind !== 'volume'}
+                onClick={() => setTransformMode('scale')}
+              >
+                <ScaleIcon />
+              </button>
+              <button
+                type="button"
+                className="btn secondary icon-btn"
+                title={spaceTooltip(transformSpace)}
+                aria-label={spaceTooltip(transformSpace)}
+                onClick={() => setTransformSpace((s) => toggleSpace(s))}
+              >
+                {spaceIconKind(transformSpace) === 'box' ? <BoxIcon /> : <GlobeIcon />}
+              </button>
+            </div>
+            <div className="toolbar-group">
+              <button
+                type="button"
+                className={`btn secondary icon-btn${placing ? ' active' : ''}`}
+                title={placeTooltip(selection, placing)}
+                aria-label={placeTooltip(selection, placing)}
+                aria-pressed={placing}
+                disabled={!canPlace(selection)}
+                onClick={() => setPlacing((p) => !p)}
+              >
+                <PlaceIcon />
+              </button>
+            </div>
           </div>
           <div className="viewport-toolbar-center">
             <ViewSelector activeView={activeView} onSelect={setActiveView} disabledViews={disabledViews} />

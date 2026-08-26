@@ -6,6 +6,66 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## "Place on surface" tests only the geometry, places the raw hit point, and names its supported kinds in one list
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4.2. A one-shot toolbar tool: arm it,
+click the scene geometry, and the selected entity's position becomes the point clicked.
+
+**Why a geometry-only ray.** The existing pick raycasts the gizmo sets, and reusing it
+would have been less code — but a camera body parked in front of a wall would then
+occlude the wall the user is trying to place on, and the tool's whole value is naming a
+*surface* directly. So it raycasts `room.group` alone; gizmos and the coverage overlay
+are transparent to it. The corollary is that hits are filtered against the active clip
+band (§13.9) in `surfaceHit.ts`: `Raycaster` knows nothing about clipping planes, so
+without that filter the ray would land on geometry the clip has hidden and the resulting
+position would appear to come from nowhere.
+
+**Why the raw hit point, with no normal offset.** A small step along the surface normal
+was the safer engineering choice and was rejected deliberately. A position lying exactly
+on a surface can float-error into the geometry's interior, self-occluding a camera's rays
+(≈0% coverage for it) or dropping a probe into an obstacle voxel (reads as invalid,
+§12.2). Offsetting would hide that — but it also makes the tool's contract fuzzy: the
+position you get is no longer the point you clicked, and the offset distance becomes
+another number to explain and tune. The tool does the literal thing, and the panel's
+numeric fields are one nudge away. Recorded as accepted behavior in the spec, not a bug.
+
+**Why the supported kinds are a list, not a condition.** `PLACEABLE_KINDS` in
+`scene/placement.ts` is the single place camera+probe is stated; `canPlace` is a type
+predicate over it, and App's handler switches exhaustively with a `never` default. Adding
+a kind to the list therefore *fails to compile* until it has an action of its own. The
+alternative — an `if (kind === 'camera' || kind === 'probe')` at each use site — drifts
+silently, and the excluded kinds each have a real reason to stay out (a section is bounds
+not a point; a zone has no transform; a volume's `position` is its box centre, so a
+surface hit buries half the box).
+
+**Also decided here:**
+
+- **The gizmo detaches while armed** rather than staying interactive. Leaving it up means
+  the region around the selected entity can't be clicked — exactly the region you want
+  when nudging a camera onto a nearby wall — and makes "does this drag move it or aim the
+  ray?" ambiguous.
+- **A miss is a no-op that stays armed.** Clipping the edge of the mesh is a mis-aim, not
+  a cancel, and it must not deselect either. Mechanically this falls out of SceneView
+  emitting nothing on a miss: App disarms only on a *delivered* point.
+- **Placement is routed through `changeCamera`/`changeProbe`, not a new action or a
+  `TransformChange`.** The existing actions already carry the right recompute coupling
+  (a camera edit latches `stale`, a probe edit deliberately doesn't, §12.5), so the tool
+  inherits it instead of restating it. `TransformChange`'s camera variant demands a
+  `rotation` the tool never changes, which would have meant reading the current rotation
+  back just to echo it.
+- **It works in the Selected view**, the one exception to §2.4.1's inert clicks. Safe
+  because placement never changes the selection, so it can't eject the view. Note what
+  that view constrains: an active Selected view always implies a selected *camera*, so
+  the only thing placeable there is the camera being rendered through — aim it at a wall,
+  click, and it mounts there while the viewport jumps to the new vantage point. It does
+  reinstate the click-vs-drag threshold in a view that otherwise has no use for one, so
+  an aim drag places nothing.
+- **Escape is scoped, not global.** The listener mounts only while armed and ignores
+  events targeting a form field, because Escape is already the numeric fields' revert key
+  (§5.2.1) and those keydowns bubble to `window`.
+
+---
+
 ## Save writes back to the folder the scene was opened from, and the target is session-only
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §14.5, §14.7. The app now tracks a
