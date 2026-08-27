@@ -734,8 +734,12 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 - **Rows.** A generic `TreeRow` renders indentation, the expand caret, label,
   selection highlight, and click routing; kind-specific content is dispatched on
   `node.kind`. Camera rows keep the existing checkbox toggle (§5.4), coverage dot,
-  coverage-rate badge, and `inside geometry` badge. Probe rows show the probe label
-  plus a small **"seen by K" badge** — the count of enabled cameras that see the probe
+  coverage-rate badge, and `inside geometry` badge. The dot and badge read the
+  **same per-camera rate the stats panel shows** (§10) — the enabled-zones union
+  when zones are active, the SDK summary otherwise (`sampling_volumes.md` §7.4) —
+  so a camera never reports two different numbers in the two places.
+  Probe rows show the probe label plus a small
+  **"seen by K" badge** — the count of enabled cameras that see the probe
   (`popcount` of its mask, §12.2), mirroring the camera coverage-rate badge; full
   detail lives in the probe panel (§12.3). The badge is omitted when there is no usable
   mask (no run yet, or no coverage data at the point — §12.3). Section rows keep an

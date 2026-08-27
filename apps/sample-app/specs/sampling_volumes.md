@@ -452,6 +452,13 @@ orientation. Overlay/sections **dim** when the retained run is stale, as today.
 - The main **StatsPanel** reflects the **enabled-zones union** — its `overallRate`,
   per-camera rates, `validVoxels`, blind-spot count all come from §7.2's union
   summary over the enabled zones.
+- The **hierarchy camera rows** (`spec.md` §5.5) read from the **same** union
+  summary: a camera row's coverage-rate badge and its coverage dot show that
+  camera's rate over `M(enabled)`, so the badge and the StatsPanel's "Per camera"
+  line for the same camera are always the same number, formatted the same way —
+  **one decimal** (`NN.N%`), matching the panel. A camera absent from the union summary —
+  including when the enabled zones mark nothing — shows no badge, as when there
+  is no run.
 - **Per-zone numbers** are always available: on each **zone row** as a coverage
   badge (§4), and in the **ZonePanel** (§6.2) for the selected zone.
 - The **Marked voxels** readout (§6.3) shows the enabled-union size vs full,

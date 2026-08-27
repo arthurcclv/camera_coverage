@@ -286,6 +286,12 @@ default" — see DECISIONS.md).
   and sections apply), `regionsFromVolumes` (SDK `box` regions from OBB world
   AABBs), and `ZoneCoverageStore`/`computeZoneCoverage` (a 4th retained-chunk
   consumer that aggregates per-zone coverage client-side). Pure — no Three.js.
+- `statsDisplay.ts` — the one place the *displayed* coverage numbers are chosen
+  (spec §10, §5.5, `sampling_volumes.md` §7.4): `displayCoverageSummary` picks the
+  enabled-zones union when zones are active and the SDK summary otherwise, and
+  `hierarchyPerCamera` narrows it for the hierarchy badges (dropping them on an
+  empty marked set, where every rate finalizes to 0). Both the StatsPanel and the
+  hierarchy read it, so the two can't report different rates for one camera. Pure.
 - `samplingVolumeGizmos.ts` — per-volume wireframe box (edges + faint fill) whose
   root object maps 1:1 to `{position, quaternion, scale}` so TransformControls
   (translate/rotate/scale) writes them straight back; pickable, dims the volumes of

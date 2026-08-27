@@ -6,6 +6,31 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Displayed coverage numbers come from one derivation, not per-call-site picks
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.5, §10 and
+[`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §7.4.
+
+**Why.** Two readouts show a camera's coverage rate: the stats panel's "Per
+camera" list and the hierarchy row's badge (and its dot color). App built the
+zone-aware summary inline for the stats panel but passed the raw SDK summary to
+the hierarchy, so with zones active the same camera reported two different
+percentages — the badge over the whole sampled volume, the panel over the marked
+set. Nothing was wrong with either number; they just answered different
+questions without saying so. **Decision:** `scene/statsDisplay.ts` owns the
+choice, App derives once, and both consumers read that. A third readout gets
+consistency by construction instead of by remembering.
+
+**Trade-off.** A whole module for what was an inline ternary. It buys a unit
+test on the rule (`test/statsDisplay.test.ts`) — App's JSX has none — and makes
+the invariant structural rather than conventional.
+
+**Related.** `hierarchyPerCamera` drops the badge when the marked set is empty:
+`computeZoneCoverage` divides by `validVoxels`, so a zone marking nothing yields
+`0` for every camera, and `0%` would read as "this camera sees nothing" instead
+of "there is nothing to see". The stats panel still lists its `0.0%` rows, where
+the adjacent `Valid voxels: 0` supplies that context.
+
 ## The coverage overlay decodes `maskWords`, and every mask consumer must
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §9, §9.1, §16.

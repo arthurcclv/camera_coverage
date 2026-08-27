@@ -69,6 +69,7 @@ import {
 } from './scene/saveTarget.ts';
 import { SceneView, type SceneViewState, type TransformChange } from './scene/sceneView/sceneView.ts';
 import { initSceneState, sceneReducer, type EntityKind } from './scene/sceneReducer.ts';
+import { displayCoverageSummary, hierarchyPerCamera } from './scene/statsDisplay.ts';
 import { useEngine } from './engine/useEngine.ts';
 
 import {
@@ -1059,18 +1060,12 @@ export function App() {
     [cameras],
   );
 
-  // The main StatsPanel reflects the enabled-zones union when zones are active
-  // (`sampling_volumes.md` §7.4): overriding the SDK summary's coverage numbers
-  // with the union's, while keeping its elapsed time.
-  const displaySummary =
-    samplingActive && enabledUnionSummary && summary
-      ? {
-          ...summary,
-          overallRate: enabledUnionSummary.overallRate,
-          validVoxels: enabledUnionSummary.validVoxels,
-          perCamera: enabledUnionSummary.perCamera,
-        }
-      : summary;
+  // The displayed coverage numbers — the enabled-zones union when zones are
+  // active (`sampling_volumes.md` §7.4), the SDK summary otherwise. Both the
+  // StatsPanel and the hierarchy's camera badges read this one summary so they
+  // can't disagree (§5.5, §7.4).
+  const displaySummary = displayCoverageSummary(summary, enabledUnionSummary, samplingActive);
+  const hierarchyRates = hierarchyPerCamera(displaySummary);
   // The "Marked voxels" readout — enabled-union size vs full valid volume (§6.3,
   // §7.4). `full` is the workspace's full valid-voxel count from the engine's
   // full-volume sampling (not the retained run, which when active covers only
@@ -1110,7 +1105,7 @@ export function App() {
             volumes={volumes}
             selection={selection}
             flaggedIds={engine.state.flaggedCameras}
-            perCamera={summary?.perCamera ?? null}
+            perCamera={hierarchyRates}
             probeSeenCounts={probeSeenCounts}
             sectionCellGrids={sectionCellGrids}
             zoneSummaries={zoneCoverage?.perZone ?? null}

@@ -679,7 +679,7 @@ function CameraRowContent({ node, rate, flagged, enabled, onToggleEnabled }: Cam
       <span className="dot" style={{ background: dotColor(rate, flagged) }} />
       <span className="label">{node.label}</span>
       {flagged && <span className="badge flagged">inside geometry</span>}
-      {enabled && rate !== undefined && <span className="rate">{(rate * 100).toFixed(0)}%</span>}
+      {enabled && rate !== undefined && <span className="rate">{(rate * 100).toFixed(1)}%</span>}
     </>
   );
 }
