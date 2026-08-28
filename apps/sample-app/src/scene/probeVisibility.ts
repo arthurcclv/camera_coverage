@@ -12,6 +12,7 @@
  * uses the SDK accessor's own O(depth) descent — no extra spatial index.
  */
 import { accessor } from '@linkervision/camera-coverage-sdk';
+import { maskBitSet, runCameras, NO_RUN_CAMERAS, type RunCamera, type RunCameras } from './runCameras.ts';
 import type { ChunkResult, Vec3, WorkspaceGrid } from '@linkervision/camera-coverage-sdk';
 
 /** A user-placed point in the scene (spec §12.1). */
@@ -107,13 +108,13 @@ export function locateVoxel(
 export class ProbeVisibility {
   private grid: WorkspaceGrid | null = null;
   private chunks = new Map<number, ChunkResult>();
-  /** Enabled-camera ids snapshotted from the run, in mask-bit order (spec §12.2). */
-  private cameraIds: string[] = [];
+  /** The run's enabled cameras and their mask-bit indices (spec §12.2, §5.4). */
+  private cams: RunCameras = NO_RUN_CAMERAS;
 
-  /** Start retaining a new run's chunks; snapshot its ordered enabled-camera list. */
-  reset(grid: WorkspaceGrid, cameraIds: string[]): void {
+  /** Start retaining a new run's chunks; snapshot its ordered camera list. */
+  reset(grid: WorkspaceGrid, cameras: readonly RunCamera[]): void {
     this.grid = grid;
-    this.cameraIds = [...cameraIds];
+    this.cams = runCameras(cameras);
     this.chunks.clear();
   }
 
@@ -140,14 +141,12 @@ export class ProbeVisibility {
     if (!acc.isValid(loc.i, loc.j, loc.k)) return { status: 'no-data' };
 
     // Decode every mask word (correct up to MAX_CAMERAS = 128, spec §12.2), not
-    // just word 0.
-    const visible = this.cameraIds.map((_, n) => {
-      const word = n >>> 5;
-      if (word >= chunk.camWords) return false;
-      const bit = n & 31;
-      return ((acc.getMaskWord(loc.i, loc.j, loc.k, word) >>> bit) & 1) === 1;
-    });
+    // just word 0. The bit index comes from `cams.bits`, not the loop counter:
+    // a disabled camera still occupies a slot (spec §5.4), so the two diverge.
+    const visible = this.cams.bits.map((bit) =>
+      maskBitSet((w) => acc.getMaskWord(loc.i, loc.j, loc.k, w), chunk.camWords, bit),
+    );
     const seenCount = visible.reduce((sum, v) => sum + (v ? 1 : 0), 0);
-    return { status: 'ok', cameraIds: this.cameraIds, visible, seenCount };
+    return { status: 'ok', cameraIds: this.cams.ids, visible, seenCount };
   }
 }

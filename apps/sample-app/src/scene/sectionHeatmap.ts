@@ -15,6 +15,7 @@ import { chunkLocalForGlobalIndex } from './probeVisibility.ts';
 import { coverageFraction, popcount32 } from './coverageOverlay.ts';
 import { turboColormap } from './heatmapLegend.ts';
 import type { MarkedFilter } from './samplingVolumes.ts';
+import { maskBitSet, runCameras, NO_RUN_CAMERAS, type RunCamera, type RunCameras } from './runCameras.ts';
 
 export type SectionOrientation = 'horizontal' | 'vertical-x' | 'vertical-z';
 export type SectionAggregation = 'mean' | 'max' | 'min' | 'blind';
@@ -328,6 +329,8 @@ export interface SectionCellGrid {
   camWords: number;
   /** Enabled-camera ids in mask-bit order, snapshotted from the retained run. */
   cameraIds: string[];
+  /** Mask-bit index of each `cameraIds` entry (spec §5.4) — not the array index. */
+  cameraBits: number[];
   /**
    * Grid-aligned world extent of the selected columns along `axisA`/`axisB`
    * (spec §13.3): the footprint snapped to voxel-column boundaries, so the
@@ -353,7 +356,7 @@ export interface SectionCellGrid {
 export function computeSectionCells(
   grid: Pick<WorkspaceGrid, 'worldMin' | 'voxelSize' | 'gridDims'>,
   accessors: ReadonlyMap<number, VoxelAccessor>,
-  cameraIds: string[],
+  cams: RunCameras,
   camWords: number,
   section: Pick<Section, 'orientation' | 'min' | 'max'> &
     Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
@@ -435,7 +438,10 @@ export function computeSectionCells(
           seenWords[w] |= word;
           camCount += popcount32(word);
         }
-        const frac = coverageFraction(camCount, cameraIds.length);
+        // Denominator is the *enabled* count: disabled cameras hold mask slots
+        // but can never contribute a bit, so counting them would cap the scale
+        // below 1 for every cell (spec §5.4).
+        const frac = coverageFraction(camCount, cams.ids.length);
         sum += frac;
         if (frac > max) max = frac;
         if (frac < min) min = frac;
@@ -472,7 +478,7 @@ export function computeSectionCells(
     max: grid.worldMin[axisB] + (rangeB.end + 1) * grid.voxelSize,
   };
 
-  return { dimsA, dimsB, cells, camWords, cameraIds, extentA, extentB };
+  return { dimsA, dimsB, cells, camWords, cameraIds: cams.ids, cameraBits: cams.bits, extentA, extentB };
 }
 
 /** The display value a cell contributes to the heatmap for a given aggregation (spec §13.3). */
@@ -575,7 +581,7 @@ export interface SectionStats {
 
 /** Coverage stats over a section's colored cells, independent of display aggregation (spec §13.7). */
 export function computeSectionStats(grid: SectionCellGrid): SectionStats {
-  const { cells, cameraIds, camWords } = grid;
+  const { cells, cameraIds, cameraBits, camWords } = grid;
   let validCells = 0;
   let obstacleCells = 0;
   let sum = 0;
@@ -595,9 +601,7 @@ export function computeSectionStats(grid: SectionCellGrid): SectionStats {
     if (cell.meanFraction < min) min = cell.meanFraction;
     if (cell.meanFraction > max) max = cell.meanFraction;
     for (let n = 0; n < cameraIds.length; n++) {
-      const word = n >>> 5;
-      const bit = n & 31;
-      if (word < camWords && ((cell.seenWords[word] >>> bit) & 1) === 1) seenCounts[n]++;
+      if (maskBitSet((w) => cell.seenWords[w], camWords, cameraBits[n])) seenCounts[n]++;
     }
   }
 
@@ -614,6 +618,31 @@ export function computeSectionStats(grid: SectionCellGrid): SectionStats {
   };
 }
 
+/**
+ * A section's world-space footprint on **XZ** — the plane the SDK chunks along
+ * (`spec.md` §3). Two of the three bounds come from the in-plane axes, the third
+ * from the collapse axis; whichever pair lands on X and Z is what can overlap a
+ * chunk. Used only to decide which chunks a section's cells can possibly read,
+ * so a conservative box is fine.
+ */
+function sectionFootprintXZ(
+  section: Pick<Section, 'orientation' | 'min' | 'max'> &
+    Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
+): { x0: number; x1: number; z0: number; z1: number } {
+  const a0 = section.minA ?? -Infinity;
+  const a1 = section.maxA ?? Infinity;
+  const b0 = section.minB ?? -Infinity;
+  const b1 = section.maxB ?? Infinity;
+  switch (section.orientation) {
+    case 'horizontal': // collapse Y; axisA = X, axisB = Z
+      return { x0: a0, x1: a1, z0: b0, z1: b1 };
+    case 'vertical-x': // collapse X; axisA = Z, axisB = Y
+      return { x0: section.min, x1: section.max, z0: a0, z1: a1 };
+    case 'vertical-z': // collapse Z; axisA = X, axisB = Y
+      return { x0: a0, x1: a1, z0: section.min, z1: section.max };
+  }
+}
+
 // --- Retained-run store (spec §13.4) -----------------------------------------
 
 /**
@@ -625,15 +654,26 @@ export class SectionHeatmapStore {
   private grid: WorkspaceGrid | null = null;
   private chunks = new Map<number, ChunkResult>();
   private accessorCache = new Map<number, VoxelAccessor>();
-  private cameraIds: string[] = [];
+  private cams: RunCameras = NO_RUN_CAMERAS;
   private camWords = 1;
+  /**
+   * Cached cell grids, and the chunk revisions each was built from (spec §13.4).
+   * An incremental run (`spec.md` §8) replaces only a few chunks, so a section
+   * whose footprint misses all of them keeps the grid it already had instead of
+   * re-walking every column on the main thread.
+   */
+  private cellCache = new Map<string, CachedCells>();
+  /** Bumped per chunk on every replacement; a cache entry records what it saw. */
+  private revision = new Map<number, number>();
 
   /** Start retaining a new run's chunks; snapshot its ordered enabled-camera list. */
-  reset(grid: WorkspaceGrid, cameraIds: string[]): void {
+  reset(grid: WorkspaceGrid, cameras: readonly RunCamera[]): void {
     this.grid = grid;
-    this.cameraIds = [...cameraIds];
+    this.cams = runCameras(cameras);
     this.chunks.clear();
     this.accessorCache.clear();
+    this.cellCache.clear();
+    this.revision.clear();
     this.camWords = 1;
   }
 
@@ -641,6 +681,7 @@ export class SectionHeatmapStore {
   addChunk(result: ChunkResult): void {
     this.chunks.set(result.chunkId, result);
     this.accessorCache.delete(result.chunkId);
+    this.revision.set(result.chunkId, (this.revision.get(result.chunkId) ?? 0) + 1);
     this.camWords = Math.max(this.camWords, result.camWords);
   }
 
@@ -654,6 +695,8 @@ export class SectionHeatmapStore {
     this.grid = null;
     this.chunks.clear();
     this.accessorCache.clear();
+    this.cellCache.clear();
+    this.revision.clear();
   }
 
   private accessorFor(chunkId: number): VoxelAccessor | undefined {
@@ -679,11 +722,84 @@ export class SectionHeatmapStore {
     marked: MarkedFilter | null = null,
   ): SectionCellGrid | null {
     if (!this.grid) return null;
+
+    const deps = this.chunksUnder(section);
+    const key = sectionCacheKey(section);
+    const hit = this.cellCache.get(key);
+    if (hit && hit.marked === marked && sameDeps(hit.deps, deps)) return hit.grid;
+
     const accessors = new Map<number, VoxelAccessor>();
     for (const chunkId of this.chunks.keys()) {
       const acc = this.accessorFor(chunkId);
       if (acc) accessors.set(chunkId, acc);
     }
-    return computeSectionCells(this.grid, accessors, this.cameraIds, this.camWords, section, marked);
+    const grid = computeSectionCells(
+      this.grid,
+      accessors,
+      this.cams,
+      this.camWords,
+      section,
+      marked,
+    );
+    this.cellCache.set(key, { marked, grid, deps });
+    return grid;
   }
+
+  /**
+   * The chunks a section's cells can read, with their current revisions. Chunks
+   * are partitioned on XZ only, so a footprint that misses a chunk's XZ box can
+   * never reach into it — a vertical section over one aisle depends on a couple
+   * of chunks, not the workspace.
+   */
+  private chunksUnder(
+    section: Pick<Section, 'orientation' | 'min' | 'max'> &
+      Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
+  ): Map<number, number> {
+    const box = sectionFootprintXZ(section);
+    const deps = new Map<number, number>();
+    for (const [chunkId, chunk] of this.chunks) {
+      const vs = chunk.voxelSize;
+      const cx0 = chunk.origin[0];
+      const cx1 = cx0 + chunk.dims[0] * vs;
+      const cz0 = chunk.origin[2];
+      const cz1 = cz0 + chunk.dims[2] * vs;
+      if (box.x1 < cx0 || box.x0 > cx1 || box.z1 < cz0 || box.z0 > cz1) continue;
+      deps.set(chunkId, this.revision.get(chunkId) ?? 0);
+    }
+    return deps;
+  }
+}
+
+/**
+ * Whether a cache entry's dependencies still match the current ones: the same
+ * chunks, each at the same revision. A chunk appearing or disappearing under the
+ * footprint counts as a change too, so a grid that grew a chunk is not reused.
+ */
+function sameDeps(a: ReadonlyMap<number, number>, b: ReadonlyMap<number, number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [chunkId, rev] of a) if (b.get(chunkId) !== rev) return false;
+  return true;
+}
+
+/** A cached cell grid plus what it was built from (spec §13.4). */
+interface CachedCells {
+  marked: MarkedFilter | null;
+  grid: SectionCellGrid;
+  deps: Map<number, number>;
+}
+
+/** Cache identity for a section: every field `computeSectionCells` reads. */
+function sectionCacheKey(
+  section: Pick<Section, 'orientation' | 'min' | 'max'> &
+    Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
+): string {
+  return [
+    section.orientation,
+    section.min,
+    section.max,
+    section.minA,
+    section.maxA,
+    section.minB,
+    section.maxB,
+  ].join('|');
 }

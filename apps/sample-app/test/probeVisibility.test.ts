@@ -60,7 +60,7 @@ test('query before any run has no data (never "0 of N", spec §12.3)', () => {
 
 test('query decodes the retained mask against the snapshotted camera list', () => {
   const pv = new ProbeVisibility();
-  pv.reset(grid, ['cam-a', 'cam-b', 'cam-c']);
+  pv.reset(grid, ['cam-a', 'cam-b', 'cam-c'].map((id) => ({ id, enabled: true })));
   pv.addChunk(buildChunk());
 
   const q = pv.query([1.5, 0.5, 0.5]);
@@ -73,7 +73,7 @@ test('query decodes the retained mask against the snapshotted camera list', () =
 
 test('blind-spot voxel reports zero cameras but is still "ok" data', () => {
   const pv = new ProbeVisibility();
-  pv.reset(grid, ['cam-a', 'cam-b']);
+  pv.reset(grid, ['cam-a', 'cam-b'].map((id) => ({ id, enabled: true })));
   pv.addChunk(buildChunk());
 
   const q = pv.query([0.5, 0.5, 0.5]); // voxel (0,0,0): valid, mask 0
@@ -84,7 +84,7 @@ test('blind-spot voxel reports zero cameras but is still "ok" data', () => {
 
 test('invalid voxel and out-of-workspace point both report no-data', () => {
   const pv = new ProbeVisibility();
-  pv.reset(grid, ['cam-a']);
+  pv.reset(grid, ['cam-a'].map((id) => ({ id, enabled: true })));
   pv.addChunk(buildChunk());
 
   assert.deepEqual(pv.query([0.5, 1.5, 0.5]).status, 'no-data'); // voxel (0,1,0) invalid
@@ -93,20 +93,41 @@ test('invalid voxel and out-of-workspace point both report no-data', () => {
 
 test('reset clears retained chunks and the camera snapshot', () => {
   const pv = new ProbeVisibility();
-  pv.reset(grid, ['cam-a', 'cam-b', 'cam-c']);
+  pv.reset(grid, ['cam-a', 'cam-b', 'cam-c'].map((id) => ({ id, enabled: true })));
   pv.addChunk(buildChunk());
   assert.ok(pv.query([1.5, 0.5, 0.5]).status === 'ok');
 
-  pv.reset(grid, ['cam-x']); // new run: no chunks yet
+  pv.reset(grid, ['cam-x'].map((id) => ({ id, enabled: true }))); // new run: no chunks yet
   assert.deepEqual(pv.query([1.5, 0.5, 0.5]), { status: 'no-data' });
 });
 
 test('clear() discards the retained run so query() reads no-data (spec §14.4)', () => {
   const pv = new ProbeVisibility();
-  pv.reset(grid, ['cam-a', 'cam-b', 'cam-c']);
+  pv.reset(grid, ['cam-a', 'cam-b', 'cam-c'].map((id) => ({ id, enabled: true })));
   pv.addChunk(buildChunk());
   assert.ok(pv.query([1.5, 0.5, 0.5]).status === 'ok');
 
   pv.clear();
   assert.deepEqual(pv.query([1.5, 0.5, 0.5]), { status: 'no-data' });
+});
+
+test('a disabled camera is dropped from the readout without shifting the others (spec §5.4, §12.2)', () => {
+  const pv = new ProbeVisibility();
+  // Camera 'b' is disabled but still holds bit 1, so 'c' stays at bit 2 — which
+  // is the bit the retained mask actually has set.
+  pv.reset(grid, [
+    { id: 'cam-a', enabled: true },
+    { id: 'cam-b', enabled: false },
+    { id: 'cam-c', enabled: true },
+  ]);
+  pv.addChunk(buildChunk());
+
+  const q = pv.query([1.5, 0.5, 0.5]);
+  assert.equal(q.status, 'ok');
+  if (q.status !== 'ok') return;
+  assert.deepEqual(q.cameraIds, ['cam-a', 'cam-c'], 'the disabled camera is not listed');
+  assert.deepEqual(q.visible, [true, true], 'bits 0 and 2 — not bits 0 and 1');
+  // "Seen by K of N": N is the enabled count, never the list length (spec §12.3).
+  assert.equal(q.seenCount, 2);
+  assert.equal(q.cameraIds.length, 2);
 });

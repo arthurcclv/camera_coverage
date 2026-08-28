@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { ChunkResult, Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
+import { WorkspaceGrid, type ChunkResult, type Quat, type Vec3 } from '@linkervision/camera-coverage-sdk';
 import {
   computeZoneCoverage,
   extractZonesAndVolumes,
@@ -11,6 +11,7 @@ import {
   obbWorldAabb,
   regionsFromVolumes,
   zoneLabel,
+  ZoneCoverageStore,
   type SamplingVolume,
   type Zone,
 } from '../src/scene/samplingVolumes.ts';
@@ -28,6 +29,9 @@ function zone(id: string, name = id): Zone {
 }
 
 // --- OBB membership & world AABB (§2.3, §7.1) --------------------------------
+
+/** Every listed camera enabled, so bit index == list index (spec §5.4). */
+const allEnabled = (ids: string[]) => ({ ids, bits: ids.map((_, n) => n) });
 
 test('inVolume: axis-aligned box contains its interior and excludes the outside', () => {
   const v = vol('volume-1', 'zone-1', [0, 0, 0], [2, 2, 2]);
@@ -198,7 +202,7 @@ test('computeZoneCoverage: per-zone rates, union, and blind spots', () => {
   // Box over x∈[0,1] (excludes the x=1.5 column) → marks voxels 0 and 2.
   const volumes = [vol('v1', 'zone-1', [0.5, 0.5, 1], [1, 1, 2])];
 
-  const cov = computeZoneCoverage([c], ['c0', 'c1'], zones, volumes);
+  const cov = computeZoneCoverage([c], allEnabled(['c0', 'c1']), zones, volumes);
   // The "% of full" denominator is NOT sourced here — when active the retained
   // chunks cover only the boxes, so no workspace-full count exists (§7.1, §7.4).
   assert.equal('fullValidVoxels' in cov, false);
@@ -223,7 +227,7 @@ test('computeZoneCoverage: a voxel in two zones counts in both zones but once in
     vol('v1', 'zone-1', [0.5, 0.5, 0.5], [1, 1, 1]),
     vol('v2', 'zone-2', [0.5, 0.5, 0.5], [1, 1, 1]),
   ];
-  const cov = computeZoneCoverage([c], ['c0'], zones, volumes);
+  const cov = computeZoneCoverage([c], allEnabled(['c0']), zones, volumes);
   assert.equal(cov.perZone.get('zone-1')!.validVoxels, 1);
   assert.equal(cov.perZone.get('zone-2')!.validVoxels, 1);
   assert.equal(cov.enabledUnion.validVoxels, 1); // counted once in the union
@@ -236,9 +240,126 @@ test('computeZoneCoverage: a disabled zone is excluded from the union but still 
     vol('v1', 'zone-1', [0.5, 0.5, 0.5], [1, 1, 1]), // voxel 0
     vol('v2', 'zone-2', [1.5, 0.5, 1.5], [1, 1, 1]), // voxel 3
   ];
-  const cov = computeZoneCoverage([c], ['c0', 'c1'], zones, volumes);
+  const cov = computeZoneCoverage([c], allEnabled(['c0', 'c1']), zones, volumes);
   // Per-zone stats exist for the disabled zone.
   assert.equal(cov.perZone.get('zone-2')!.validVoxels, 1);
   // The union counts only the enabled zone's voxel.
   assert.equal(cov.enabledUnion.validVoxels, 1);
+});
+
+test('computeZoneCoverage reads each camera at its own mask bit (spec §5.4)', () => {
+  // Three cameras passed to setCameras, 'c1' disabled — so 'c2' sits at bit 2.
+  // Voxel 0 is seen by bits 0 and 2, voxel 2 by bit 2 only.
+  const c = chunk([0b101, 0b000, 0b100, 0b000]);
+  const zones = [zone('zone-1')];
+  const volumes = [vol('v1', 'zone-1', [0.5, 0.5, 1], [1, 1, 2])]; // marks voxels 0 and 2
+
+  const cov = computeZoneCoverage([c], { ids: ['c0', 'c2'], bits: [0, 2] }, zones, volumes);
+  const z1 = cov.perZone.get('zone-1')!;
+
+  assert.deepEqual(
+    z1.perCamera.map((p) => p.id),
+    ['c0', 'c2'],
+    'the disabled camera gets no row',
+  );
+  assert.equal(z1.perCamera[0].coverageRate, 0.5, 'c0 (bit 0) sees voxel 0 only');
+  // Reading by list index would look at bit 1 — empty — and report 0 here.
+  assert.equal(z1.perCamera[1].coverageRate, 1, 'c2 (bit 2) sees both marked voxels');
+  assert.equal(z1.overallRate, 1);
+  assert.equal(z1.blindVoxels, 0);
+});
+
+test('computeZoneCoverage skips the voxel scan when no zone holds a volume (§7.2)', () => {
+  // The scan is O(valid voxels × cameras) on the main thread after every run, so
+  // it must not run to produce a result of all zeroes. Asserted by counting
+  // accessor reads: a scan would touch the chunk, an early-out never does.
+  const c = chunk([0b11, 0b11, 0b11, 0b11]);
+  let reads = 0;
+  const counted = new Proxy(c, {
+    get(t, k) {
+      if (k === 'visibility' || k === 'validity') reads++;
+      return Reflect.get(t, k);
+    },
+  }) as ChunkResult;
+
+  const empty = computeZoneCoverage([counted], allEnabled(['c0', 'c1']), [], []);
+  assert.equal(reads, 0, 'no zones ⇒ the chunk is never decoded');
+  assert.equal(empty.enabledUnion.validVoxels, 0);
+  assert.deepEqual([...empty.perZone.keys()], []);
+
+  // A zone with no volumes in it is the same situation, and must be caught too —
+  // the guard is on the volumes, not on the zone list being empty.
+  const zoneOnly = computeZoneCoverage([counted], allEnabled(['c0', 'c1']), [zone('zone-1')], []);
+  assert.equal(reads, 0, 'a volume-less zone ⇒ still no decode');
+  const z1 = zoneOnly.perZone.get('zone-1')!;
+  assert.equal(z1.validVoxels, 0, 'the zone still gets a (zeroed) summary for its badge');
+  assert.deepEqual(
+    z1.perCamera.map((p) => p.id),
+    ['c0', 'c1'],
+  );
+
+  // Sanity: with a volume present the scan does run.
+  computeZoneCoverage([counted], allEnabled(['c0', 'c1']), [zone('zone-1')], [
+    vol('v1', 'zone-1', [1, 0.5, 1], [2, 1, 2]),
+  ]);
+  assert.ok(reads > 0, 'a zone with a volume must still be aggregated');
+});
+
+// --- Per-chunk accumulator cache (§7.2) --------------------------------------
+
+/** The same 2×1×2 dense chunk, placed at an arbitrary chunk id / X offset. */
+function chunkAt(chunkId: number, x: number, masks: [number, number, number, number]): ChunkResult {
+  return { ...chunk(masks), chunkId, origin: [x, 0, 0] } as ChunkResult;
+}
+
+const ZONES = [zone('zone-1')];
+/** Covers both chunks' voxels: x ∈ [0,4], y ∈ [0,1], z ∈ [0,2]. */
+const VOLS = [vol('v1', 'zone-1', [2, 0.5, 1], [4, 1, 2])];
+const CAMS = [
+  { id: 'c0', enabled: true },
+  { id: 'c1', enabled: true },
+];
+
+function zoneStore(chunks: ChunkResult[]): ZoneCoverageStore {
+  const s = new ZoneCoverageStore();
+  s.reset(new WorkspaceGrid({ worldMin: [0, 0, 0], worldMax: [4, 1, 2], voxelSize: 1, chunkSizeXZ: 2 }), CAMS);
+  for (const c of chunks) s.addChunk(c);
+  return s;
+}
+
+test('the cached store agrees with an uncached whole-scene scan (§7.2)', () => {
+  const chunks = [chunkAt(0, 0, [0b01, 0b00, 0b11, 0b00]), chunkAt(1, 2, [0b10, 0b11, 0b00, 0b01])];
+  const cached = zoneStore(chunks).compute(ZONES, VOLS)!;
+  const direct = computeZoneCoverage(chunks, allEnabled(['c0', 'c1']), ZONES, VOLS);
+  assert.deepEqual(cached.enabledUnion, direct.enabledUnion);
+  assert.deepEqual(cached.perZone.get('zone-1'), direct.perZone.get('zone-1'));
+});
+
+test('replacing one chunk rescans only it, and the merged answer still updates (§7.2)', () => {
+  const s = zoneStore([chunkAt(0, 0, [0b01, 0b00, 0b11, 0b00]), chunkAt(1, 2, [0b00, 0b00, 0b00, 0b00])]);
+  const before = s.compute(ZONES, VOLS)!.perZone.get('zone-1')!;
+  assert.equal(before.overallRate, 0.25, '2 of 8 marked voxels covered');
+
+  // An incremental run re-sends chunk 1 with everything now visible.
+  s.addChunk(chunkAt(1, 2, [0b11, 0b11, 0b11, 0b11]));
+  const after = s.compute(ZONES, VOLS)!.perZone.get('zone-1')!;
+  assert.equal(after.overallRate, 0.75, 'chunk 1 fully covered, chunk 0 unchanged');
+  // Chunk 0's cached contribution is still the one it originally produced.
+  assert.equal(after.validVoxels, 8);
+});
+
+test('a zone or volume edit invalidates every cached chunk (§7.2)', () => {
+  const s = zoneStore([chunkAt(0, 0, [0b11, 0b11, 0b11, 0b11]), chunkAt(1, 2, [0b11, 0b11, 0b11, 0b11])]);
+  assert.equal(s.compute(ZONES, VOLS)!.perZone.get('zone-1')!.validVoxels, 8);
+
+  // Shrinking the volume to chunk 0's half must not be served from a cache keyed
+  // only on the chunks — the accumulators themselves depend on the geometry.
+  const narrowed = [vol('v1', 'zone-1', [1, 0.5, 1], [2, 1, 2])];
+  assert.equal(s.compute(ZONES, narrowed)!.perZone.get('zone-1')!.validVoxels, 4);
+
+  // Disabling the zone empties the union while the per-zone summary stands.
+  const off = [{ ...ZONES[0], enabled: false }];
+  const disabled = s.compute(off, VOLS)!;
+  assert.equal(disabled.enabledUnion.validVoxels, 0);
+  assert.equal(disabled.perZone.get('zone-1')!.validVoxels, 8);
 });

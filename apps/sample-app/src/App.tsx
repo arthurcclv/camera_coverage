@@ -212,6 +212,26 @@ export function App() {
   // overlay (the fourth consumer) stays inline below since SceneView owns it.
   const coverageRun = useMemo(() => new CoverageRun(), []);
 
+  // --- cancellation (SDK spec §13.2): the run currently in flight, so an edit
+  // that invalidates it can stop it instead of waiting it out ------------------
+  const inFlightRef = useRef<{ controller: AbortController; done: Promise<unknown> } | null>(null);
+
+  /**
+   * Abort the in-flight run and wait for it to unwind. Awaiting matters: the
+   * engine's `compute()` is not reentrant, so a new run must not start until the
+   * cancelled one has actually left it. A cancelled run resolves to `null`
+   * (`useEngine` treats `COMPUTE_CANCELED` as a non-error), so there is nothing
+   * to catch — but the guard stays in case the run failed for another reason.
+   */
+  const cancelInFlight = useCallback(async () => {
+    const run = inFlightRef.current;
+    if (!run) return;
+    inFlightRef.current = null;
+    run.controller.abort();
+    await run.done.catch(() => {});
+  }, []);
+
+
   const workspaceCenter = useMemo<Vec3>(
     () => [
       (room.worldMin[0] + room.worldMax[0]) / 2,
@@ -803,11 +823,12 @@ export function App() {
       setInitializedVoxelSize(null);
       initializedRoomRef.current = null;
       viewRef.current?.resetCoverage(); // the overlay lives in SceneView
+      void cancelInFlight(); // spec §14.4 step 4, now an actual cancel (SDK §13.2)
       coverageRun.clear(); // wipes the three stores + invalidates in-flight runs
       setMasksVersion((v) => v + 1);
       setSceneError(null);
     },
-    [coverageRun],
+    [coverageRun, cancelInFlight],
   );
 
   // The transient "Saved to <folder>" status (§14.7) is the only signal a silent
@@ -959,13 +980,13 @@ export function App() {
   const handleSaveAs = useCallback(() => void handleSaveScene('saveAs'), [handleSaveScene]);
 
   const handleRun = useCallback(async () => {
-    // Snapshot the scene "generation": if `applyScene` (import/reset) bumps
-    // this while we're mid-run, every check below discards this run's results
-    // instead of applying them — the in-scope stand-in for "cancel any
-    // in-flight compute" (spec §14.4; see `coverageRun`'s guard).
-    const gen = coverageRun.generation;
     const needsReinit =
       initializedVoxelSize === null || initializedVoxelSize !== debouncedVoxelSize || initializedRoomRef.current !== room;
+
+    // Snapshot the scene "generation": if `applyScene` (import/reset) bumps
+    // this while we're mid-run, every check below discards this run's results
+    // instead of applying them (spec §14.4; see `coverageRun`'s guard).
+    const gen = coverageRun.generation;
     if (needsReinit) {
       const initResult = await engine.initAndLoad(room.sceneMesh, room.worldMin, room.worldMax, debouncedVoxelSize, CHUNK_SIZE_XZ);
       if (!coverageRun.isCurrent(gen)) return;
@@ -991,11 +1012,14 @@ export function App() {
 
     // Convert app cameras to plain `CameraConfig` (drop the display `name`) at the
     // SDK boundary — the one place the engine type is required (spec §5.6, §14.1).
-    const enabledCameras = stateRef.current.cameras.filter((c) => c.enabled);
-    const ok = engine.setCameras(enabledCameras.map(toCameraConfig));
+    // Disabled cameras are passed too, carrying `enabled: false`: filtering them
+    // out would renumber every later camera's mask bit and disqualify the run
+    // from incremental recompute (spec §5.4, SDK spec §13.1).
+    const runCameras = stateRef.current.cameras;
+    const ok = engine.setCameras(runCameras.map(toCameraConfig));
     if (!ok) return;
 
-    // Retain this run's chunks + ordered enabled-camera ids for probe lookup
+    // Retain this run's chunks + ordered camera list for probe lookup
     // (spec §12.2), in parallel with the overlay (which SceneView owns).
     const grid = new WorkspaceGrid({
       worldMin: room.worldMin,
@@ -1003,10 +1027,24 @@ export function App() {
       voxelSize: debouncedVoxelSize,
       chunkSizeXZ: CHUNK_SIZE_XZ,
     });
-    coverageRun.reset(grid, enabledCameras.map((c) => c.id));
-    viewRef.current?.resetCoverage();
-    const result = await engine.compute({
+    const controller = new AbortController();
+    const runPromise = engine.compute({
       mode: 1,
+      // Let the engine decide; it reports back through `onRunStart` (spec §8).
+      incremental: true,
+      signal: controller.signal,
+      onRunStart: ({ incremental }) => {
+        if (!coverageRun.isCurrent(gen)) return;
+        // A full run re-sends every chunk, so the stores start empty. An
+        // incremental run re-sends only a few — clearing here would blank the
+        // rest of the scene, silently (spec §8).
+        if (!incremental) {
+          coverageRun.reset(grid, runCameras);
+          viewRef.current?.resetCoverage();
+        } else {
+          viewRef.current?.beginCoverageRun();
+        }
+      },
       onChunkDone: (_chunkId, chunkResult) => {
         // A newer scene may have replaced (and cleared) the stores mid-stream;
         // don't let a stale chunk repopulate them (spec §14.4).
@@ -1015,6 +1053,13 @@ export function App() {
         coverageRun.addChunk(chunkResult);
       },
     });
+    inFlightRef.current = { controller, done: runPromise };
+    const result = await runPromise;
+    if (inFlightRef.current?.controller === controller) inFlightRef.current = null;
+    // One rebuild per run, not one per chunk (spec §9). Unconditional: a run
+    // superseded mid-stream still left the overlay in streaming mode, and
+    // leaving it there would stall every later rebuild.
+    viewRef.current?.flushCoverage();
     if (!coverageRun.isCurrent(gen)) return;
     if (result) {
       setSummary(result);
@@ -1022,6 +1067,25 @@ export function App() {
       setMasksVersion((v) => v + 1);
     }
   }, [engine, room, initializedVoxelSize, debouncedVoxelSize, coverageRun]);
+
+  // --- cancel a superseded run (SDK spec §13.2). A resolution, geometry, or
+  // sampling change makes whatever is computing describe a workspace the user has
+  // already moved off, and those runs are the long ones — a full re-init at a fine
+  // voxel size, not a few dirty chunks. Cancelling here, at the edit, rather than
+  // at the next run keeps `handleRun` strictly non-reentrant: the abort lands, the
+  // engine goes idle, and the ordinary `!busy` gate below starts the new run.
+  //
+  // A camera edit is deliberately *not* cancelled. Its run is short (§8) and its
+  // result is still applied — one edit stale, reconciled by the next auto-run —
+  // so cancelling would throw away finished work to save nothing.
+  const pendingHeavyWork =
+    initializedVoxelSize === null ||
+    initializedVoxelSize !== debouncedVoxelSize ||
+    initializedRoomRef.current !== room ||
+    sceneState.samplingDirty;
+  useEffect(() => {
+    if (pendingHeavyWork) void cancelInFlight();
+  }, [pendingHeavyWork, cancelInFlight]);
 
   // --- auto-run: recompute automatically once results go stale, throttled to
   // at most AUTO_RUN_MAX_HZ runs/sec ------------------------------------------
@@ -1064,7 +1128,16 @@ export function App() {
   // active (`sampling_volumes.md` §7.4), the SDK summary otherwise. Both the
   // StatsPanel and the hierarchy's camera badges read this one summary so they
   // can't disagree (§5.5, §7.4).
-  const displaySummary = displayCoverageSummary(summary, enabledUnionSummary, samplingActive);
+  const enabledCameraIds = useMemo(
+    () => new Set(cameras.filter((c) => c.enabled).map((c) => c.id)),
+    [cameras],
+  );
+  const displaySummary = displayCoverageSummary(
+    summary,
+    enabledUnionSummary,
+    samplingActive,
+    enabledCameraIds,
+  );
   const hierarchyRates = hierarchyPerCamera(displaySummary);
   // The "Marked voxels" readout — enabled-union size vs full valid volume (§6.3,
   // §7.4). `full` is the workspace's full valid-voxel count from the engine's

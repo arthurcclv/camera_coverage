@@ -414,8 +414,26 @@ sections), the app computes a **summary per zone** over `M(z)`:
   §16.1), but per zone.
 
 This reuses the mask-decoding the section stats already do (`spec.md` §13.7). The
-single pass handles any number of zones. (When `useZones` is off, none of this
-runs; the SDK's own `CoverageSummary` populates the stats panel exactly as today.)
+single pass handles any number of zones.
+
+**The pass is cached per chunk.** The aggregation is a sum over voxels, so it
+decomposes: each chunk's contribution to every zone's accumulator (and to the union)
+is computed once and retained, and a run that replaces only some chunks — an
+incremental run, `spec.md` §8 — rescans only those and re-adds the rest. The cache is
+invalidated per chunk when that chunk's masks are replaced, and wholesale when the
+zone set (ids or `enabled`), the volumes' geometry/membership, or the run's camera
+list changes, since the accumulators depend on all of those. Those are a handful of
+small entities, so detecting the change is cheap next to the scan it protects.
+
+**The pass is skipped entirely when no zone holds a volume.** With nothing to test
+membership against, every accumulator finalizes to zero, so the scan cannot change the
+answer — and it is not cheap to run for nothing: it is `O(valid voxels × cameras)` over
+the *whole* retained run, on the main thread, after **every** `compute()`. At a fine
+voxel size that is hundreds of milliseconds of blocked UI per run, and with auto-run
+firing up to 10×/sec during a camera drag (`spec.md` §8.1) it is the dominant cost of an
+edit. The guard is on the volumes rather than on `useZones`, so a scene that has zones
+but no volumes in them is covered too; with the pass skipped, the SDK's own
+`CoverageSummary` populates the stats panel exactly as it does with the feature off.
 
 ### 7.3 Visualization follows the enabled zones
 

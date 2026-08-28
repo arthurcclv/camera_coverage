@@ -37,6 +37,7 @@ import {
   type PreparedCamera,
 } from './camera.ts';
 import { assembleChunkResult } from './results.ts';
+import { IncrementalState, type ChunkStats, type RunOptions } from './incremental.ts';
 import { CpuBackend, type ComputeBackend } from './backend.ts';
 import { tsKernels, type Kernels } from './kernels.ts';
 
@@ -58,6 +59,23 @@ const DEFAULT_WORKSPACE: WorkspaceConfig = {
   chunkSizeXZ: 10,
 };
 
+/**
+ * Yield to the **macrotask** queue (§13.2). `await`ing a synchronous backend drains
+ * microtasks only, and a cancel crossing the Worker boundary arrives as a message —
+ * a macrotask — so without this a CPU-backend run could never observe one.
+ */
+function yieldToEvents(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function canceled(): EngineError {
+  return new EngineError(EngineErrorCode.COMPUTE_CANCELED, 'compute() was canceled.');
+}
+
+function emptyStats(numCameras: number): ChunkStats {
+  return { validCount: 0, coveredCount: 0, visibleCount: new Array<number>(numCameras).fill(0) };
+}
+
 export class CoverageEngine implements VisibilityEngine {
   private grid!: WorkspaceGrid;
   private backend: ComputeBackend | null = null;
@@ -73,6 +91,9 @@ export class CoverageEngine implements VisibilityEngine {
   private cameraConfigs: CameraConfig[] = [];
   private cameras: PreparedCamera[] = [];
   private cameraEnabled: boolean[] = [];
+
+  /** Baseline of the last completed run, for incremental recompute (§13.1). */
+  private readonly incremental = new IncrementalState();
 
   private disposed = false;
 
@@ -95,6 +116,8 @@ export class CoverageEngine implements VisibilityEngine {
 
     const backendKind = config.backend ?? 'auto';
     this.backend = await createBackend(backendKind);
+    // A re-init reshapes the grid, so every retained chunk id means something else.
+    this.incremental.drop();
     this.disposed = false;
     return this.backend.capabilities;
   }
@@ -119,6 +142,7 @@ export class CoverageEngine implements VisibilityEngine {
 
     // Re-derive sampling if it was set before the scene.
     if (this.sampling) this.recomputeSamplingState();
+    this.incremental.drop();
     this.refreshCameraEnabled();
 
     return {
@@ -145,6 +169,9 @@ export class CoverageEngine implements VisibilityEngine {
       );
     }
     this.recomputeSamplingState();
+    // Validity changed, so every retained chunk statistic describes a different
+    // set of voxels (§13.1). Must accompany the §6.4 cache being rebuilt.
+    this.incremental.drop();
     const summary = this.sampling!.summarize();
     return { validVoxels: summary.validVoxels, activeChunks: summary.activeChunks };
   }
@@ -162,14 +189,21 @@ export class CoverageEngine implements VisibilityEngine {
     this.refreshCameraEnabled();
   }
 
-  /** Flag cameras positioned inside geometry (§17 CAMERA_INSIDE_GEOMETRY). */
+  /**
+   * Resolve each camera's *effective* enabled state: the caller's
+   * `CameraConfig.enabled` (§5.2) AND not-inside-geometry (§17). A camera the
+   * caller switched off keeps its index but is cleared from every chunk's active
+   * mask, and is never flagged `CAMERA_INSIDE_GEOMETRY` — switching a camera off
+   * is not a misconfiguration to warn about.
+   */
   private refreshCameraEnabled(): void {
-    this.cameraEnabled = this.cameras.map(() => true);
+    this.cameraEnabled = this.cameras.map((cam) => cam.enabled);
     if (!this.occupancy) return;
     const [nx, ny, nz] = this.occupancy.dims;
     const vs = this.grid.voxelSize;
     const wm = this.grid.worldMin;
     for (let c = 0; c < this.cameras.length; c++) {
+      if (!this.cameraEnabled[c]) continue; // caller-disabled: not a misconfiguration
       const p = this.cameras[c].position;
       const i = Math.floor((p[0] - wm[0]) / vs);
       const j = Math.floor((p[1] - wm[1]) / vs);
@@ -205,20 +239,71 @@ export class CoverageEngine implements VisibilityEngine {
     const emitVoxels = !!opts?.onChunkDone;
     const numCameras = this.cameras.length;
     const cw = computeCamWords(Math.max(1, numCameras));
+    const runOptions: RunOptions = { mode, threshold, emitVoxels };
 
-    const chunkIds =
-      opts?.chunks ?? Array.from({ length: this.grid.chunkCount }, (_, i) => i);
+    // An explicit chunk list is a caller-scoped query, not a run over the scene:
+    // it reports over just those chunks and leaves the baseline entirely
+    // untouched — neither advancing it nor rewriting retained statistics (§13.1).
+    const scoped = opts?.chunks !== undefined;
+
+    let chunkIds: number[];
+    let incremental = false;
+    if (scoped) {
+      chunkIds = opts!.chunks!;
+    } else {
+      const dirty = opts?.incremental
+        ? this.incremental.plan(
+            this.cameras,
+            this.cameraEnabled,
+            runOptions,
+            this.grid.chunkCount,
+            (id) => this.chunkAabb(id),
+          )
+        : null;
+      if (dirty) {
+        chunkIds = dirty;
+        incremental = true;
+      } else {
+        chunkIds = Array.from({ length: this.grid.chunkCount }, (_, i) => i);
+        this.incremental.drop();
+      }
+    }
+
+    // Fired before the first chunk so a caller accumulating chunks knows whether
+    // to clear its store or replace into it (§16.1).
+    opts?.onRunStart?.({ incremental, chunkIds });
 
     const totalVisible = new Array<number>(numCameras).fill(0);
     let totalValid = 0;
     let totalCovered = 0;
 
     const start = now();
+    const signal = opts?.signal;
 
+    try {
     for (const chunkId of chunkIds) {
+      // Checked before each chunk, never inside one: Passes 1–3 are a single
+      // submission (§11.1) with no interruption point, so a chunk that started
+      // always finishes (§13.2).
+      if (signal?.aborted) throw canceled();
+      // Let a cancel message actually land. Only when the caller asked to be able
+      // to cancel — an uncancellable run pays nothing.
+      if (signal) {
+        await yieldToEvents();
+        if (signal.aborted) throw canceled();
+      }
+
       const chunk = this.grid.chunk(chunkId);
       const { validity, validCount } = this.sampling.chunkValidity(chunk);
-      if (validCount === 0) continue;
+      if (validCount === 0) {
+        // Retain an explicit zero line rather than nothing. A chunk with no
+        // valid voxels emits no result, but the baseline must still *account*
+        // for it: `plan()` requires a line per chunk, and without one a
+        // zone-restricted scene — where most chunks are empty — could never run
+        // incrementally at all.
+        if (!scoped) this.incremental.record(chunkId, emptyStats(numCameras));
+        continue;
+      }
 
       const activeMask = this.chunkActiveMask(chunk, cw, precull);
       if (allZero(activeMask)) {
@@ -235,6 +320,7 @@ export class CoverageEngine implements VisibilityEngine {
           },
         };
         totalValid += validCount;
+        if (!scoped) this.incremental.record(chunkId, empty.stats);
         this.emitChunk(chunkId, chunk.dims, chunk.origin, cw, mode, validity, empty, opts);
         continue;
       }
@@ -259,18 +345,40 @@ export class CoverageEngine implements VisibilityEngine {
       totalCovered += out.stats.coveredCount;
       for (let c = 0; c < numCameras; c++) totalVisible[c] += out.stats.visibleCount[c];
 
+      if (!scoped) this.incremental.record(chunkId, out.stats as ChunkStats);
       this.emitChunk(chunkId, chunk.dims, chunk.origin, cw, mode, validity, out, opts);
+    }
+    } catch (err) {
+      // A half-finished run — cancelled or failed — leaves retained statistics
+      // straddling two camera generations with no cheap way to tell which is
+      // which (§13.1, §13.2).
+      this.incremental.drop();
+      throw err;
     }
 
     const elapsedMs = now() - start;
 
+    // A scoped run answers over the chunks it was given. Every other run answers
+    // over the whole scene, which for an incremental run means summing the
+    // chunks it just recomputed together with the ones it reused (§13.1 step 4).
+    let sumValid = totalValid;
+    let sumCovered = totalCovered;
+    let sumVisible = totalVisible;
+    if (!scoped) {
+      const merged = this.incremental.totals(numCameras);
+      sumValid = merged.totalValid;
+      sumCovered = merged.totalCovered;
+      sumVisible = merged.totalVisible;
+      this.incremental.commit(this.cameras, this.cameraEnabled, runOptions);
+    }
+
     return {
       perCamera: this.cameras.map((cam, c) => ({
         id: cam.id,
-        coverageRate: totalValid > 0 ? totalVisible[c] / totalValid : 0,
+        coverageRate: sumValid > 0 ? sumVisible[c] / sumValid : 0,
       })),
-      overallRate: totalValid > 0 ? totalCovered / totalValid : 0,
-      validVoxels: totalValid,
+      overallRate: sumValid > 0 ? sumCovered / sumValid : 0,
+      validVoxels: sumValid,
       elapsedMs,
     };
   }
@@ -300,19 +408,34 @@ export class CoverageEngine implements VisibilityEngine {
     opts?.onChunkDone?.(chunkId, result);
   }
 
+  /**
+   * A chunk's world-space AABB. Shared by pre-cull (§7.2) and the incremental
+   * dirty-set diff (§13.1) so both ask the same question of the same box.
+   */
+  private chunkAabb(chunkId: number): { min: Vec3; max: Vec3 } {
+    const chunk = this.grid.chunk(chunkId);
+    return this.chunkAabbOf(chunk);
+  }
+
+  private chunkAabbOf(chunk: { origin: Vec3; dims: Vec3 }): { min: Vec3; max: Vec3 } {
+    const vs = this.grid.voxelSize;
+    return {
+      min: chunk.origin,
+      max: [
+        chunk.origin[0] + chunk.dims[0] * vs,
+        chunk.origin[1] + chunk.dims[1] * vs,
+        chunk.origin[2] + chunk.dims[2] * vs,
+      ],
+    };
+  }
+
   private chunkActiveMask(
     chunk: { origin: Vec3; dims: Vec3 },
     cw: number,
     precull: boolean,
   ): Uint32Array {
     const mask = new Uint32Array(cw);
-    const vs = this.grid.voxelSize;
-    const min = chunk.origin;
-    const max: Vec3 = [
-      chunk.origin[0] + chunk.dims[0] * vs,
-      chunk.origin[1] + chunk.dims[1] * vs,
-      chunk.origin[2] + chunk.dims[2] * vs,
-    ];
+    const { min, max } = this.chunkAabbOf(chunk);
     for (let c = 0; c < this.cameras.length; c++) {
       if (!this.cameraEnabled[c]) continue;
       if (precull && !frustumIntersectsAabb(this.cameras[c], min, max)) continue;

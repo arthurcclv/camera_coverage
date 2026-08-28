@@ -11,6 +11,7 @@ import type {
   ChunkResult,
   CoverageSummary,
   EngineOptions,
+  RunStart,
   GpuCapabilities,
   SamplingConfig,
   SamplingStats,
@@ -42,9 +43,19 @@ export type Req =
         threshold?: number;
         chunks?: number[];
         precull?: boolean;
+        incremental?: boolean;
         emitChunks?: boolean;
+        /** The caller passed a `signal`, so the host installs an AbortController (§13.2). */
+        cancellable?: boolean;
       };
     }
+  /**
+   * Abort the in-flight `compute` whose request id is `computeId` (§13.2). A
+   * separate message rather than a field, because an `AbortSignal` can no more
+   * cross the boundary than a callback can: the client keeps the signal and
+   * translates a firing into this.
+   */
+  | { id: number; kind: 'cancel'; computeId: number }
   | { id: number; kind: 'dispose' };
 
 export type Res =
@@ -64,6 +75,17 @@ export interface ChunkEvent {
   computeId: number;
   chunkId: number;
   result: ChunkResult;
+}
+
+/**
+ * Streamed during `compute` before the first `ChunkEvent` (§16.1). Unlike
+ * `emitChunks`, this travels host → client: only the engine knows whether it
+ * could honour an incremental request, and the client must know before the
+ * first chunk arrives so it can decide whether to clear its store.
+ */
+export interface RunStartEvent extends RunStart {
+  kind: 'runStart';
+  computeId: number;
 }
 
 // --- transport adapters ----------------------------------------------------

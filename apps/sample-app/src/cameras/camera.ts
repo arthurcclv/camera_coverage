@@ -15,8 +15,10 @@ export interface SceneCamera extends CameraConfig {
   name: string;
   /**
    * Whether the camera participates in `compute()` (spec §5.4). A disabled camera
-   * stays in the scene (editable, dimmed gizmo) but is filtered out before
-   * `setCameras()`. Stored on the entity so it round-trips in the scene file (§14.3).
+   * stays in the scene (editable, dimmed gizmo) and **is** passed to
+   * `setCameras()` — carrying this flag, so it keeps its mask-bit index while
+   * contributing nothing. Required here where the SDK's is optional, so the app
+   * always states it. Stored on the entity so it round-trips in the scene file (§14.3).
    */
   enabled: boolean;
 }
@@ -38,6 +40,8 @@ export function cameraLabel(camera: SceneCamera): string {
 
 /** Strip the app-only `name`/`enabled`, yielding the plain SDK `CameraConfig` (spec §8). */
 export function toCameraConfig(camera: SceneCamera): CameraConfig {
-  const { name: _name, enabled: _enabled, ...config } = camera;
+  // `enabled` is *kept*: since spec §5.4 the engine needs it to hold the camera's
+  // mask-bit slot open. Only the display `name` is app-only.
+  const { name: _name, ...config } = camera;
   return config;
 }

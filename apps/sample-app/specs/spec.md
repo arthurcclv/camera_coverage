@@ -694,10 +694,21 @@ visible.
 - Each **camera node** in the scene hierarchy (§5.5) has a **checkbox toggle** to
   enable/disable that camera, independent of selection. Toggling doesn't change the
   current selection.
-- Disabled cameras stay in the scene (dimmed body) and keep
-  their position/rotation/FOV editable, but are **excluded from `setCameras()`**
-  passed to the engine, so they don't participate in `compute()` — no coverage
-  rate is reported for them and they can't be flagged as `CAMERA_INSIDE_GEOMETRY`.
+- Disabled cameras stay in the scene (dimmed body) and keep their
+  position/rotation/FOV editable. They **are** passed to `setCameras()`, carrying
+  `enabled: false` (SDK spec §5.2), so they keep their camera index but contribute
+  nothing to `compute()` — their coverage rate is 0 and they can't be flagged as
+  `CAMERA_INSIDE_GEOMETRY`.
+- The app deliberately does **not** filter its own camera list before
+  `setCameras()`. Filtering would renumber every camera after the toggled one, which
+  disqualifies the run from incremental recompute (SDK spec §13.1) and forces a full
+  recompute on every checkbox click. Passing the flag instead keeps indices stable, so
+  a toggle recomputes only that camera's frustum chunks.
+- Because disabled cameras now occupy indices, anything that treats "the cameras the
+  engine knows about" as "the cameras that count" must filter explicitly: the stats
+  panel's `perCamera` list (§10), the probe panel's *seen by N of M* denominator
+  (§12.3), and the section legend's camera-count scale (§13.6) all read the **enabled**
+  count. `involvedCameraCount` (§9.1) already does.
 - Toggling a camera marks the result stale, same as any other camera edit (§8.1).
 - The overlay's coverage-fraction denominator (`involvedCameraCount`, §9.1) tracks
   the **enabled** camera count, not the total.
@@ -909,10 +920,26 @@ at the `setCameras()` boundary (§8). Rules:
 - An **Auto-run** checkbox next to the button, **on by default**, triggers
   `compute()` automatically whenever the result is stale (§8.1) instead of
   requiring a manual click.
-- `compute({ mode: 1, onChunkDone })`:
+- `compute({ mode: 1, incremental: true, onRunStart, onChunkDone })`:
   - streams `ChunkResult`s; the overlay is rebuilt from accumulated chunks.
   - a progress/spinner state animates while the worker runs.
-- On completion the returned `CoverageSummary` populates the stats panel.
+- On completion the returned `CoverageSummary` populates the stats panel. It always
+  describes the whole scene, incremental or not (SDK spec §13.1).
+
+**Incremental runs.** The app always asks for `incremental: true` and lets the engine
+decide (SDK spec §13.1); there is no user-facing switch. `onRunStart` fires once before
+the first chunk and reports what kind of run this is, which is what the app's four
+chunk consumers — the coverage overlay (§9), probe visibility (§12.2), the section
+heatmap store (§13.4), and zone coverage (`sampling_volumes.md` §7.2) — key their
+lifecycle off:
+
+- `incremental === false` — **reset** all four, then accumulate as before.
+- `incremental === true` — **do not reset**. Each store is keyed by `chunkId`, so an
+  arriving chunk replaces that chunk's retained entry and every chunk the run skipped
+  keeps the result it already had.
+
+Resetting on an incremental run would blank most of the scene with no error, so the
+reset is driven by `onRunStart` rather than inferred from app state.
 
 ### 8.1 Stale result handling
 
@@ -928,8 +955,31 @@ resolution slider:
   Auto-run does **not** retry after a run ends in error (§11); the user must
   press Run again to retry, same as the off case.
 
+**Superseded runs are cancelled.** A resolution, geometry, or sampling change makes
+whatever is currently computing describe a workspace the user has already moved off, and
+those are the long runs — a full re-init at a fine voxel size, not a handful of dirty
+chunks. The app aborts the in-flight `compute()` (`camera-coverage-sdk` §13.2) at the
+moment of that edit, so the engine goes idle at the next chunk boundary and the ordinary
+"not busy" gate starts the replacement run. Without this the user waits out a full run
+whose result is discarded, and only then waits for the one they asked for. A scene
+import cancels the same way (§14.4 step 4).
+
+A **camera** edit is deliberately not cancelled: its run is short, and its result is
+still applied — one edit stale, reconciled by the next auto-run — so cancelling would
+discard finished work to save nothing. Cancellation is surfaced nowhere in the UI: it is
+not an error (§11), it does not stop Auto-run, and it leaves the previous run's overlay
+and stats standing until the replacement lands.
+
 Camera edits require only `setCameras(...)` + `compute(...)` (no re-init).
 Resolution edits require the full re-init pipeline (§6).
+
+A camera **pose** edit — the dominant case, since a gizmo drag emits one per frame and
+auto-run fires up to 10×/sec — is eligible for incremental recompute, so a drag costs
+only the chunks the camera's old and new frusta touch rather than the whole workspace.
+Adding, deleting, or reordering a camera is not eligible and falls back to a full run
+(SDK spec §13.1); reordering already never marks stale, so in practice only add and
+delete pay it. Resolution and sampling edits discard the engine's baseline, so the run
+that follows one is always full.
 
 **Sampling (zone/volume) edits** feed `setSampling`, so a **sampling-dirty** flag
 is set whenever the volume set, a volume transform, its `zoneId`, a non-empty
@@ -960,9 +1010,22 @@ coverage-overlay mode of the shared bottom-right legend widget (§13.6); it show
 no section legend is up and the overlay is visible.
 
 Voxels are extracted from streamed `ChunkResult`s using
-`accessor(result).forEachLeaf((min, size, mask, valid, maskWords) => …)` and fed into
-the renderer incrementally as chunks arrive. Each valid leaf becomes one voxel at world
-position `min` with edge `size`; `intensity` and `color` depend on the active mode.
+`accessor(result).forEachLeaf((min, size, mask, valid, maskWords) => …)` as chunks
+arrive. Each valid leaf becomes one voxel at world position `min` with edge `size`;
+`intensity` and `color` depend on the active mode.
+
+Extracted leaves are retained **keyed by `chunkId`**, not appended to one flat list, so
+an arriving chunk **replaces** that chunk's leaves. This is what lets an incremental run
+(§8) rewrite a few chunks while the rest of the overlay stands.
+
+Mapping the retained leaves onto the renderer is a **whole-overlay rebuild** (it walks
+every leaf, applies the marked-set filter and the active mode, and re-uploads). It is
+therefore **deferred to the end of a run**, not run per arriving chunk: the app flushes
+the overlay once, after the last chunk. Rebuilding per chunk makes a full run quadratic
+in chunk count, and would make an incremental run pay a full-scene rebuild for each of
+the handful of chunks it recomputed — cancelling the saving the incremental run bought.
+A rebuild is still triggered directly, outside a run, by the client-side re-filters that
+need one (mode switch, hue/intensity change, zone enable/disable).
 
 The overlay derives each leaf's camera count from **`maskWords`** — every one of the
 `CAM_WORDS` words (SDK spec §9.5) — not from the single-word `mask` argument. Reading
@@ -1032,8 +1095,9 @@ From `CoverageSummary`:
 
 - `overallRate` — fraction of valid voxels seen by ≥ 1 camera.
 - `perCamera[]` — per-camera `coverageRate`, listed alongside each camera by its
-  **display name** (§5.6). Disabled cameras (§5.4) aren't sent to the engine, so they
-  have no entry here.
+  **display name** (§5.6). Disabled cameras (§5.4) *are* sent to the engine and so do
+  have an entry, always `0`; the panel **filters them out** rather than listing a row of
+  zeroes for a camera the user switched off.
 - `validVoxels`, `elapsedMs`.
 - **Blind-spot count** — number of valid voxels no enabled camera sees (§16),
   derived as `round(validVoxels × (1 − overallRate))`. Surfaced here numerically so
@@ -1057,7 +1121,8 @@ panel is exactly as above (the SDK summary).
 | `WEBGPU_UNAVAILABLE` on `auto` init (compute) | fall back to CPU (§3.2) |
 | WebGPU renderer unavailable | automatic WebGL2 fallback in `WebGPURenderer` (§2.3); no error surfaced |
 | `SCENE_TOO_LARGE` (fine voxel on CPU) | catch, show message, keep previous valid state |
-| `CAMERA_INSIDE_GEOMETRY` | surface which camera; keep it flagged in the list (disabled cameras are excluded, so never flagged) |
+| `COMPUTE_CANCELED` (§8.1) | **not** surfaced: the app asked for the abort, so no banner, no error state, and Auto-run keeps going |
+| `CAMERA_INSIDE_GEOMETRY` | surface which camera; keep it flagged in the list (the SDK never flags a camera carrying `enabled: false`, §5.4) |
 | `TOO_MANY_CAMERAS` | not reachable (10 ≤ 128), but guarded |
 | Worker/device errors | reported in a status area; engine re-init offered |
 
@@ -1104,10 +1169,14 @@ at this point." The retained SVO is the compact resident form; no extra spatial 
 is built, and lookup uses the SDK accessor's own `O(depth)` descent.
 
 - **Bit order.** Bit *n* of a mask is the camera at index *n* in the
-  **enabled-camera list passed to `setCameras()` for that run**. The app snapshots
-  that ordered id list alongside the retained chunks, so masks decode to the correct
-  camera ids even if the live enabled set has since changed. All mask words are
-  decoded (correct up to `MAX_CAMERAS` = 128), not just word 0.
+  **camera list passed to `setCameras()` for that run**. The app snapshots that ordered
+  id list alongside the retained chunks, so masks decode to the correct camera ids even
+  if the live camera set has since changed. All mask words are decoded (correct up to
+  `MAX_CAMERAS` = 128), not just word 0.
+- Since §5.4, that list includes **disabled** cameras (they hold their index, with a
+  permanently-0 bit). The snapshot therefore records each camera's enabled state
+  alongside its id: readouts phrased "of N cameras" (§12.3, §13.6) count the **enabled**
+  entries, never the list length, and per-camera rows skip disabled entries.
 - **Resolution.** Because the mask is quantized to the voxel grid, probe visibility
   has voxel-size resolution (§6).
 
@@ -1310,6 +1379,13 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
   colormap **re-aggregates client-side instantly** and **never** triggers `compute()`.
   Adding, moving, resizing, or deleting a section never marks coverage stale (§8.1) —
   like probes (§12.5), sections are not part of the coverage input.
+- A section's cell grid is **cached against the chunks it reads**. Chunks are
+  partitioned on XZ only (`camera-coverage-sdk` §3), so a section whose footprint misses
+  a chunk's XZ box can never read into it — and after an incremental run (§8) a section
+  over one aisle keeps the grid it already had while one spanning the whole floor
+  re-aggregates. The cache is keyed on the section's own geometry and the marked filter
+  as well, so an edit to either recomputes; it is a recompute-avoidance optimization
+  only, never a change of result.
 - Because the heatmap reflects a past run, when the live scene diverges from it
   (results stale, §8.1) the heatmap is **dimmed** and the Section stats panel shows a
   **stale hint** (§13.7), mirroring the overlay's stale dimming and the probe panel's
@@ -1651,7 +1727,8 @@ Sketch:
 3. Load **every** referenced GLB/GLTF via `GLTFLoader` (from `three/examples`, no new
    npm dependency). Any missing-file or parse failure aborts the import.
 4. Only if all of the above succeed: build the merged collision mesh (§14.6),
-   **cancel any in-flight compute**, replace the `Scene`, clear the coverage overlay
+   **cancel any in-flight compute** (`camera-coverage-sdk` §13.2 — an actual abort, not
+   just a discarded result), replace the `Scene`, clear the coverage overlay
    and the retained per-run probe/section data (they read "no-data", §12.3/§13.4, until
    the next run), and **require an explicit Run** (§8) — import never auto-computes.
 5. On **any** failure the current scene is left **completely untouched** and a single

@@ -371,3 +371,363 @@ async function collectAll(
   engine.dispose();
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// §18.6g–6i — incremental recompute (§13.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * A 4×4-chunk workspace. Cameras use a short `far` so one camera's frustum
+ * touches only a corner of it — without that, every chunk is dirty and 6h's
+ * strict-subset assertion is vacuous.
+ */
+const WS_CHUNKED: WorkspaceConfig = {
+  worldMin: [0, 0, 0],
+  worldMax: [12, 3, 12],
+  voxelSize: 0.3,
+  chunkSizeXZ: 3,
+};
+const CHUNK_COUNT = 16;
+
+/** A wall inside the workspace, so occlusion (not just frustum math) is exercised. */
+const WALL: SceneMesh = wallZ(6, 0, 12, 0, 3);
+
+const shortCam = (id: string, position: Vec3, extra: Partial<CameraConfig> = {}) =>
+  camera(id, position, LOOK_NEG_Z, { fov: 60, far: 2.5, ...extra });
+
+/** Flatten a chunk's per-voxel mask words + validity, for bit-exact comparison. */
+function flatten(r: ChunkResult, camWords: number): number[] {
+  const acc = accessor(r);
+  const [nx, ny, nz] = r.dims;
+  const flat: number[] = [];
+  for (let k = 0; k < nz; k++)
+    for (let j = 0; j < ny; j++)
+      for (let i = 0; i < nx; i++) {
+        for (let w = 0; w < camWords; w++) flat.push(acc.getMaskWord(i, j, k, w) >>> 0);
+        flat.push(acc.isValid(i, j, k) ? 1 : 0);
+      }
+  return flat;
+}
+
+interface IncrRun {
+  summary: { perCamera: { id: string; coverageRate: number }[]; overallRate: number; validVoxels: number };
+  chunks: Map<number, number[]>;
+  runStart: { incremental: boolean; chunkIds: number[] } | null;
+  /** Backend dispatches — how many chunks actually reached Passes 1–3. */
+  dispatches: number;
+}
+
+/**
+ * Drive an engine through a sequence of camera sets, returning the last run's
+ * outcome. Every run after the first asks for `incremental: true`, so the second
+ * entry of `sets` is the edit under test.
+ */
+async function incrementalSequence(
+  sets: CameraConfig[][],
+  opts: {
+    scene?: SceneMesh;
+    /** Per-run overrides, indexed alongside `sets`. */
+    perRun?: { mode?: 1 | 2; threshold?: number; emitVoxels?: boolean }[];
+  } = {},
+): Promise<IncrRun> {
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...WS_CHUNKED, backend: 'cpu' });
+  await engine.loadScene(opts.scene ?? WALL);
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+
+  // Wrap the backend to count how many chunks are actually dispatched. Counting
+  // emitted chunks would not do: the empty-activeMask path emits without
+  // dispatching, so a regression that recomputes everything could still emit the
+  // same number of chunks.
+  const internals = engine as unknown as { backend: { computeChunk: (a: unknown) => unknown } };
+  const backend = internals.backend;
+  const original = backend.computeChunk.bind(backend);
+  let dispatches = 0;
+
+  let last: IncrRun | null = null;
+  for (let n = 0; n < sets.length; n++) {
+    const over = opts.perRun?.[n] ?? {};
+    const emitVoxels = over.emitVoxels ?? true;
+    engine.setCameras(sets[n]);
+    const camWords = Math.max(1, Math.ceil(sets[n].length / 32));
+    const chunks = new Map<number, number[]>();
+    let runStart: IncrRun['runStart'] = null;
+    dispatches = 0;
+    backend.computeChunk = (a: unknown) => {
+      dispatches++;
+      return original(a);
+    };
+    const summary = await engine.compute({
+      mode: over.mode ?? 1,
+      threshold: over.threshold ?? 1,
+      incremental: n > 0,
+      onRunStart: (info) => (runStart = { ...info }),
+      onChunkDone: emitVoxels ? (id, r) => chunks.set(id, flatten(r, camWords)) : undefined,
+    });
+    last = { summary, chunks, runStart, dispatches };
+  }
+  engine.dispose();
+  return last!;
+}
+
+const C0 = [shortCam('a', [1.5, 1.5, 10.5]), shortCam('b', [10.5, 1.5, 4.0])];
+/** Camera 'a' nudged — the gizmo-drag case §13.1 exists for. */
+const C1 = [shortCam('a', [1.9, 1.5, 10.3]), shortCam('b', [10.5, 1.5, 4.0])];
+
+test('§18.6g: an incremental run is bit-identical to a full run at the same cameras', async () => {
+  const incr = await incrementalSequence([C0, C1]);
+  const full = await incrementalSequence([C1]);
+
+  assert.equal(incr.runStart?.incremental, true, 'the C0 → C1 edit must be eligible');
+
+  // Whole-scene summary, not just the recomputed chunks.
+  assert.deepEqual(incr.summary.perCamera, full.summary.perCamera);
+  assert.equal(incr.summary.overallRate, full.summary.overallRate);
+  assert.equal(incr.summary.validVoxels, full.summary.validVoxels);
+
+  // Every chunk the incremental run emitted matches the full run's, word for word.
+  assert.ok(incr.chunks.size > 0, 'the edit must dirty at least one chunk');
+  for (const [id, flat] of incr.chunks) {
+    assert.deepEqual(flat, full.chunks.get(id), `chunk ${id} differs from the full run`);
+  }
+});
+
+test('§18.6h: an incremental run dispatches only its dirty chunks', async () => {
+  const incr = await incrementalSequence([C0, C1]);
+  const full = await incrementalSequence([C1]);
+
+  const dirty = incr.runStart!.chunkIds;
+  assert.ok(dirty.length < CHUNK_COUNT, 'a short-range camera nudge must not dirty the workspace');
+  assert.ok(incr.dispatches < full.dispatches, 'incremental must dispatch fewer chunks than full');
+  assert.ok(incr.dispatches <= dirty.length, 'no chunk outside the reported set may dispatch');
+
+  // The emitted chunks are exactly the reported ones — a caller replacing by
+  // chunkId must not be handed a chunk the run never announced.
+  assert.deepEqual([...incr.chunks.keys()].sort((x, y) => x - y), [...dirty].sort((x, y) => x - y));
+});
+
+test('§18.6h: an edit that changes nothing dispatches nothing', async () => {
+  const incr = await incrementalSequence([C0, C0]);
+  assert.equal(incr.runStart?.incremental, true);
+  assert.deepEqual(incr.runStart?.chunkIds, []);
+  assert.equal(incr.dispatches, 0);
+  assert.equal(incr.chunks.size, 0);
+  // The summary is still the whole scene's, served entirely from retained stats.
+  const full = await incrementalSequence([C0]);
+  assert.deepEqual(incr.summary.perCamera, full.summary.perCamera);
+  assert.equal(incr.summary.overallRate, full.summary.overallRate);
+});
+
+test('§18.6i: an index-shifting camera-list edit falls back to a full run', async () => {
+  const added = [...C0, shortCam('c', [6.0, 1.5, 6.0])];
+  const removed = [C0[0]];
+  const reordered = [C0[1], C0[0]];
+
+  for (const [label, next] of [
+    ['add', added],
+    ['delete', removed],
+    ['reorder', reordered],
+  ] as const) {
+    const incr = await incrementalSequence([C0, next]);
+    assert.equal(incr.runStart?.incremental, false, `${label} must not run incrementally`);
+    assert.equal(incr.runStart?.chunkIds.length, CHUNK_COUNT, `${label} must run every chunk`);
+  }
+});
+
+test('§18.6i: changing mode, threshold, or emitVoxels falls back to a full run', async () => {
+  const cases: { label: string; perRun: { mode?: 1 | 2; threshold?: number; emitVoxels?: boolean }[] }[] = [
+    { label: 'mode', perRun: [{ mode: 1 }, { mode: 2 }] },
+    { label: 'threshold', perRun: [{ mode: 2, threshold: 1 }, { mode: 2, threshold: 4 }] },
+    { label: 'emitVoxels', perRun: [{ emitVoxels: false }, { emitVoxels: true }] },
+  ];
+  for (const { label, perRun } of cases) {
+    const incr = await incrementalSequence([C0, C1], { perRun });
+    assert.equal(incr.runStart?.incremental, false, `${label} change must not run incrementally`);
+  }
+});
+
+test('§18.6i: toggling `enabled` stays incremental and clears that camera everywhere', async () => {
+  const off = [C0[0], shortCam('b', [10.5, 1.5, 4.0], { enabled: false })];
+  const incr = await incrementalSequence([C0, off]);
+  const full = await incrementalSequence([off]);
+
+  assert.equal(incr.runStart?.incremental, true, 'a toggle is index-stable, so it stays eligible');
+  assert.ok(incr.runStart!.chunkIds.length < CHUNK_COUNT, 'only b’s frustum chunks are dirty');
+  assert.deepEqual(incr.summary.perCamera, full.summary.perCamera);
+  // The disabled camera keeps its slot and reports zero, rather than vanishing.
+  assert.equal(incr.summary.perCamera.length, 2);
+  assert.equal(incr.summary.perCamera[1].id, 'b');
+  assert.equal(incr.summary.perCamera[1].coverageRate, 0);
+});
+
+test('§18.6i: the first run has no baseline, so it is always full', async () => {
+  const incr = await incrementalSequence([C0]);
+  assert.equal(incr.runStart?.incremental, false);
+  assert.equal(incr.runStart?.chunkIds.length, CHUNK_COUNT);
+});
+
+test('§13.1: setSampling drops the baseline, so the next run is full', async () => {
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...WS_CHUNKED, backend: 'cpu' });
+  await engine.loadScene(WALL);
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+  engine.setCameras(C0);
+  await engine.compute({ onChunkDone: () => {} });
+
+  await engine.setSampling({ regions: [{ type: 'heightBand', yMin: 0.5, yMax: 2.0 }] });
+  engine.setCameras(C1);
+  let runStart: { incremental: boolean; chunkIds: number[] } | null = null;
+  await engine.compute({
+    incremental: true,
+    onRunStart: (i) => (runStart = { ...i }),
+    onChunkDone: () => {},
+  });
+  engine.dispose();
+  assert.equal(runStart!.incremental, false);
+  assert.equal(runStart!.chunkIds.length, CHUNK_COUNT);
+});
+
+test('§13.1: a scoped `chunks` run leaves the baseline untouched', async () => {
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...WS_CHUNKED, backend: 'cpu' });
+  await engine.loadScene(WALL);
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+  engine.setCameras(C0);
+  const base = await engine.compute({ onChunkDone: () => {} });
+
+  // A scoped run reports over just its chunks — today's behavior, unchanged.
+  const scoped = await engine.compute({ chunks: [0], onChunkDone: () => {} });
+  assert.ok(scoped.validVoxels < base.validVoxels);
+
+  // ...and the baseline still describes C0, so a C0 → C0 run is a no-op.
+  let runStart: { incremental: boolean; chunkIds: number[] } | null = null;
+  const after = await engine.compute({
+    incremental: true,
+    onRunStart: (i) => (runStart = { ...i }),
+    onChunkDone: () => {},
+  });
+  engine.dispose();
+  assert.equal(runStart!.incremental, true);
+  assert.deepEqual(runStart!.chunkIds, []);
+  assert.equal(after.validVoxels, base.validVoxels);
+  assert.deepEqual(after.perCamera, base.perCamera);
+});
+
+// ---------------------------------------------------------------------------
+// §18.6j–6k — cancellation (§13.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run to completion, counting backend dispatches, with a hook that can abort
+ * part-way. `abortAfter` fires the controller once that many chunks have been
+ * dispatched — so `abortAfter: 0` cancels before any chunk starts.
+ */
+async function cancellableRun(
+  cams: CameraConfig[],
+  abortAfter: number | null,
+): Promise<{ dispatches: number; error: unknown; engine: CoverageEngine; controller: AbortController }> {
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...WS_CHUNKED, backend: 'cpu' });
+  await engine.loadScene(WALL);
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+  engine.setCameras(cams);
+
+  const controller = new AbortController();
+  const internals = engine as unknown as { backend: { computeChunk: (a: unknown) => unknown } };
+  const backend = internals.backend;
+  const original = backend.computeChunk.bind(backend);
+  let dispatches = 0;
+  backend.computeChunk = (a: unknown) => {
+    dispatches++;
+    if (abortAfter !== null && dispatches >= abortAfter && abortAfter > 0) controller.abort();
+    return original(a);
+  };
+  if (abortAfter === 0) controller.abort();
+
+  let error: unknown = null;
+  try {
+    await engine.compute({ signal: controller.signal, onChunkDone: () => {} });
+  } catch (err) {
+    error = err;
+  }
+  return { dispatches, error, engine, controller };
+}
+
+test('§18.6j: a cancelled compute rejects with COMPUTE_CANCELED and stops dispatching', async () => {
+  const { dispatches, error, engine } = await cancellableRun(C0, 2);
+  assert.ok(error instanceof EngineError, 'cancellation surfaces as an EngineError');
+  assert.equal((error as EngineError).code, EngineErrorCode.COMPUTE_CANCELED);
+  // The chunk in flight when the signal fired always finishes (§13.2), so the
+  // count may exceed the trigger by one — but it must not reach the full run.
+  assert.ok(dispatches < CHUNK_COUNT, `stopped early (${dispatches} of ${CHUNK_COUNT})`);
+  engine.dispose();
+});
+
+test('§18.6j: aborting before the first chunk dispatches nothing', async () => {
+  const { dispatches, error, engine } = await cancellableRun(C0, 0);
+  assert.equal((error as EngineError).code, EngineErrorCode.COMPUTE_CANCELED);
+  assert.equal(dispatches, 0);
+  engine.dispose();
+});
+
+test('§18.6j: the engine stays usable — the next run matches an uninterrupted one', async () => {
+  const { engine, error } = await cancellableRun(C0, 2);
+  assert.equal((error as EngineError).code, EngineErrorCode.COMPUTE_CANCELED);
+
+  // Same engine, no re-init: a fresh compute must be complete and correct.
+  const after = await engine.compute({ onChunkDone: () => {} });
+  engine.dispose();
+
+  const clean = await incrementalSequence([C0]);
+  assert.equal(after.validVoxels, clean.summary.validVoxels);
+  assert.equal(after.overallRate, clean.summary.overallRate);
+  assert.deepEqual(after.perCamera, clean.summary.perCamera);
+});
+
+test('§18.6j: an already-finished run ignores a late abort', async () => {
+  const { engine, controller } = await cancellableRun(C0, null);
+  controller.abort(); // after the run settled
+  const after = await engine.compute({ signal: controller.signal, onChunkDone: () => {} }).catch((e) => e);
+  engine.dispose();
+  // A *new* compute on an already-aborted signal is cancelled immediately — the
+  // late abort didn't corrupt anything, it just applies to the next run.
+  assert.equal((after as EngineError).code, EngineErrorCode.COMPUTE_CANCELED);
+});
+
+test('§18.6k: a cancelled run drops the incremental baseline', async () => {
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...WS_CHUNKED, backend: 'cpu' });
+  await engine.loadScene(WALL);
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+
+  // A completed run establishes a baseline at C0.
+  engine.setCameras(C0);
+  await engine.compute({ onChunkDone: () => {} });
+
+  // A cancelled run at C1 leaves statistics straddling two camera generations.
+  const controller = new AbortController();
+  const internals = engine as unknown as { backend: { computeChunk: (a: unknown) => unknown } };
+  const backend = internals.backend;
+  const original = backend.computeChunk.bind(backend);
+  let n = 0;
+  backend.computeChunk = (a: unknown) => {
+    if (++n >= 2) controller.abort();
+    return original(a);
+  };
+  engine.setCameras(C1);
+  await engine
+    .compute({ signal: controller.signal, onChunkDone: () => {} })
+    .catch(() => {});
+  backend.computeChunk = original;
+
+  // The C1 → C1 edit would be eligible on an intact baseline; it must not be.
+  let runStart: { incremental: boolean; chunkIds: number[] } | null = null;
+  await engine.compute({
+    incremental: true,
+    onRunStart: (i) => (runStart = { ...i }),
+    onChunkDone: () => {},
+  });
+  engine.dispose();
+  assert.equal(runStart!.incremental, false, 'the baseline must not survive a cancellation');
+  assert.equal(runStart!.chunkIds.length, CHUNK_COUNT);
+});

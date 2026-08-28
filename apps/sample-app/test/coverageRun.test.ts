@@ -9,7 +9,7 @@ import type { SamplingVolume, Zone } from '../src/scene/samplingVolumes.ts';
 // A 2×1×2 workspace of 1 m voxels → one 2×1×2 chunk. Voxel centers (li = i + 2k):
 // 0→(0.5,0.5,0.5), 1→(1.5,0.5,0.5), 2→(0.5,0.5,1.5), 3→(1.5,0.5,1.5).
 const GRID = new WorkspaceGrid({ worldMin: [0, 0, 0], worldMax: [2, 1, 2], voxelSize: 1, chunkSizeXZ: 2 });
-const IDS = ['cam-a', 'cam-b', 'cam-c'];
+const IDS = ['cam-a', 'cam-b', 'cam-c'].map((id) => ({ id, enabled: true }));
 
 /** Voxels 0 and 2 valid + seen by cameras 0 and 2; all four valid. */
 function buildChunk(): ChunkResult {

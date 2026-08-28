@@ -25,6 +25,12 @@ scene (raw buffers)
 Public entry: `createEngine()` / `CoverageEngine` implementing `VisibilityEngine`
 (`init → loadScene → setSampling → setCameras → compute → dispose`).
 
+The pipeline runs over **every** chunk by default. `compute({ incremental: true })`
+(§13.1) narrows the per-chunk stage to the chunks a camera edit can have affected,
+leaving the preprocessing and sampling stages untouched — they were already
+camera-independent. Nothing else in the flow changes: a recomputed chunk is recomputed
+whole, over all cameras, so no chunk ever mixes camera generations.
+
 ## Module map
 
 | Concern | Spec | Module(s) |
@@ -39,6 +45,8 @@ Public entry: `createEngine()` / `CoverageEngine` implementing `VisibilityEngine
 | Per-chunk pipeline (Pass 1/2/3), submission & readback | §11/§11.1 | `src/compute/cpu.ts`, `src/compute/webgpu.ts`, `src/shaders.ts` |
 | Dense result buffers | §9.1–9.3 | `src/compute/cpu.ts`, `src/results.ts` |
 | SVO merged storage + `VoxelAccessor` | §9.5 | `src/svo.ts` |
+| Incremental recompute baseline + dirty-set diff | §13.1 | `src/incremental.ts` |
+| Cancellation (signal check + macrotask yield) | §13.2 | `src/engine.ts`, `src/worker/*` |
 | Engine API + orchestration | §16.1 | `src/engine.ts` |
 | Web Worker host + main-thread client | §4/§16 | `src/worker/*` |
 | Rust WASM kernels | §4/§6.2/§9.5/§10 | `crates/camera_coverage_wasm/` + `src/wasm/loader.ts` |
@@ -141,6 +149,41 @@ Chunk count/size derive from workspace dimensions (`src/grid.ts`), not a constan
 voxels each. Only one chunk's GPU buffers are ever resident at a time (§9.4), a
 memory-budget constraint driven by WebGPU's default 128 MiB
 `maxStorageBufferBindingSize`.
+
+## Retained state across calls, and what drops it
+
+Two things now survive from one call to the next, and they invalidate differently:
+
+| State | Owner | Keyed to | Dropped by |
+|---|---|---|---|
+| Per-chunk validity mask + `validCount` (§6.4) | `src/sampling.ts` | scene + `SamplingConfig` | `loadScene()`, `setSampling()` |
+| Incremental baseline: camera set, run options, per-chunk stats (§13.1) | `src/incremental.ts` | scene + sampling + cameras + run options | the above, plus re-`init()`, a **cancelled** or thrown `compute()`, and any ineligible edit |
+
+The baseline is strictly *narrower* than the validity cache: anything that drops the
+cache must also drop the baseline, never the reverse. Reviewing a change that touches
+lifecycle, check that direction explicitly — the failure mode is not a crash but a
+coverage number computed against a stale chunk, which looks entirely plausible.
+
+Two invariants carry the correctness of §13.1 and are worth stating as invariants
+rather than leaving in the code:
+
+- **The dirty set may over-approximate, never under-approximate.** It is built from the
+  same conservative frustum–AABB test as pre-cull (`src/camera.ts`), which has false
+  positives only. Any change that tightens that test to be more exact must be checked
+  against *both* callers.
+- **Cancellation needs the event loop to turn, not just a flag.** The CPU backend's
+  `computeChunk` is synchronous, so a cancel crossing the Worker boundary (a macrotask)
+  can only land if the engine explicitly yields between chunks. Anything that removes
+  that yield makes cancellation silently inert in the worker while still passing an
+  in-process test — `test/worker.test.ts` over `loopback()` is what catches it.
+- **A chunk's mask never mixes camera generations.** A dirty chunk is recomputed over all
+  cameras, not just the changed ones. Recomputing "only the moved camera's bit" would be
+  faster and is wrong — the retained mask is the caller's, not the engine's, and the
+  engine has nothing to merge into.
+
+Both are covered by §18.6g–6i, which pair an equivalence assertion with a
+dispatch-counter assertion: equivalence alone passes if the optimization silently stops
+working, and the counter alone passes if it works but is unsound.
 
 ## WebGPU is a separate risk surface
 

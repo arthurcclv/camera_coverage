@@ -26,13 +26,26 @@ const union: ZoneSummary = {
   ],
 };
 
+/** Every camera enabled, so nothing is filtered out of the SDK summary (spec §10). */
+const ALL = new Set(['cam-1', 'cam-2', 'cam-a', 'cam-b', 'cam-c', 'c0', 'c1']);
+
 test('with zones off the SDK summary is displayed as-is (spec §10)', () => {
-  assert.equal(displayCoverageSummary(sdkSummary, union, false), sdkSummary);
-  assert.equal(displayCoverageSummary(sdkSummary, null, false), sdkSummary);
+  assert.deepEqual(displayCoverageSummary(sdkSummary, union, false, ALL), sdkSummary);
+  assert.deepEqual(displayCoverageSummary(sdkSummary, null, false, ALL), sdkSummary);
+});
+
+test('a disabled camera is dropped from the displayed per-camera list (spec §5.4, §10)', () => {
+  // Since §5.4 the SDK reports every camera, disabled ones at a flat 0 — listing
+  // that row would read as "this camera sees nothing" rather than "it is off".
+  const d = displayCoverageSummary(sdkSummary, null, false, new Set(['cam-1']))!;
+  assert.deepEqual(d.perCamera, [sdkSummary.perCamera[0]]);
+  // Only the list is filtered: the scene-wide numbers are unaffected.
+  assert.equal(d.overallRate, sdkSummary.overallRate);
+  assert.equal(d.validVoxels, sdkSummary.validVoxels);
 });
 
 test('with zones on the union overrides the coverage numbers, keeping elapsed (§7.4)', () => {
-  const d = displayCoverageSummary(sdkSummary, union, true)!;
+  const d = displayCoverageSummary(sdkSummary, union, true, ALL)!;
   assert.equal(d.overallRate, 0.9);
   assert.equal(d.validVoxels, 200);
   assert.deepEqual(d.perCamera, union.perCamera);
@@ -40,7 +53,7 @@ test('with zones on the union overrides the coverage numbers, keeping elapsed (�
 });
 
 test('no run means nothing to display', () => {
-  assert.equal(displayCoverageSummary(null, union, true), null);
+  assert.equal(displayCoverageSummary(null, union, true, ALL), null);
   assert.equal(hierarchyPerCamera(null), null);
 });
 
@@ -48,20 +61,20 @@ test('no run means nothing to display', () => {
 // hierarchy badge and the stats panel's "Per camera" line are the same numbers.
 test('hierarchy rates are the displayed summary rates, zones on or off', () => {
   for (const samplingActive of [false, true]) {
-    const d = displayCoverageSummary(sdkSummary, union, samplingActive);
+    const d = displayCoverageSummary(sdkSummary, union, samplingActive, ALL);
     assert.deepEqual(hierarchyPerCamera(d), d!.perCamera);
   }
 });
 
 test('an empty marked set drops the badges rather than reporting 0% (§7.4)', () => {
   const empty: ZoneSummary = { validVoxels: 0, overallRate: 0, blindVoxels: 0, perCamera: [] };
-  const d = displayCoverageSummary(sdkSummary, empty, true)!;
+  const d = displayCoverageSummary(sdkSummary, empty, true, ALL)!;
   assert.equal(d.validVoxels, 0);
   assert.equal(hierarchyPerCamera(d), null);
 });
 
 test('a camera missing from the union summary gets no rate', () => {
   const partial: ZoneSummary = { ...union, perCamera: [{ id: 'cam-1', coverageRate: 0.8 }] };
-  const rates = hierarchyPerCamera(displayCoverageSummary(sdkSummary, partial, true));
+  const rates = hierarchyPerCamera(displayCoverageSummary(sdkSummary, partial, true, ALL));
   assert.equal(new Map(rates!.map((p) => [p.id, p.coverageRate])).get('cam-2'), undefined);
 });

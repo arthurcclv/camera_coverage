@@ -19,9 +19,23 @@ test('cameraLabel trims the name and falls back to the default when blank (spec 
   assert.equal(cameraLabel(cam('cam-3', '   ')), 'Camera 3');
 });
 
-test('toCameraConfig drops the app-only name/enabled at the SDK boundary (spec §8, §14.1)', () => {
+test('toCameraConfig drops the app-only name but keeps enabled (spec §5.4, §8, §14.1)', () => {
   const cfg = toCameraConfig(cam('cam-1', 'Front door'));
   assert.equal('name' in cfg, false);
-  assert.equal('enabled' in cfg, false);
-  assert.deepEqual(cfg, { id: 'cam-1', position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 });
+  // `enabled` crosses the boundary since spec §5.4: the engine needs it to hold
+  // the camera's mask-bit slot open rather than have the app renumber the list.
+  assert.equal(cfg.enabled, true);
+  assert.deepEqual(cfg, {
+    id: 'cam-1',
+    enabled: true,
+    position: [0, 0, 0],
+    rotation: [0, 0, 0, 1],
+    fov: 60,
+  });
+});
+
+test('toCameraConfig carries a disabled camera through rather than dropping it (spec §5.4)', () => {
+  const cfg = toCameraConfig({ ...cam('cam-2', 'Yard'), enabled: false });
+  assert.equal(cfg.enabled, false);
+  assert.equal(cfg.id, 'cam-2');
 });

@@ -92,6 +92,7 @@ engine.dispose();
 | §11/§11.1 per-chunk pipeline (Pass 1/2/3), submission & readback | `src/compute/cpu.ts`, `src/compute/webgpu.ts`, `src/shaders.ts` |
 | §9.1–9.3 dense result buffers | `src/compute/cpu.ts`, `src/results.ts` |
 | §9.5 SVO merged storage + VoxelAccessor | `src/svo.ts` |
+| §13.1 incremental recompute (baseline + dirty-set diff) | `src/incremental.ts` |
 | §16.1 engine API + orchestration | `src/engine.ts` |
 | §4/§16 Web Worker host + main-thread client | `src/worker/*` |
 | §4/§6.2/§9.5/§10 Rust WASM kernels | `crates/camera_coverage_wasm/` + `src/wasm/loader.ts` |

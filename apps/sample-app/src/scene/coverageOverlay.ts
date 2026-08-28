@@ -106,7 +106,14 @@ export class CoverageOverlay {
     this.renderer.setRenderOrder(RenderOrder.coverageFog);
   }
 
-  private leaves: Leaf[] = [];
+  /**
+   * Retained leaves **keyed by chunkId** (spec §9), not one flat list: an
+   * incremental run (§8) re-sends only a few chunks, and each must replace its
+   * predecessor rather than pile on top of it.
+   */
+  private leaves = new Map<number, Leaf[]>();
+  /** Whether a run is streaming — while it is, `rebuild()` is deferred to `flush()`. */
+  private streaming = false;
   // The marked-set filter (union of enabled zones' volumes, `sampling_volumes.md`
   // §7.3); `null` ⇒ draw every valid voxel (full-volume fallback).
   private markedFilter: MarkedFilter | null = null;
@@ -118,9 +125,34 @@ export class CoverageOverlay {
     involvedCameraCount: 1,
   };
 
-  /** Clear accumulated chunks before starting a new compute() run. */
+  /**
+   * Clear accumulated chunks before a **full** run (spec §8). An incremental run
+   * must NOT call this — it streams only a few chunks, so clearing first would
+   * blank the rest of the overlay with no error. Call {@link beginRun} instead.
+   */
   reset(): void {
-    this.leaves = [];
+    this.leaves.clear();
+    // Rebuild straight away rather than waiting for a flush: `reset()` is also
+    // how a scene replace empties the overlay (spec §14.4), and that clear has
+    // to be visible even when no run follows it.
+    this.streaming = true;
+    this.rebuild();
+  }
+
+  /**
+   * Enter streaming mode: `addChunk` retains without rebuilding until
+   * {@link flush}. `rebuild()` walks every retained leaf and re-uploads the whole
+   * renderer, so doing it per arriving chunk is quadratic in chunk count — and on
+   * an incremental run it would cost a full-scene rebuild per recomputed chunk,
+   * cancelling the saving that run just bought (spec §9).
+   */
+  beginRun(): void {
+    this.streaming = true;
+  }
+
+  /** Leave streaming mode and rebuild once, at the end of a run (spec §9). */
+  flush(): void {
+    this.streaming = false;
     this.rebuild();
   }
 
@@ -136,7 +168,8 @@ export class CoverageOverlay {
   }
 
   /**
-   * Append a streamed ChunkResult's valid leaves. Decodes the leaf's full
+   * Retain a streamed ChunkResult's valid leaves, **replacing** any previously
+   * held for that chunk so a re-sent chunk does not double up. Decodes the leaf's full
    * `maskWords` (all `CAM_WORDS` words), so it stays correct above 32 cameras;
    * `maskWords` is accessor-owned scratch, so it is reduced to `camCount` here
    * rather than retained (§9).
@@ -145,10 +178,11 @@ export class CoverageOverlay {
     const acc = accessor(result);
     const [ox, oy, oz] = result.origin;
     const vs = result.voxelSize;
+    const leaves: Leaf[] = [];
     acc.forEachLeaf((min, size, _mask, valid, maskWords) => {
       if (!valid) return;
       const world = size * vs;
-      this.leaves.push({
+      leaves.push({
         cx: ox + min[0] * vs + world / 2,
         cy: oy + min[1] * vs + world / 2,
         cz: oz + min[2] * vs + world / 2,
@@ -156,7 +190,8 @@ export class CoverageOverlay {
         camCount: popcountWords(maskWords),
       });
     });
-    this.rebuild();
+    this.leaves.set(result.chunkId, leaves);
+    if (!this.streaming) this.rebuild();
   }
 
   setOptions(opts: Partial<OverlayOptions>): void {
@@ -175,7 +210,8 @@ export class CoverageOverlay {
     // Both modes share the user-selected overlay hue (spec §9.2).
     const color = hueToRgb(this.opts.overlayHue);
     const voxels: Voxel[] = [];
-    for (const leaf of this.leaves) {
+    for (const chunkLeaves of this.leaves.values())
+    for (const leaf of chunkLeaves) {
       // Marked-set filter (§7.3): outside the enabled zones' union, the voxel
       // reads as unmarked and the overlay draws nothing there.
       if (this.markedFilter && !this.markedFilter(leaf.cx, leaf.cy, leaf.cz)) continue;

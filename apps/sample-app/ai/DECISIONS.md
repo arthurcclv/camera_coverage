@@ -6,6 +6,150 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Only the long, superseded runs are cancelled — camera edits ride it out
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §8.1, §11, §14.4.
+
+**Why.** With cancellation available (SDK spec §13.2) the tempting rule is "any edit
+during a run cancels it". That is wrong here. A camera run is now a handful of dirty
+chunks and its result *is* applied — one edit stale, reconciled by the next auto-run —
+so cancelling it throws away finished work to save nothing, and under a 10 Hz gizmo drag
+it could cancel every run before any completes. The runs actually worth stopping are the
+ones whose result is already known to be unwanted: a resolution, geometry, or sampling
+change re-inits the workspace, and the run in flight describes the old one.
+**Decision:** cancel on `pendingHeavyWork` only.
+
+**Trade-off.** The abort is issued from an effect at the moment of the edit rather than
+from `handleRun`, which is what keeps `handleRun` strictly non-reentrant — the engine's
+`compute()` is not safe to enter twice, and cancelling at the top of a run would have
+meant a second `handleRun` racing the first through `initAndLoad`. The cost is one more
+effect and a `pendingHeavyWork` expression that has to stay in step with `handleRun`'s
+own `needsReinit`; if they drift, the symptom is a run that is not cancelled (a wait),
+never a corrupted one.
+
+**Related.** `useEngine` maps `COMPUTE_CANCELED` to `status: 'ready'`, not `'error'`.
+Otherwise the app's own abort would raise an error banner and stop Auto-run from
+retrying (§11) — the user would see their resolution change break the app.
+
+## The per-run aggregations are cached the way the engine caches chunks
+
+Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §7.2 and
+[`../specs/spec.md`](../specs/spec.md) §13.4.
+
+**Why.** Incremental recompute (SDK spec §13.1) made the engine's share of a camera edit
+proportional to what changed, but the app's consumers still re-derived from the whole
+retained scene on every run — so the wall-clock cost of a drag barely moved. The two
+that mattered are aggregations, and both decompose the same way the engine's per-chunk
+statistics do. **Decision:** `ZoneCoverageStore` retains per-chunk accumulators and sums
+them, rescanning only the chunks a run replaced; `SectionHeatmapStore` caches each
+section's cell grid against the chunks its footprint can reach. Measured on the default
+room at `voxelSize` 0.1 with a zone defined, a 3-of-9-chunk run: zone aggregation
+602 ms → 257 ms, and 0.2 ms when nothing changed at all.
+
+**Trade-off.** Two caches whose invalidation has to be right, and the failure mode is a
+plausible-looking stale number rather than a crash. Both are therefore invalidated
+coarsely and deliberately: a zone/volume/camera-list change drops *every* chunk's
+accumulator rather than reasoning about which voxels moved in or out, and a section's
+grid is keyed on its full geometry plus the marked-filter identity. Cheap to check —
+these are a handful of small entities guarding a scan of millions of voxels.
+
+**Related.** The section cache's chunk dependency is geometric (XZ footprint overlap),
+which is a *superset* of what a section actually reads. That direction is the safe one:
+over-approximating means an unnecessary recompute, under-approximating would serve a
+stale grid.
+
+**Still whole-scene.** The overlay's `rebuild()` is not covered by any of this — it is a
+renderer upload (~48 ms at that resolution), not an aggregation, and making it
+incremental needs per-chunk instance ranges inside `VoxelVolumetricRenderer`. It is now
+the largest remaining per-run main-thread cost in a scene with no zones.
+
+## The main-thread aggregations, not `elapsedMs`, are what a run actually costs
+
+Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §7.2.
+
+**Why.** `CoverageSummary.elapsedMs` is measured inside the engine, around its chunk
+loop — in the worker. Everything the app then does with the streamed chunks (decode
+leaves, rebuild the overlay, aggregate zones, build section cells) happens on the main
+thread and is outside that number. Once incremental recompute (SDK spec §13.1) cut the
+engine's share, the reported time dropped while the UI still blocked for roughly as long:
+the consumers scale with the *whole retained scene*, not with the dirty set. Measured on
+the default room at `voxelSize` 0.1 (3.1M valid voxels, 8 cameras), per run:
+overlay decode 30 ms, overlay rebuild 48 ms, section cells 24 ms per section, and
+`computeZoneCoverage` **773 ms** — with no zones defined at all.
+
+**Decision.** `computeZoneCoverage` returns early when no zone holds a volume, which is
+the common case and was pure waste (773 ms → 0.2 ms). The spec had always said this pass
+does not run without zones; the code had drifted. Separately, the per-voxel × per-camera
+inner loop reads mask bits inline rather than through `runCameras.ts`'s `maskBitSet`
+helper — the closure that helper needs allocated per camera per voxel, ~40% of that
+loop's time.
+
+**Trade-off.** Neither fix touches the case the feature exists for: with a zone actually
+defined the pass is still ~717 ms per run at that resolution, and the overlay rebuild and
+section cells remain whole-scene every run. Making those incremental (per-chunk
+accumulators re-summed, mirroring the engine's baseline) or moving them off the main
+thread is the real fix and is not done here. Until then, `elapsedMs` understates a run's
+cost and should not be read as "how long the app was busy".
+
+**Related.** The inline-bit-math exception is deliberate and local: `maskBitSet` stays the
+right call everywhere else (per probe, per cell), where it runs orders of magnitude less
+often and the clarity is worth more than the closure.
+
+## Store lifecycle is driven by `onRunStart`, not inferred from app state
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §8, §9, §12.2.
+
+**Why.** Four consumers accumulate a run's chunks — the coverage overlay, probe
+visibility, the section heatmap store, and zone coverage — and all four used to `reset()`
+at the top of `handleRun`. With incremental recompute (SDK spec §13.1) a run may stream
+only a handful of chunks, so resetting first would blank the rest of the scene. App
+already knows enough to *guess* — it tracks `needsReinit` and `samplingDirty` — but the
+engine, not the app, decides whether a run is actually incremental, and it declines for
+reasons app cannot see (no baseline yet, a previous run that threw). **Decision:**
+`compute()` reports `{ incremental, chunkIds }` through `onRunStart` before the first
+chunk, and the reset is driven by that flag alone. **Trade-off:** one more callback to
+plumb across the worker boundary, in exchange for a rule with a single source of truth.
+Guessing wrong here produces a mostly-empty overlay and no error at all.
+
+**Related.** Three of the four stores were already `Map<chunkId, ChunkResult>`, so they
+needed nothing beyond skipping the reset. `CoverageOverlay` kept a flat `Leaf[]` and had
+to become chunk-keyed.
+
+## The overlay rebuilds once per run, not once per chunk
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §9.
+
+**Why.** `CoverageOverlay.addChunk` called `rebuild()` on every arriving chunk, and
+`rebuild()` walks *every* retained leaf, re-applies the marked-set filter and the active
+mode, and re-uploads the whole renderer. That was already quadratic in chunk count on a
+full run; nobody noticed because the GPU compute dominated. Incremental recompute removes
+that cover — a run that computes three chunks would have paid three full-scene rebuilds
+to save 97% of the compute, and could easily end up slower. **Decision:** retain leaves
+keyed by `chunkId`, and flush the rebuild once, after the last chunk of a run. Rebuilds
+triggered outside a run (mode switch, hue/intensity, zone enable/disable) are unaffected —
+they are already one-shot. **Trade-off:** the overlay no longer paints progressively as
+chunks stream in, so a long full run shows nothing until it finishes rather than filling
+in. Given auto-run fires at up to 10 Hz, the progressive fill was mostly a flicker; if it
+is missed, the flush can be made periodic without changing the keying.
+
+## Disabled cameras are sent to the engine, not filtered out
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.4, §10, §12.2.
+
+**Why.** App filtered `cameras` to the enabled ones before `setCameras()`, which reads as
+the obviously correct thing to do — the engine shouldn't waste work on a camera the user
+switched off. But mask bits are positional (SDK spec §7.1), so dropping camera #2
+renumbers every camera after it, which disqualifies the next run from incremental
+recompute (SDK spec §13.1). Toggling a camera is a frequent interaction, and it would
+have forced a full workspace recompute every time. **Decision:** pass every camera with
+an `enabled` flag; the engine clears disabled cameras from every chunk's active mask, so
+the work is skipped anyway while the index stays put. **Trade-off:** "the cameras the
+engine knows about" is no longer "the cameras that count", and several readouts took the
+list's length as their denominator. Those call sites — the stats/zone/section per-camera
+lists, the probe panel's *seen by K of N*, and the section legend's camera-count scale —
+must filter explicitly now, and a new one that forgets will quietly report a rate against
+an inflated total.
+
 ## Displayed coverage numbers come from one derivation, not per-call-site picks
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.5, §10 and

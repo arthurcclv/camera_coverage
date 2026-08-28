@@ -6,6 +6,93 @@ decisions at the top when you add to this file.
 
 ---
 
+## Cancellation is cooperative, chunk-granular, and needs a macrotask yield to work
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.2, §16.1, §17.
+
+**Why.** A superseded run — the caller changed resolution, sampling, or the scene — used
+to run to completion because the engine exposed no way to stop it; callers could only
+discard the result. **Decision:** `compute()` takes an `AbortSignal` and checks it
+between chunks. Chunk granularity is forced, not chosen: Passes 1–3 are a single GPU
+submission (§11.1) with no interruption point inside them, so the floor on cancel latency
+is one chunk either way.
+
+**The non-obvious part** is that checking the signal is not enough. On the CPU backend
+`computeChunk` is synchronous, so `await`ing it drains microtasks only — and a cancel
+crossing the Worker boundary is a *message*, a macrotask. Without an explicit
+`setTimeout(0)` between chunks the flag could never flip mid-run, and cancellation would
+appear to work in an in-process test while doing nothing in the real worker. The WebGPU
+backend already yields at `mapAsync`, but the yield is unconditional so both backends
+behave the same, and it is skipped entirely when no signal was supplied so an
+uncancellable run pays nothing. `test/worker.test.ts` covers this end-to-end over
+`loopback()`, which is the only place the macrotask requirement is actually visible.
+
+**Trade-off.** Rejecting with `COMPUTE_CANCELED` rather than resolving with a partial
+summary means every caller has to classify the error; the alternative — a "was cancelled"
+flag on the summary — would let a caller silently treat a partial scan as a whole-scene
+one. A cancelled run also drops the incremental baseline (§13.1): it stopped part-way,
+so its retained statistics straddle two camera generations, which is the same condition
+a thrown `compute()` already discards for. That makes the run *after* a cancellation a
+full one — the cost of stopping early, and §18.6k pins it so nobody 'optimizes' it away.
+
+**Related.** An `AbortSignal` cannot be cloned into a Worker any more than a callback
+can. The client keeps the signal and relays a firing as a `cancel` message naming the
+request; the host holds one `AbortController` per in-flight compute. A cancel for an id
+that already settled is a deliberate no-op — a late cancel racing a finishing run is
+normal, not an error.
+
+## Incremental recompute keys off camera *identity*, and `enabled` exists to protect it
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.1, §5.2, §16.1.
+
+**Why.** §13 always listed "recompute only the chunks touched by the moving camera's
+old and new frusta" as step 3, and it was never implemented: `compute()` defaulted
+`chunkIds` to every chunk, so a gizmo drag at 10 runs/sec re-ran the whole workspace to
+move one camera a few centimetres. The blocker was never the frustum math — the
+conservative pre-cull test in §7.2 already answers "can this camera touch this chunk"
+with no false negatives. It was that a mask bit is a camera's *array index*, so a
+retained result is only meaningful while the camera list is positionally identical.
+**Decision:** an incremental run is gated on the ordered camera **id** list being
+unchanged, and on `mode`/`threshold`/`emitVoxels` matching, before any dirty-set math
+runs. Everything else falls back to a full run. **Trade-off:** add, delete, and reorder
+pay full price. Reorder never marks the app stale anyway, and add/delete are one-off
+clicks rather than a continuous stream, so the case that actually needed this — dragging
+— is fully covered.
+
+**Related.** `CameraConfig.enabled` was added *for* this rule, not for convenience.
+`sample-app` used to filter its list to enabled cameras before `setCameras()`, which
+made switching a camera off a positional edit: every later camera's bit shifted, and
+every retained mask in the app became garbage. Toggling is a common interaction, so it
+would have fallen back to a full recompute on every click. Carrying the flag instead
+keeps indices stable and makes a toggle just another eligible pose-class edit. The price
+is that disabled cameras consume the 128-camera budget and can widen `CAM_WORDS`, and
+that every "of N cameras" denominator in a consumer must now count enabled entries
+rather than take the list's length — §5.4 of the app spec enumerates the call sites.
+
+## The engine retains per-chunk statistics, never per-chunk masks
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.1.
+
+**Why.** An incremental run skips chunks, but `CoverageSummary` must still describe the
+whole scene — `overallRate` and `perCamera` are ratios over every valid voxel, not over
+the ones this run happened to touch. Something has to remember the skipped chunks.
+The obvious move is to retain the `ChunkResult`s, and it is the wrong one: that is the
+per-voxel data §9.4 budgets in megabytes per chunk, and whoever consumed `onChunkDone`
+is already holding it. **Decision:** the baseline retains only
+`{ validCount, coveredCount, visibleCount[] }` per chunk — kilobytes total — and the
+summary is re-summed across all of them. Voxel-level retention stays the caller's
+problem, which is why `onRunStart` exists to tell the caller when it must replace rather
+than rebuild. **Trade-off:** the engine cannot serve a "give me chunk 7 again" query, and
+a caller that ignores `onRunStart` and clears its store on an incremental run silently
+loses most of the scene. That failure is invisible at the type level, so §16.1 states the
+replace-don't-reset contract explicitly and §18.6i pins the fallback reporting.
+
+**Related.** The baseline advances only on a run that completed over everything it was
+responsible for. A `compute()` with an explicit `chunks` list never advances it, and a
+throw discards it. Both keep the invariant "the baseline describes one camera generation
+uniformly" — the alternative, per-chunk baselines, would let a half-finished run leave
+chunks straddling two camera sets with no cheap way to tell which.
+
 ## Narrowed validity-build loops clamp inward only; an unreached chunk is empty
 
 **Why:** building the validity mask by testing every voxel center against every

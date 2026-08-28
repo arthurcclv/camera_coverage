@@ -31,6 +31,7 @@ export type {
   SceneStats,
   SamplingStats,
   ComputeOptions,
+  RunStart,
   VisibilityEngine,
   Vec3,
   Quat,

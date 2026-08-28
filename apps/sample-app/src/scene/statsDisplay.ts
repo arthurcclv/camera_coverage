@@ -20,9 +20,16 @@ export function displayCoverageSummary(
   summary: CoverageSummary | null,
   enabledUnion: ZoneSummary | null,
   samplingActive: boolean,
+  enabledCameraIds: ReadonlySet<string>,
 ): CoverageSummary | null {
   if (!summary) return null;
-  if (!samplingActive || !enabledUnion) return summary;
+  // Since spec §5.4 the SDK summary carries an entry for every camera, disabled
+  // ones included (always 0). Drop them here — the one derivation point — rather
+  // than in each readout, so a new readout inherits the rule instead of having to
+  // remember it. The zone path already lists only enabled cameras.
+  if (!samplingActive || !enabledUnion) {
+    return { ...summary, perCamera: summary.perCamera.filter((c) => enabledCameraIds.has(c.id)) };
+  }
   return {
     ...summary,
     overallRate: enabledUnion.overallRate,

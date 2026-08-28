@@ -24,6 +24,8 @@ export interface PreparedCamera {
   viewProj: Mat4;
   /** Six frustum planes [a,b,c,d] with n·p + d ≥ 0 inside, for AABB pre-cull. */
   planes: Float32Array; // 6 * 4
+  /** `CameraConfig.enabled` resolved (§5.2); false ⇒ cleared from every activeMask. */
+  enabled: boolean;
 }
 
 /** CAM_WORDS = ceil(numCameras / 32), clamped to ≥ 1 (§7.1). */
@@ -77,6 +79,7 @@ export function prepareCamera(cam: CameraConfig): PreparedCamera {
     near,
     far,
     viewProj,
+    enabled: cam.enabled !== false,
     planes: extractFrustumPlanes(viewProj),
   };
 }

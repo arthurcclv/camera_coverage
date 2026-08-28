@@ -40,6 +40,9 @@ import { accessor } from '@linkervision/camera-coverage-sdk';
 
 // --- axisMapping / collapseAxisExtent / defaultSection (spec §13.1, §5.5) ----
 
+/** Every listed camera enabled, so bit index == list index (spec §5.4). */
+const allEnabled = (ids: string[]) => ({ ids, bits: ids.map((_, n) => n) });
+
 test('axisMapping: horizontal collapses Y, spans X×Z', () => {
   assert.deepEqual(axisMapping('horizontal'), { collapseAxis: 1, axisA: 0, axisB: 2 });
 });
@@ -336,7 +339,7 @@ test('computeSectionCells aggregates a fully-valid column across two chunks', ()
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
-    ['cam-a', 'cam-b'],
+    allEnabled(['cam-a', 'cam-b']),
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
   );
@@ -358,7 +361,7 @@ test('computeSectionCells colors a column with valid voxels even when it also cr
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
-    ['cam-a'],
+    allEnabled(['cam-a']),
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
   );
@@ -373,7 +376,7 @@ test('computeSectionCells colors a column with valid voxels even when it also cr
 test('computeSectionCells is transparent (not black) for an all-no-data column (§13.3)', () => {
   const chunk0 = denseChunk(0, [0, 0, 0], {}); // covers x=0,1 only
   // Section range x∈[2,4] → column walks x=2,3, both in the never-retained chunk1.
-  const cells = computeSectionCells(grid, accessorsFor([chunk0]), ['cam-a'], 1, {
+  const cells = computeSectionCells(grid, accessorsFor([chunk0]), allEnabled(['cam-a']), 1, {
     orientation: 'vertical-x',
     min: 2,
     max: 4,
@@ -390,7 +393,7 @@ test('computeSectionCells is black for a column entirely inside geometry (no val
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
-    ['cam-a'],
+    allEnabled(['cam-a']),
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
   );
@@ -402,7 +405,7 @@ test('computeSectionCells is black for a column entirely inside geometry (no val
 test('computeSectionCells: no-data wins over obstacle in a valueless column → transparent (§13.3)', () => {
   // x=0,1 obstacle (retained), x=2,3 no-data (chunk1 never retained). No valid voxel.
   const chunk0 = denseChunk(0, [0, 0, 0], { invalidAt: [[0, 0, 0], [1, 0, 0]] });
-  const cells = computeSectionCells(grid, accessorsFor([chunk0]), ['cam-a'], 1, {
+  const cells = computeSectionCells(grid, accessorsFor([chunk0]), allEnabled(['cam-a']), 1, {
     orientation: 'vertical-x',
     min: 0,
     max: 4,
@@ -415,7 +418,7 @@ test('computeSectionCells: no-data wins over obstacle in a valueless column → 
 test('computeSectionCells clips the column to the section range', () => {
   // Restrict to x in [0, 0.9] -> only global x=0 (chunk0) is walked.
   const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
-  const cells = computeSectionCells(grid, accessorsFor([chunk0]), ['cam-a'], 1, {
+  const cells = computeSectionCells(grid, accessorsFor([chunk0]), allEnabled(['cam-a']), 1, {
     orientation: 'vertical-x',
     min: 0,
     max: 0.9,
@@ -430,7 +433,7 @@ test('computeSectionCells restricts cells to the in-plane footprint and reports 
   // selects X columns 1..2 and Z column 0 only → a 2×1 sub-rectangle of columns.
   const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[1, 0, 0, 0b1]] }); // x=1: y=0 seen, y=1 blind
   const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b1], [0, 1, 0, 0b1]] }); // x=2: y=0,1 both seen
-  const cells = computeSectionCells(grid, accessorsFor([chunk0, chunk1]), ['cam-a'], 1, {
+  const cells = computeSectionCells(grid, accessorsFor([chunk0, chunk1]), allEnabled(['cam-a']), 1, {
     orientation: 'horizontal',
     min: 0,
     max: 2, // full Y column
@@ -454,7 +457,7 @@ test('computeSectionCells restricts cells to the in-plane footprint and reports 
 test('computeSectionCells with no footprint spans the whole grid (pre-footprint fallback, spec §13.3)', () => {
   const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] });
   const chunk1 = denseChunk(1, [2, 0, 0], {});
-  const cells = computeSectionCells(grid, accessorsFor([chunk0, chunk1]), ['cam-a'], 1, {
+  const cells = computeSectionCells(grid, accessorsFor([chunk0, chunk1]), allEnabled(['cam-a']), 1, {
     orientation: 'horizontal',
     min: 0,
     max: 2,
@@ -482,7 +485,7 @@ test('computeSectionCells skips out-of-zone voxels and aggregates only the in-zo
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
-    ['cam-a'],
+    allEnabled(['cam-a']),
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
     marked,
@@ -499,7 +502,7 @@ test('computeSectionCells makes a column transparent when no voxel is in the mar
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
-    ['cam-a'],
+    allEnabled(['cam-a']),
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
     () => false, // nothing in the marked set → every voxel skipped → empty column → transparent
@@ -518,7 +521,7 @@ test('computeSectionCells skips an out-of-zone voxel that is invalid (unsampled 
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
-    ['cam-a'],
+    allEnabled(['cam-a']),
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
     (cx: number) => cx < 2,
@@ -535,7 +538,7 @@ test('computeSectionCells still colors an in-zone column that mixes a valid voxe
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
-    ['cam-a'],
+    allEnabled(['cam-a']),
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
     (cx: number) => cx < 2,
@@ -553,7 +556,7 @@ test('computeSectionCells blacks an in-zone column that is entirely obstacle (§
   const cells = computeSectionCells(
     grid,
     accessorsFor([chunk0, chunk1]),
-    ['cam-a'],
+    allEnabled(['cam-a']),
     1,
     { orientation: 'vertical-x', min: 0, max: 4 },
     (cx: number) => cx < 1,
@@ -568,9 +571,9 @@ test('computeSectionCells: a column fully inside the marked set colors identical
   const chunk1 = denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b11]] });
   const section = { orientation: 'vertical-x' as const, min: 0, max: 4 };
   const accessors = accessorsFor([chunk0, chunk1]);
-  const unfiltered = computeSectionCells(grid, accessors, ['cam-a', 'cam-b'], 1, section);
+  const unfiltered = computeSectionCells(grid, accessors, allEnabled(['cam-a', 'cam-b']), 1, section);
   // A filter marking the whole workspace must leave the aggregation unchanged.
-  const filtered = computeSectionCells(grid, accessors, ['cam-a', 'cam-b'], 1, section, () => true);
+  const filtered = computeSectionCells(grid, accessors, allEnabled(['cam-a', 'cam-b']), 1, section, () => true);
   const at = (g: SectionCellGrid) => g.cells[0 + g.dimsA * 0];
   assert.equal(at(filtered).valid, true);
   assert.equal(at(filtered).meanFraction, at(unfiltered).meanFraction);
@@ -615,7 +618,7 @@ test('sectionHeatmapTextureData: obstacle cells are opaque black, transparent ce
       { valid: true, black: false, meanFraction: 0.5, maxFraction: 0.5, minFraction: 0.5, blindFraction: 0, seenWords: new Uint32Array(1) },
     ],
     camWords: 1,
-    cameraIds: ['cam-a'],
+    cameraIds: ['cam-a'], cameraBits: [0],
   };
   const data = sectionHeatmapTextureData(cellGrid, 'mean');
   assert.deepEqual([data[0], data[1], data[2], data[3]], [0, 0, 0, 255]); // obstacle → opaque black
@@ -633,7 +636,7 @@ test('averageDisplayValue averages the aggregation-selected value over colored c
       { valid: true, black: false, meanFraction: 0.4, maxFraction: 0.9, minFraction: 0.1, blindFraction: 0.3, seenWords: new Uint32Array(1) },
     ],
     camWords: 1,
-    cameraIds: [],
+    cameraIds: [], cameraBits: [],
   };
   assert.equal(averageDisplayValue(cellGrid, 'mean'), 0.4);
   assert.equal(averageDisplayValue(cellGrid, 'max'), 0.9);
@@ -646,7 +649,7 @@ test('averageDisplayValue is 0 with no colored cells', () => {
     dimsB: 1,
     cells: [{ valid: false, black: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }],
     camWords: 1,
-    cameraIds: [],
+    cameraIds: [], cameraBits: [],
   };
   assert.equal(averageDisplayValue(cellGrid, 'mean'), 0);
 });
@@ -663,7 +666,7 @@ test('computeSectionStats counts colored + obstacle in the total and excludes tr
       { valid: true, black: false, meanFraction: 0.5, maxFraction: 0.8, minFraction: 0.2, blindFraction: 0, seenWords: new Uint32Array([0b1]) },
     ],
     camWords: 1,
-    cameraIds: ['cam-a', 'cam-b'],
+    cameraIds: ['cam-a', 'cam-b'], cameraBits: [0, 1],
   };
   const stats = computeSectionStats(cellGrid);
   assert.equal(stats.totalCells, 2); // colored + obstacle; transparent excluded
@@ -685,7 +688,7 @@ test('computeSectionStats counts a fully-blind column as a blind cell', () => {
     dimsB: 1,
     cells: [{ valid: true, black: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 1, seenWords: new Uint32Array(1) }],
     camWords: 1,
-    cameraIds: [],
+    cameraIds: [], cameraBits: [],
   };
   const stats = computeSectionStats(cellGrid);
   assert.equal(stats.blindCells, 1);
@@ -698,7 +701,7 @@ test('computeSectionStats: no colored cells yields zeroed numbers, not NaN', () 
     dimsB: 1,
     cells: [{ valid: false, black: false, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(1) }],
     camWords: 1,
-    cameraIds: ['cam-a'],
+    cameraIds: ['cam-a'], cameraBits: [0],
   };
   const stats = computeSectionStats(cellGrid);
   assert.equal(stats.sectionCoverage, 0);
@@ -749,4 +752,132 @@ test('SectionHeatmapStore.clear() discards the retained run (spec §14.4)', () =
   store.clear();
   assert.equal(store.hasRun(), false);
   assert.equal(store.computeCells({ orientation: 'vertical-x', min: 0, max: 4 }), null);
+});
+
+test('a disabled camera does not inflate the coverage denominator (spec §5.4, §13.3)', () => {
+  // Three cameras passed to setCameras, the middle one disabled. Voxel (0,0,0)
+  // is seen by bits 0 and 2 — i.e. by both *enabled* cameras, so its fraction
+  // must be 1. Counting the disabled slot would cap it at 2/3 and every cell in
+  // the workspace would read as under-covered.
+  const chunk0 = denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b101]] });
+  const chunk1 = denseChunk(1, [2, 0, 0], {});
+  const cams = { ids: ['cam-a', 'cam-c'], bits: [0, 2] };
+  const cells = computeSectionCells(grid, accessorsFor([chunk0, chunk1]), cams, 1, {
+    orientation: 'vertical-x',
+    min: 0,
+    max: 4,
+  });
+  const cell = cells.cells[0];
+  assert.equal(cell.maxFraction, 1, 'seen by both enabled cameras ⇒ fully covered');
+  assert.deepEqual(cells.cameraIds, ['cam-a', 'cam-c']);
+  assert.deepEqual(cells.cameraBits, [0, 2]);
+});
+
+test('computeSectionStats reads each camera at its own mask bit, not its list index (spec §5.4)', () => {
+  // seenWords has bits 0 and 2 set. With 'cam-c' at bit 2, both enabled cameras
+  // register; reading by list index would look at bit 1 and miss 'cam-c'.
+  const stats = computeSectionStats({
+    dimsA: 1,
+    dimsB: 1,
+    camWords: 1,
+    cameraIds: ['cam-a', 'cam-c'],
+    cameraBits: [0, 2],
+    extentA: { min: 0, max: 1 },
+    extentB: { min: 0, max: 1 },
+    cells: [
+      {
+        valid: true,
+        black: false,
+        meanFraction: 1,
+        maxFraction: 1,
+        minFraction: 1,
+        blindFraction: 0,
+        seenWords: new Uint32Array([0b101]),
+      },
+    ],
+  });
+  assert.deepEqual(stats.perCamera, [
+    { id: 'cam-a', seenFraction: 1 },
+    { id: 'cam-c', seenFraction: 1 },
+  ]);
+});
+
+// --- Cell-grid cache keyed on the chunks a section reads (spec §13.4) --------
+
+const CAMS_AB = [
+  { id: 'cam-a', enabled: true },
+  { id: 'cam-b', enabled: true },
+];
+
+/** Store over the 4×2×2 grid: chunk 0 spans x∈[0,2), chunk 1 spans x∈[2,4). */
+function heatStore(chunks: ChunkResult[]): SectionHeatmapStore {
+  const s = new SectionHeatmapStore();
+  s.reset(grid, CAMS_AB);
+  for (const c of chunks) s.addChunk(c);
+  return s;
+}
+
+const FULL_SECTION = {
+  orientation: 'vertical-z' as const,
+  min: 0,
+  max: 2,
+  minA: 0,
+  maxA: 4,
+  minB: 0,
+  maxB: 2,
+};
+/** Footprint confined to chunk 1's half of X. */
+const RIGHT_SECTION = { ...FULL_SECTION, minA: 2.5, maxA: 4 };
+
+test('an unchanged section is served from cache, not recomputed (spec §13.4)', () => {
+  const s = heatStore([
+    denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] }),
+    denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b11]] }),
+  ]);
+  const first = s.computeCells(FULL_SECTION, null);
+  const second = s.computeCells(FULL_SECTION, null);
+  assert.equal(second, first, 'the identical grid object comes back');
+});
+
+test('replacing a chunk the section reads invalidates its cached grid (spec §13.4)', () => {
+  const s = heatStore([
+    denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] }),
+    denseChunk(1, [2, 0, 0], {}),
+  ]);
+  const before = s.computeCells(FULL_SECTION, null)!;
+  s.addChunk(denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b11]] }));
+  const after = s.computeCells(FULL_SECTION, null)!;
+  assert.notEqual(after, before, 'a stale grid must not be served');
+  assert.ok(
+    after.cells.some((c, n) => c.maxFraction !== before.cells[n].maxFraction),
+    'and the new masks are reflected',
+  );
+});
+
+test('a section keeps its cached grid when a chunk outside its footprint changes (spec §13.4)', () => {
+  // The point of the cache under an incremental run: chunks are partitioned on
+  // XZ, so a section whose footprint misses chunk 0 cannot read it.
+  const s = heatStore([
+    denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] }),
+    denseChunk(1, [2, 0, 0], { visibleAt: [[0, 0, 0, 0b11]] }),
+  ]);
+  const before = s.computeCells(RIGHT_SECTION, null);
+  s.addChunk(denseChunk(0, [0, 0, 0], { visibleAt: [[1, 1, 1, 0b11]] }));
+  assert.equal(s.computeCells(RIGHT_SECTION, null), before, 'chunk 0 is not a dependency');
+
+  // ...but the full-width section does depend on it.
+  const fullBefore = s.computeCells(FULL_SECTION, null);
+  s.addChunk(denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b11]] }));
+  assert.notEqual(s.computeCells(FULL_SECTION, null), fullBefore);
+});
+
+test('a different marked filter is not served from the cache (§7.3, §13.4)', () => {
+  const s = heatStore([
+    denseChunk(0, [0, 0, 0], { visibleAt: [[0, 0, 0, 0b1]] }),
+    denseChunk(1, [2, 0, 0], {}),
+  ]);
+  const unfiltered = s.computeCells(FULL_SECTION, null);
+  const filtered = s.computeCells(FULL_SECTION, () => false);
+  assert.notEqual(filtered, unfiltered);
+  assert.ok(filtered!.cells.every((c) => !c.valid), 'everything filtered out reads as no-data');
 });

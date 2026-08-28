@@ -56,6 +56,18 @@ export interface CameraConfig {
   aspect?: number; // default 16/9
   near?: number; // default 0.1
   far?: number; // effective detection range, default 50
+  /**
+   * Default true. A disabled camera keeps its global camera index (§7.1) but is
+   * cleared from every chunk's active mask, so its bit is 0 everywhere and its
+   * `coverageRate` is 0; it is never flagged `CAMERA_INSIDE_GEOMETRY`.
+   *
+   * Keeping the slot rather than dropping the camera is the point (§5.2): mask
+   * bits are positional, so a caller that filtered its own list would renumber
+   * every later camera and disqualify the next run from incremental recompute
+   * (§13.1). The cost is that disabled cameras still count against MAX_CAMERAS
+   * and can widen CAM_WORDS.
+   */
+  enabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,11 +170,46 @@ export interface SamplingStats {
   activeChunks: number;
 }
 
+/** What a run is about to do, reported once before its first chunk (§13.1, §16.1). */
+export interface RunStart {
+  /**
+   * `false` ⇒ every non-empty chunk will be streamed, so a caller that
+   * accumulates chunks should clear its store first. `true` ⇒ only `chunkIds`
+   * will be streamed, and the caller must *replace* those chunks in a store
+   * keyed by `chunkId`, leaving the rest standing. Clearing on an incremental
+   * run silently drops most of the scene — no error is raised.
+   */
+  incremental: boolean;
+  /** The chunks this run will compute, in the order it will compute them. */
+  chunkIds: number[];
+}
+
 export interface ComputeOptions {
   mode?: 1 | 2;
   threshold?: number; // Mode 2, default 1
   chunks?: number[]; // omitted = all
   onChunkDone?: (chunkId: number, result: ChunkResult) => void;
+  /** Fired once before the first chunk (§16.1). */
+  onRunStart?: (info: RunStart) => void;
+  /**
+   * Request incremental recompute (§13.1): when only camera poses/enabled flags
+   * changed since the last completed run, compute only the chunks those cameras'
+   * old ∪ new frusta touch. The engine may decline for any reason and run full;
+   * the decision is always reported through `onRunStart`. Ignored when `chunks`
+   * is given. Default false.
+   */
+  incremental?: boolean;
+  /**
+   * Abort the run at the next chunk boundary (§13.2). The promise then rejects
+   * with `COMPUTE_CANCELED`, the incremental baseline is dropped, and the engine
+   * stays usable. A chunk already dispatched always finishes — Passes 1–3 are one
+   * submission with no interruption point — so worst-case latency is one chunk.
+   *
+   * Supplying a signal makes the engine yield to the macrotask queue between
+   * chunks, so that a cancel arriving over the Worker boundary can actually be
+   * delivered mid-run. Omit it and that cost is not paid.
+   */
+  signal?: AbortSignal;
   /**
    * Chunk-level camera pre-cull (§7.2). Default true. Toggling it must never
    * change the output (acceptance test §18.5a) — exposed for that test.
@@ -190,6 +237,8 @@ export const EngineErrorCode = {
   CAMERA_INSIDE_GEOMETRY: 'CAMERA_INSIDE_GEOMETRY',
   DEVICE_LOST: 'DEVICE_LOST',
   INVALID_STATE: 'INVALID_STATE',
+  /** A `compute()` was aborted through its `signal` (§13.2). Not a failure. */
+  COMPUTE_CANCELED: 'COMPUTE_CANCELED',
 } as const;
 export type EngineErrorCode = (typeof EngineErrorCode)[keyof typeof EngineErrorCode];
 

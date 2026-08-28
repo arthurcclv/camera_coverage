@@ -173,3 +173,67 @@ test('webgpu: oversized staging readback is rejected, not left to mapAsync', { s
   assert.ok(after.validVoxels > 0, 'engine still usable after the rejected chunk');
   engine.dispose();
 });
+
+/**
+ * §18.6g on the real WGSL path. Incremental recompute is engine orchestration
+ * rather than shader code, but it changes *which* chunks reach the GPU and
+ * reuses statistics the GPU produced on an earlier submission — so the
+ * equivalence claim is only proven where the compute actually runs.
+ */
+test(
+  'webgpu: an incremental run matches a full run at the same cameras',
+  { skip: !available && 'no WebGPU adapter available' },
+  async () => {
+    const WS_CHUNKED: WorkspaceConfig = {
+      worldMin: [0, 0, 0],
+      worldMax: [12, 3, 12],
+      voxelSize: 0.3,
+      chunkSizeXZ: 3,
+    };
+    const wall = wallZ(6, 0, 12, 0, 3);
+    const shortCam = (id: string, position: [number, number, number]) =>
+      camera(id, position, LOOK_NEG_Z, { fov: 60, far: 2.5 });
+    const c0 = [shortCam('a', [1.5, 1.5, 10.5]), shortCam('b', [10.5, 1.5, 4.0])];
+    const c1 = [shortCam('a', [1.9, 1.5, 10.3]), shortCam('b', [10.5, 1.5, 4.0])];
+
+    const engine = new CoverageEngine({ onWarning: () => {} });
+    await engine.init({ ...WS_CHUNKED, backend: 'webgpu' });
+    await engine.loadScene(wall);
+    await engine.setSampling({ regions: [{ type: 'full' }] });
+
+    engine.setCameras(c0);
+    await engine.compute({ onChunkDone: () => {} });
+
+    engine.setCameras(c1);
+    let runStart: { incremental: boolean; chunkIds: number[] } | null = null;
+    const incr = await engine.compute({
+      incremental: true,
+      onRunStart: (i) => (runStart = { ...i }),
+      onChunkDone: () => {},
+    });
+    engine.dispose();
+
+    const fresh = new CoverageEngine({ onWarning: () => {} });
+    await fresh.init({ ...WS_CHUNKED, backend: 'webgpu' });
+    await fresh.loadScene(wall);
+    await fresh.setSampling({ regions: [{ type: 'full' }] });
+    fresh.setCameras(c1);
+    const full = await fresh.compute({ onChunkDone: () => {} });
+    fresh.dispose();
+
+    assert.equal(runStart!.incremental, true);
+    assert.ok(runStart!.chunkIds.length < 16, 'the nudge must not dirty every chunk');
+    assert.equal(incr.validVoxels, full.validVoxels);
+    assert.ok(Math.abs(incr.overallRate - full.overallRate) < 1e-9);
+    assert.deepEqual(
+      incr.perCamera.map((p) => p.id),
+      full.perCamera.map((p) => p.id),
+    );
+    for (let i = 0; i < incr.perCamera.length; i++) {
+      assert.ok(
+        Math.abs(incr.perCamera[i].coverageRate - full.perCamera[i].coverageRate) < 1e-9,
+        `camera ${incr.perCamera[i].id}: ${incr.perCamera[i].coverageRate} vs ${full.perCamera[i].coverageRate}`,
+      );
+    }
+  },
+);

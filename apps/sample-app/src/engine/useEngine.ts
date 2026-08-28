@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   EngineError,
+  EngineErrorCode,
   WorkerClient,
   type CameraConfig,
   type ComputeOptions,
@@ -187,6 +188,13 @@ export function useEngine() {
         setState((s) => ({ ...s, status: 'ready' }));
         return summary;
       } catch (err) {
+        // A cancellation is this app asking the engine to stop (SDK spec §13.2),
+        // not a failure: surfacing it would show an error banner for a run the
+        // user's own edit superseded, and stop Auto-run from retrying (§11).
+        if (err instanceof EngineError && err.code === EngineErrorCode.COMPUTE_CANCELED) {
+          setState((s) => ({ ...s, status: 'ready' }));
+          return null;
+        }
         setState((s) => ({ ...s, status: 'error', errorMessage: describeError(err) }));
         return null;
       }

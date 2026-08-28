@@ -119,10 +119,24 @@ interface CameraConfig {
   aspect: number;   // default 16/9
   near: number;     // default 0.1, used as the frustum near plane
   far: number;      // effective detection range (beyond it = invisible), default 50
+  enabled: boolean; // default true; false = keeps its slot, contributes nothing
 }
 ```
 
 In this system, `far` means the **camera's effective detection range**, not a rendering clip plane; the default should reflect a realistic CCTV effective range (50 m) rather than 200 m.
+
+`enabled` defaults to `true`. A camera with `enabled: false` stays in the list and
+**keeps its global camera index** (§7.1) — it is simply never set in any chunk's
+`activeMask` (§7.2), so its mask bit is 0 everywhere, its `visibleCount` is 0, and its
+`coverageRate` is 0. It is not flagged `CAMERA_INSIDE_GEOMETRY` (§17): a camera the
+caller switched off is not a misconfiguration to warn about.
+
+Retaining the slot rather than dropping the camera from the list is deliberate. Mask
+bits are positional, so removing a disabled camera would renumber every camera after it
+and invalidate every retained result — which is exactly what disqualifies a camera-list
+edit from an incremental run (§13.1). With `enabled`, toggling a camera is an
+index-stable edit and stays incremental. The cost is that disabled cameras still count
+against the 128 limit and can still widen `CAM_WORDS`.
 
 ---
 
@@ -279,6 +293,11 @@ Before dispatching each chunk, the CPU runs a frustum–chunk-AABB intersection 
 
 - Pass 1 / Pass 2 run frustum and ray tests only for the set bits of `activeMask`; actual GPU workload is determined by "how many cameras touch this chunk" (typically far fewer than numCameras in large scenes).
 - Pre-cull is conservative (it only excludes cameras that definitely do not intersect); **toggling pre-cull must not change the output** (bit-exact; included in the acceptance tests).
+- A camera that is disabled (`enabled: false`, §5.2) or flagged `CAMERA_INSIDE_GEOMETRY` (§17) is cleared from `activeMask` for **every** chunk, independently of the frustum test and of the `precull` option.
+
+The same conservative frustum–AABB test also decides which chunks a moved camera can
+have affected, and so drives the dirty set of an incremental run (§13.1). Because the
+test has no false negatives, a chunk it rejects is guaranteed unaffected.
 
 Frustum containment test (for point p):
 
@@ -598,7 +617,142 @@ The scene is fixed → the BVH is immutable. When cameras are added, removed, or
 
 1. The CPU recomputes viewProj for affected cameras and updates only the Camera buffer (`writeBuffer`, ≤ 12 KB @ 128 cameras)
 2. Re-run Passes 1–3 for all chunks (no BVH rebuild, no occupancy rebuild, **no validity rebuild** — the mask is camera-independent and served from the §6.4 cache)
-3. Interactive optimization: recompute only the chunks touched by the union of the moving camera's old and new frusta
+3. **Interactive optimization** (§13.1): when only camera poses changed, recompute only the chunks touched by the union of each moved camera's old and new frusta
+
+### 13.1 Incremental Recompute
+
+Step 2 is the correct-but-unconditional path: every chunk pays for every edit. Under a
+gizmo drag the host re-runs `compute()` many times per second while only one camera has
+moved by centimetres, so nearly all of that work reproduces the previous answer. An
+**incremental run** recomputes only the chunks that can have changed and reuses the
+retained per-chunk statistics for the rest.
+
+Incremental recompute is **opt-in** — `compute({ incremental: true })` (§16.1). Omitted
+or `false` runs the full path of step 2, unchanged. The engine may always decline and
+run full; a caller cannot distinguish a declined run from a full one except through
+`onRunStart` (§16.1).
+
+#### Baseline
+
+The engine retains a **baseline** describing the last fully completed `compute()`:
+
+| Retained | Purpose |
+|---|---|
+| Ordered camera ids, and each camera's prepared pose/intrinsics | Eligibility check + the "old frustum" half of the dirty set |
+| `mode`, `threshold`, and whether per-voxel output was emitted (§11.1) | Eligibility check — retained results describe *those* options |
+| Per chunk: `{ validCount, coveredCount, visibleCount[] }` | Re-summing the whole-scene `CoverageSummary` |
+
+The baseline holds **statistics only, never voxel masks**. It is a few KB (a
+`visibleCount` per chunk per camera); the per-voxel data belongs to whoever consumed
+`onChunkDone`, and duplicating it inside the engine would defeat §9.4's memory budget.
+
+The baseline is **established or advanced only by a `compute()` that ran to completion
+over every chunk it was responsible for**. It is **discarded** by `loadScene()`,
+`setSampling()`, any re-`init()` (a `voxelSize` change), and by a `compute()` that
+threw. `setCameras()` does **not** touch it — the baseline describes cameras as of the
+last completed *run*, not the last *set*, so a host that calls `setCameras()` and then
+abandons the run stays correct.
+
+A `compute()` given an explicit `chunks` list (§16.1) leaves the baseline **entirely
+untouched** — it neither advances the camera set nor rewrites retained statistics, and
+it reports over just the chunks it was given, as it always has. It is a caller-scoped
+query, not a run over the scene. Leaving the baseline alone is conservative, not wrong:
+the next incremental diff still measures from the older poses and therefore re-dirties
+anything the scoped run touched.
+
+Every chunk a non-scoped run visits records a statistics line, **including one with no
+valid voxels**, which records an explicit zero rather than nothing. `plan()` requires a
+line per chunk before it will run incrementally, so omitting empty chunks would leave a
+zone-restricted scene — where most chunks are empty — permanently ineligible.
+
+#### Eligibility
+
+An incremental run requires **index-stable cameras and unchanged result semantics**. The
+engine runs full whenever any of these holds:
+
+- there is no baseline;
+- the ordered list of camera **ids** differs from the baseline's in membership or order — an add, a delete, or a reorder renumbers mask bits (§7.1) and invalidates every retained mask the host is holding;
+- `mode`, `threshold`, or the presence of `onChunkDone` differs from the baseline's — retained statistics describe the baseline's options, and a host that previously ran stats-only never received the masks a chunk-skipping run would decline to re-send.
+
+`precull` is deliberately **not** an eligibility input: §7.2 requires it to be lossless,
+so a run may toggle it freely without invalidating anything.
+
+Toggling `enabled` (§5.2) is index-stable and therefore **eligible** — that is the
+reason the flag exists rather than the host filtering its own list.
+
+#### Dirty set
+
+With the id list fixed, a camera is **changed** if any of its pose or intrinsic fields
+(`position`, `rotation`, `fov`, `aspect`, `near`, `far`, `enabled`) differs from the
+baseline's, compared exactly — no epsilon. Then:
+
+```
+dirty = ⋃  { chunks whose AABB intersects cam_old's frustum }
+      over  ∪ { chunks whose AABB intersects cam_new's frustum }
+    changed
+    cameras
+```
+
+using the conservative §7.2 frustum–AABB test for both poses. A disabled camera
+contributes no frustum for the pose in which it was disabled.
+
+This is sound because a camera's influence is bounded by its own frustum: a voxel
+outside both the old and the new frustum of every changed camera was not visible to any
+changed camera before the edit and is not after it, and the bits of unchanged cameras
+are untouched by definition. Occlusion cannot leak across the boundary either — an
+occluder only ever *removes* visibility along a ray that lies inside the frustum casting
+it. Because the frustum test has no false negatives, the set is conservative: it may
+contain chunks whose result is unchanged, never omit one whose result changed.
+
+There is **no dirty-set size threshold**. A run that dirties most of the scene costs
+proportionally most of a full run plus an O(chunks × changed cameras) diff, so there is
+no cliff to guard against and no benefit to switching strategies part-way.
+
+#### Execution and reporting
+
+An incremental run:
+
+1. reports `{ incremental: true, chunkIds: dirty }` through `onRunStart` (§16.1) **before** the first chunk;
+2. runs Passes 1–3 for each dirty chunk, over **all** cameras — a recomputed chunk is recomputed whole, so its masks never mix camera generations;
+3. invokes `onChunkDone` for dirty chunks **only**;
+4. overwrites those chunks' retained statistics, then sums **all** retained statistics into the returned `CoverageSummary` — `overallRate`, `perCamera`, and `validVoxels` describe the **whole scene**, exactly as a full run's do;
+5. advances the baseline.
+
+Consequently a host must treat `onChunkDone` on an incremental run as **replace this
+chunk**, not **append to a fresh run**; see §16.1.
+
+**Equivalence requirement.** For any eligible edit, an incremental run must produce a
+`CoverageSummary` and per-chunk results bit-identical to a full `compute()` at the same
+camera configuration. This is an acceptance criterion (§18, 6g), not merely an intent.
+
+### 13.2 Cancellation
+
+A `compute()` accepts an `AbortSignal` (§16.1). Cancellation is **cooperative and
+chunk-granular**: the engine checks the signal before starting each chunk and, once
+aborted, stops the loop and rejects with `COMPUTE_CANCELED` (§17). A chunk already in
+flight always runs to completion — Passes 1–3 are a single GPU submission (§11.1) with
+no interruption point inside them — so the worst-case latency of a cancel is one
+chunk's compute, not one run's.
+
+A cancelled run **discards the incremental baseline** (§13.1). It stopped part-way, so
+its retained statistics straddle two camera generations, exactly the condition a thrown
+`compute()` already drops for.
+
+Two mechanics make this work rather than merely look like it works:
+
+- **The event loop must actually turn.** The CPU backend's `computeChunk` is synchronous,
+  so `await`ing it drains microtasks only — and a cancel arriving over the Worker
+  boundary is a *message*, a macrotask. When a signal is supplied, the engine therefore
+  yields to the macrotask queue between chunks. The WebGPU backend already yields at
+  `mapAsync`, but the yield is unconditional so both backends behave identically. It is
+  skipped entirely when no signal is given, so an uncancellable run pays nothing.
+- **Callbacks cannot cross the Worker boundary**, so the signal does not either. The
+  client sends the `compute` request, and on abort posts a separate `cancel` message
+  naming that request; the host aborts the controller it created for it (§16.1).
+
+Cancellation is a **caller-side optimization, never a correctness mechanism**: a caller
+that never cancels behaves exactly as before, and a cancelled run leaves the engine
+usable and self-consistent — its next `compute()` is simply a full one.
 
 ---
 
@@ -624,6 +778,8 @@ Raw scale: 200M voxels × 128 cameras = 25.6B rays — not viable as an interact
 | Validity cache (§6.4) | validity is built once per (scene, sampling); camera-only edits pay none of that CPU cost |
 | Single submission per chunk (§11.1) | Pass 2 is sized from the cached `validCount`, so no readback gates a dispatch: one submit and one map per chunk instead of three and three |
 | Conditional per-voxel readback (§11.1) | a `compute()` with no `onChunkDone` transfers and allocates only the stats buffer |
+| Incremental recompute (§13.1) | a pose-only edit runs only the chunks the moved cameras' old ∪ new frusta touch; under a gizmo drag that is typically a handful of chunks out of the workspace, so cost tracks the edit rather than the scene |
+| Cancellation (§13.2) | a run whose result is already known to be unwanted — superseded by a resolution, sampling, or scene change — stops at the next chunk boundary instead of running to completion |
 
 **Performance targets (acceptance baseline, RTX 3060 class)**: Passes 1–3 combined for 500k candidates × 8 cameras × 500k triangles < 500 ms; full workspace (100 chunks, height band Y = 0.5–2.0 m, 8 cameras) < 30 s.
 
@@ -655,9 +811,17 @@ interface VisibilityEngine {
     mode?: 1 | 2;
     threshold?: number;                                   // Mode 2, default 1
     chunks?: number[];                                    // omitted = all
+    incremental?: boolean;                                // §13.1, default false
+    signal?: AbortSignal;                                 // §13.2, cancel at a chunk boundary
+    onRunStart?: (info: RunStart) => void;                // fired before the first chunk
     onChunkDone?: (chunkId: number, result: ChunkResult) => void;  // streaming callback
   }): Promise<CoverageSummary>;
   dispose(): void;
+}
+
+interface RunStart {
+  incremental: boolean;   // false ⇒ every non-empty chunk will be streamed
+  chunkIds: number[];     // the chunks this run will compute, in the order it will
 }
 
 interface ChunkResult {
@@ -704,6 +868,44 @@ entirely (§11.1). Because callbacks cannot cross a Worker boundary, the worker 
 derives a boolean from the caller's `onChunkDone` and sends it with the compute request;
 the host installs a chunk stream only when it is set.
 
+`incremental: true` requests the §13.1 optimization. The engine decides whether it can
+honour it and **always** reports the decision through `onRunStart`, which fires exactly
+once per run, before any chunk. The two callbacks form one contract:
+
+- `incremental === false` — the run streams every non-empty chunk. A host that
+  accumulates chunks should **clear** its store first, as it would for any full run.
+- `incremental === true` — the run streams only the chunks in `chunkIds`. A host must
+  **not** clear its store; it must key retained chunks by `chunkId` and replace the ones
+  it receives, leaving the rest standing. Clearing here would silently drop the majority
+  of the scene, and no error would be raised.
+
+`signal` requests cancellation (§13.2). An `AbortSignal` cannot be cloned across the
+Worker boundary any more than a callback can, so the client keeps the signal on the main
+thread and, when it fires, posts a `cancel` message naming the in-flight compute; the
+host aborts the controller it made for that request. The rejection surfaces as
+`COMPUTE_CANCELED` (§17) on the original `compute()` promise either way, so a caller
+cannot tell whether the engine was in-process or in a Worker.
+
+`onRunStart` crosses the Worker boundary the same way `onChunkDone` does: the client
+sends `incremental` as a plain field on the compute request, and the host posts a
+`runStart` message before the first `chunk` message.
+
+**Host-side chunk consumption.** `installHost` accepts `onRunStart` and `onChunk` hooks
+of its own. When `onChunk` is supplied, the host feeds each `ChunkResult` to it and
+**never posts a `chunk` message**: the consumer lives in the worker, so the per-voxel
+data — the megabytes per chunk of §9.4 — never crosses the boundary at all. Such a host
+always runs with per-voxel output; the client's stats-only intent (§11.1) does not apply,
+because there is a local consumer either way.
+
+This exists because "off the main thread" and "in the engine's worker" are the same
+place. A host that ships chunks out only for the caller to reduce them to a few
+kilobytes of derived data pays the transfer, the main thread's decode, and the main
+thread's aggregation — all avoidable by reducing them where they were produced. The
+hooks are the seam that lets a caller do that without the SDK knowing anything about
+what it derives. The `CoverageSummary` a run returns
+covers the whole scene either way (§13.1), so a host that ignores `onRunStart` entirely
+and requests full runs behaves exactly as before this feature existed.
+
 All large TypedArrays between the Worker and the main thread are passed as **transferables**; structured-clone copying is forbidden.
 
 ### 16.2 Visualization Strategies (2M+ voxels must not be drawn as raw cubes)
@@ -734,6 +936,7 @@ All large TypedArrays between the Worker and the main thread are passed as **tra
 | Camera located inside SOLID | that camera's coverage is recorded as 0, with warning `CAMERA_INSIDE_GEOMETRY` |
 | Device lost | event reported to the UI; engine enters the disposed state and requires a new `init` |
 | Malformed mesh (NaN, degenerate faces) | cleaned at load time; the number of removed elements is reported |
+| `compute()` aborted via its signal (§13.2) | rejects with `COMPUTE_CANCELED` at the next chunk boundary; the incremental baseline is dropped and the engine stays usable. Not a failure — a caller that cancels deliberately should not surface it as an error |
 
 ---
 
@@ -754,6 +957,11 @@ All large TypedArrays between the Worker and the main thread are passed as **tra
 6d. *One submission per chunk* (§11.1): the WebGPU backend records exactly one `submit()` and one buffer mapping per computed chunk (internal counters), while its visibility output stays bit-identical to the CPU reference
 6e. *Regions outside a chunk* (§6.4 Build): with a single `box` region covering one corner of a multi-chunk workspace, every chunk the box does not reach reports `validCount === 0`, and a `heightBand` lying entirely above the workspace yields `validVoxels === 0` — the narrowed build loops must not manufacture an edge plane or line of valid voxels
 6f. *Oversized readback* (§11.1): a chunk whose combined staging size exceeds `maxBufferSize` throws `SCENE_TOO_LARGE` instead of failing inside `mapAsync`, and the staging plan's size is the sum of the segments it carries
+6g. *Incremental equivalence* (§13.1): for a fixed scene and sampling, a full `compute()` at camera set C1 and an incremental `compute()` that reaches C1 from a baseline at C0 (pose-only edits) produce a bit-identical `CoverageSummary` **and** bit-identical per-chunk visibility for every chunk the incremental run emitted — asserted on both backends
+6h. *Incremental actually skips work* (§13.1): the same run dispatches the backend only for the chunks reported in `onRunStart.chunkIds`, and that set is a strict subset of the workspace when one camera moves a short distance — a regression that quietly recomputes everything still satisfies 6g, so this counter assertion is what proves the optimization is live
+6i. *Incremental fallback* (§13.1): adding, deleting, or reordering a camera, or changing `mode`/`threshold`/`onChunkDone` presence between runs, reports `onRunStart.incremental === false` and streams every non-empty chunk; toggling `enabled` (§5.2) stays `true`; toggling `precull` stays `true`
+6j. *Cancellation* (§13.2): a `compute()` aborted mid-run rejects with `COMPUTE_CANCELED`, stops dispatching further chunks, and leaves the engine usable — a subsequent `compute()` returns a summary bit-identical to an uninterrupted run at the same cameras. Aborting before the first chunk dispatches nothing at all; aborting a run that already finished is a no-op
+6k. *Cancellation drops the baseline* (§13.2): the `compute()` following a cancelled one reports `onRunStart.incremental === false` even when the camera edit would otherwise have been eligible
 7. *Mode 2*: voxels at a door-frame edge have count ∈ (0, 8); threshold behavior is correct
 
 **Performance**: the baselines of §15. **Memory**: GPU residency throughout compute ≤ the declared requiredLimits.

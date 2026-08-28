@@ -94,3 +94,90 @@ test('every hue is fully saturated: one channel 1, one 0', () => {
     assert.ok(Math.min(...rgb) < 1e-9, `min at hue ${h}: ${rgb}`);
   }
 });
+
+// --- Chunk-keyed retention + batched rebuild (spec §8, §9) ------------------
+
+import * as THREE from 'three';
+import { CoverageOverlay } from '../src/scene/coverageOverlay.ts';
+
+/** The instance count actually uploaded to the renderer — one per drawn voxel. */
+function drawn(overlay: CoverageOverlay): number {
+  const mesh = overlay.object.children.find((c) => (c as THREE.InstancedMesh).isInstancedMesh);
+  return mesh ? (mesh as THREE.InstancedMesh).count : 0;
+}
+
+/** A dense 2×1×1 chunk with both voxels valid, seen by `cams` cameras. */
+function simpleChunk(chunkId: number, cams: number): ChunkResult {
+  const mask = cams === 0 ? 0 : (1 << cams) - 1;
+  return {
+    chunkId,
+    encoding: 'dense',
+    dims: [2, 1, 1],
+    origin: [chunkId * 2, 0, 0],
+    voxelSize: 1,
+    camWords: 1,
+    mode: 1,
+    visibility: new Uint32Array([mask, mask]),
+    validity: new Uint32Array([0b11]),
+    stats: { validCount: 2, coveredCount: cams > 0 ? 2 : 0, visibleCount: [] },
+  };
+}
+
+test('a re-sent chunk replaces its leaves rather than piling on (spec §9)', () => {
+  const overlay = new CoverageOverlay();
+  overlay.reset();
+  overlay.addChunk(simpleChunk(0, 1));
+  overlay.addChunk(simpleChunk(1, 1));
+  overlay.flush();
+  assert.equal(drawn(overlay), 4, 'two chunks × two voxels');
+
+  // What an incremental run does: re-send chunk 0 only, without a reset.
+  overlay.beginRun();
+  overlay.addChunk(simpleChunk(0, 2));
+  overlay.flush();
+  assert.equal(drawn(overlay), 4, 'chunk 0 replaced, chunk 1 still standing');
+  overlay.dispose();
+});
+
+test('an incremental run leaves untouched chunks in place (spec §8)', () => {
+  const overlay = new CoverageOverlay();
+  overlay.reset();
+  for (let id = 0; id < 5; id++) overlay.addChunk(simpleChunk(id, 1));
+  overlay.flush();
+  assert.equal(drawn(overlay), 10);
+
+  // The failure this guards: calling reset() on an incremental run would blank
+  // the four chunks the run never re-sent, with no error anywhere.
+  overlay.beginRun();
+  overlay.addChunk(simpleChunk(2, 1));
+  overlay.flush();
+  assert.equal(drawn(overlay), 10);
+  overlay.dispose();
+});
+
+test('the rebuild is deferred to flush, not run per chunk (spec §9)', () => {
+  const overlay = new CoverageOverlay();
+  overlay.reset();
+  overlay.beginRun();
+  overlay.addChunk(simpleChunk(0, 1));
+  overlay.addChunk(simpleChunk(1, 1));
+  // Nothing uploaded yet: rebuild walks *every* retained leaf, so doing it per
+  // chunk is quadratic in chunk count.
+  assert.equal(drawn(overlay), 0);
+  overlay.flush();
+  assert.equal(drawn(overlay), 4);
+  overlay.dispose();
+});
+
+test('reset empties the overlay immediately, without waiting for a flush (spec §14.4)', () => {
+  const overlay = new CoverageOverlay();
+  overlay.reset();
+  overlay.addChunk(simpleChunk(0, 1));
+  overlay.flush();
+  assert.equal(drawn(overlay), 2);
+
+  // A scene replace clears the overlay with no run following it.
+  overlay.reset();
+  assert.equal(drawn(overlay), 0);
+  overlay.dispose();
+});

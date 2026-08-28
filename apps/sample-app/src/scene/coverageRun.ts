@@ -24,6 +24,7 @@
  * `addCoverageChunk()`) right beside these calls.
  */
 import type { ChunkResult, WorkspaceGrid } from '@linkervision/camera-coverage-sdk';
+import type { RunCamera } from './runCameras.ts';
 import { ProbeVisibility, type Probe, type ProbeVisibilityResult } from './probeVisibility.ts';
 import {
   SectionHeatmapStore,
@@ -44,7 +45,7 @@ import {
  * own domain inputs) so they stay off this interface — `CoverageRun` fronts them.
  */
 export interface RetainedRun {
-  reset(grid: WorkspaceGrid, cameraIds: string[]): void;
+  reset(grid: WorkspaceGrid, cameras: readonly RunCamera[]): void;
   addChunk(result: ChunkResult): void;
   clear(): void;
 }
@@ -72,8 +73,8 @@ export class CoverageRun {
    * §13.4; `sampling_volumes.md` §7.2). Does not touch the generation — the caller
    * snapshotted its token first (see class doc).
    */
-  reset(grid: WorkspaceGrid, enabledCameraIds: string[]): void {
-    for (const sink of this.sinks) sink.reset(grid, enabledCameraIds);
+  reset(grid: WorkspaceGrid, cameras: readonly RunCamera[]): void {
+    for (const sink of this.sinks) sink.reset(grid, cameras);
   }
 
   /** Fan a streamed chunk out to every retained-chunk store. */

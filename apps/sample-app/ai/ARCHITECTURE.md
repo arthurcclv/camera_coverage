@@ -48,14 +48,21 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
 - **`App.tsx` `handleRun`** re-inits when voxel size changed **or** `room` (the
   built geometry) was replaced since the last init — a scene-file import (spec
   §14.4) always forces a fresh `loadScene`/workspace even at the same voxel
-  size, tracked via `initializedRoomRef`. It filters out disabled cameras,
-  builds a `WorkspaceGrid`, resets the retained-chunk consumers via
+  size, tracked via `initializedRoomRef`. It passes **every** camera (disabled ones
+  carry `enabled: false` rather than being filtered out — spec §5.4, see
+  DECISIONS.md), builds a `WorkspaceGrid`, and calls
+  `compute({ mode: 1, incremental: true, onRunStart, onChunkDone })`.
+  `onRunStart` decides the consumers' lifecycle: on a **full** run it resets them via
   `coverageRun.reset(grid, ids)` (probe-visibility, section-heatmap, and
-  zone-coverage stores) plus the overlay inline (`SceneView.resetCoverage()`),
-  then `compute({ mode: 1, onChunkDone })` feeds each streamed chunk to
-  `coverageRun.addChunk()` (the three stores) and the overlay
+  zone-coverage stores) plus the overlay inline (`SceneView.resetCoverage()`); on an
+  **incremental** run it resets nothing, because each store is keyed by `chunkId` and an
+  arriving chunk replaces just that entry (SDK spec §13.1). Each streamed chunk then
+  feeds `coverageRun.addChunk()` (the three stores) and the overlay
   (`SceneView.addCoverageChunk()`) — **four** retained-data consumers, three
-  behind the coordinator and the overlay inline (SceneView owns it). Every stage
+  behind the coordinator and the overlay inline (SceneView owns it). After the last
+  chunk App flushes the overlay once (`SceneView.flushCoverage()`); the overlay's
+  rebuild is whole-scene, so running it per chunk would cost more than an incremental
+  run saves. Every stage
   after the initial `coverageRun.generation` snapshot re-checks it with
   `coverageRun.isCurrent(gen)` before touching state or feeding a consumer, so a
   run superseded mid-flight by `applyScene` (import — which calls
@@ -211,6 +218,11 @@ default" — see DECISIONS.md).
 - `probeGizmos.ts` — per-probe octahedron markers + green sightlines to visible
   cameras. Extends `PickableGizmoSet` (overrides `dispose` to also clear the
   non-entry sightline overlay).
+- `runCameras.ts` — the bridge between a camera's **mask-bit index** (its position
+  in the full list passed to `setCameras()`, disabled cameras included since spec
+  §5.4) and its position among the cameras that *count*. Resolved once per run in
+  `reset()` and shared by all four retained-chunk consumers, so no readout
+  re-derives it — or forgets to. Pure, no deps.
 - `coverageRun.ts` — the coordinator for a run's three retained-chunk stores +
   the generation guard. Owns `ProbeVisibility`/`SectionHeatmapStore`/
   `ZoneCoverageStore`, fans out `reset`/`addChunk`/`clear` over the shared
@@ -230,8 +242,11 @@ default" — see DECISIONS.md).
   transparent layers (section heatmap plane → coverage fog → volume fill). The plane
   is the only depth writer, so it draws first and the depth test resolves the rest
   per viewpoint (spec §9, §13.5). See DECISIONS.md's transparent-layer draw-order entry.
-- `coverageOverlay.ts` — maps `ChunkResult` leaves → volumetric voxels per mode;
-  hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`) and
+- `coverageOverlay.ts` — maps `ChunkResult` leaves → volumetric voxels per mode.
+  Retains leaves **keyed by `chunkId`** so a re-sent chunk replaces rather than
+  duplicates (spec §9), and defers the whole-overlay rebuild to an explicit flush at the
+  end of a run; client-side re-filters (mode, hue/intensity, zone toggle) still rebuild
+  immediately. Also the hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`) and
   `popcountWords`, which counts across all `CAM_WORDS` words. The app's only
   `forEachLeaf` caller: it must read the callback's `maskWords`, never the word-0
   `mask`, or cameras at index ≥ 32 vanish from the overlay (see DECISIONS.md).

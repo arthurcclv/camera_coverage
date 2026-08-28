@@ -260,14 +260,27 @@ export class SceneView {
     this.placeHandler = handler;
   }
 
-  /** Clear the coverage overlay's retained chunks before a new run (spec §9, §14.4). */
+  /** Clear the coverage overlay's retained chunks before a **full** run (spec §9, §14.4). */
   resetCoverage(): void {
     this.overlay.reset();
+  }
+
+  /**
+   * Begin streaming a run without clearing — the incremental case (spec §8), where
+   * arriving chunks replace their predecessors and every other chunk stands.
+   */
+  beginCoverageRun(): void {
+    this.overlay.beginRun();
   }
 
   /** Feed a streamed `ChunkResult` into the coverage overlay (spec §9). */
   addCoverageChunk(chunk: ChunkResult): void {
     this.overlay.addChunk(chunk);
+  }
+
+  /** Rebuild the overlay once, after a run's last chunk (spec §9). */
+  flushCoverage(): void {
+    this.overlay.flush();
   }
 
   /**
