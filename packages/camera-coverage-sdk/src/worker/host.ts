@@ -52,14 +52,20 @@ export function installHost(transport: Transport, opts: HostOptions = {}): void 
           reply(req.id, null);
           break;
         case 'compute': {
+          // Install the chunk stream only when the client asked for it: with no
+          // `onChunkDone` on the main thread there is nobody to receive chunks,
+          // and passing one here would defeat the stats-only path (§11.1).
+          const { emitChunks, ...engineOpts } = req.opts;
           const summary = await engine!.compute({
-            ...req.opts,
-            onChunkDone: (chunkId, result) => {
-              transport.post(
-                { kind: 'chunk', computeId: req.id, chunkId, result },
-                chunkTransferables(result),
-              );
-            },
+            ...engineOpts,
+            onChunkDone: emitChunks
+              ? (chunkId, result) => {
+                  transport.post(
+                    { kind: 'chunk', computeId: req.id, chunkId, result },
+                    chunkTransferables(result),
+                  );
+                }
+              : undefined,
           });
           reply(req.id, summary);
           break;

@@ -484,7 +484,10 @@ only re-runs `setCameras` + `compute`):
   clear the flag; then `setCameras(enabled)` if needed; then
   `compute({ mode: 1, onChunkDone })`; then recompute per-zone summaries (§7.2).
 - `setSampling` needs **no re-init** (only a `voxelSize` change does, `spec.md`
-  §6), so volume edits are as cheap as camera edits.
+  §6), so volume edits stay far cheaper than a resolution change. They are **not**
+  as cheap as camera edits, though: a `setSampling` rebuilds the validity mask over
+  the whole grid (SDK spec §6.4), whereas a camera edit is O(cameras) and reuses the
+  cached mask.
 - Auto-run throttling (≤10 runs/s) is unchanged; dragging a volume gizmo coalesces.
 - **Zone enable/disable** and **zone rename** changes bypass the run entirely
   (§7.3) — pure client-side re-filter/relabel.

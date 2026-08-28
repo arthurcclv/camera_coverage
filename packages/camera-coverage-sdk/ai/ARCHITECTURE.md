@@ -32,11 +32,11 @@ Public entry: `createEngine()` / `CoverageEngine` implementing `VisibilityEngine
 | Coordinate system, workspace + chunk partition | §2–3 | `src/grid.ts` |
 | Mesh cleaning (degenerate/NaN culling) | §5.1 | `src/geometry/mesh.ts` |
 | Occupancy (triangle–AABB SAT + flood-fill SOLID) | §6.2 | `src/occupancy.ts`, `src/geometry/triangle-aabb.ts` |
-| Sampling policy → validity mask | §6.3 | `src/sampling.ts` |
+| Sampling policy → validity mask, and its per-chunk cache | §6.3/§6.4 | `src/sampling.ts` |
 | Camera model (viewProj, 96-byte GPU struct, CAM_WORDS, pre-cull) | §7 | `src/camera.ts` |
 | Ray occlusion (Möller–Trumbore, any-hit) | §8/§10.3 | `src/kernel.ts` (CPU), `src/shaders.ts` (WGSL) |
 | Binned-SAH BVH, threaded stackless node layout | §10 | `src/geometry/bvh.ts` |
-| Per-chunk pipeline (Pass 1/2/3) | §11 | `src/compute/cpu.ts`, `src/compute/webgpu.ts`, `src/shaders.ts` |
+| Per-chunk pipeline (Pass 1/2/3), submission & readback | §11/§11.1 | `src/compute/cpu.ts`, `src/compute/webgpu.ts`, `src/shaders.ts` |
 | Dense result buffers | §9.1–9.3 | `src/compute/cpu.ts`, `src/results.ts` |
 | SVO merged storage + `VoxelAccessor` | §9.5 | `src/svo.ts` |
 | Engine API + orchestration | §16.1 | `src/engine.ts` |
@@ -62,6 +62,24 @@ other.
   (see below). Fix a bug in one → check the other.
 - WebGPU uploads the immutable BVH/triangle buffers once, then creates/destroys
   per-chunk buffers around each dispatch so only one chunk is GPU-resident (§9.4).
+- **Submission contract (§11.1)**: per chunk, all three passes plus the staging
+  copies go into **one** command encoder and **one** `submit()`, followed by
+  **one** `mapAsync`. Nothing is read back to size a dispatch — Pass 2's bound is
+  `ceil(validCount / 64)` from the §6.4 cache. Adding a mid-chunk readback, a
+  second submit, or a per-buffer staging map breaks this and is caught by §18.6d
+  (`gpuCounters`). The CPU backend has no equivalent structure, so this is the one
+  axis where the two backends legitimately differ in shape while staying
+  bit-identical in output.
+- **One staging buffer means one *summed* allocation.** Because `stats`,
+  `visibility`, and `coverage` are resident in it together, its peak is their
+  **sum** — at Mode 2 / 0.1 m / 128 cameras, 160 MB against a default
+  `maxBufferSize` of 128 MiB. `planStaging()` (pure, unit-tested by §18.6f) lays the
+  segments out and reports that size; `computeChunk` compares it to
+  `device.limits.maxBufferSize` and throws `SCENE_TOO_LARGE` *before* creating the
+  buffer, since an over-large `createBuffer` otherwise fails as an uncaptured
+  `GPUValidationError` and only surfaces as a rejected `mapAsync`. The per-chunk
+  buffers are released in a `finally`, so a rejection here — or a device loss
+  mid-chunk — leaves nothing stranded.
 
 ### 2. Two preprocessing implementations, one algorithm
 
@@ -138,6 +156,13 @@ Two real bugs were only catchable this way (both fixed):
   pipeline and silently produced all-zero visibility.
 - An **empty-scene BVH sentinel-root** bug in `src/geometry/bvh.ts` causing a real
   GPU infinite loop.
+
+A third failure of the same shape is now designed out rather than tested for:
+`upload()` in `src/compute/webgpu.ts` honours a view's `byteOffset`/`byteLength`
+instead of uploading `.buffer` wholesale. Any pooled or `subarray()`-backed host
+buffer — the validity cache and `bvh.triData` are both candidates — would
+otherwise send the wrong bytes **only on the GPU path**, while the CPU reference
+read through the view correctly and every determinism test still passed.
 
 Treat any WebGPU/WGSL change as unverified until run through `test/webgpu.test.ts`
 or real hardware. Passing `npm test` proves the CPU reference is correct, not the

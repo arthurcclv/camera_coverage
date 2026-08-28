@@ -20,6 +20,18 @@ export interface ChunkComputeInput {
   origin: Vec3;
   voxelSize: number;
   validity: Uint32Array;
+  /**
+   * Valid voxels in this chunk, from the §6.4 cache. Bounds Pass 2's dispatch
+   * (§11 Pass 2): `candidateCount <= validCount`, so `ceil(validCount / WG)`
+   * workgroups suffice and the count never has to leave the GPU.
+   */
+  validCount: number;
+  /**
+   * Whether the caller consumes per-voxel results (§11.1). When false the
+   * backend may skip reading `visibility` / `coverage` back; `stats` — and
+   * therefore `CoverageSummary` — is unaffected.
+   */
+  emitVoxels: boolean;
   cameras: PreparedCamera[];
   numCameras: number;
   camWords: number;
@@ -30,7 +42,8 @@ export interface ChunkComputeInput {
 }
 
 export interface ChunkComputeOutput {
-  visibility: Uint32Array; // voxelCount * camWords
+  /** voxelCount * camWords. Absent when `emitVoxels` was false (§11.1). */
+  visibility?: Uint32Array;
   coverage?: Uint32Array; // Mode 2: voxelCount * 4 * camWords
   stats: { validCount: number; coveredCount: number; visibleCount: number[] };
 }

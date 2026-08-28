@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { create, globals } from 'webgpu';
 
 import { CoverageEngine } from '../src/engine.ts';
+import { EngineError, EngineErrorCode } from '../src/types.ts';
 import type { CameraConfig, SceneMesh, WorkspaceConfig } from '../src/types.ts';
 import { box, camera, LOOK_NEG_Z, wallZ } from './helpers.ts';
 
@@ -88,4 +89,87 @@ test('webgpu backend matches CPU reference: two cameras + wall', { skip: !availa
   const gpuRate = await overallRate(scene, cams, 'webgpu');
 
   assert.ok(Math.abs(gpuRate - cpuRate) < 1e-6, `webgpu ${gpuRate} vs cpu ${cpuRate}`);
+});
+
+// §18.6d / §18.6c (GPU half) ------------------------------------------------
+test('webgpu: one submit and one map per chunk, conditional voxel readback', { skip: !available && 'no WebGPU adapter available' }, async () => {
+  const { gpuCounters } = await import('../src/compute/webgpu.ts');
+  // Multi-chunk workspace so "per chunk" is a real ratio, not 1:1:1 by accident.
+  const ws: WorkspaceConfig = {
+    worldMin: [0, 0, 0], worldMax: [26, 3, 26], voxelSize: 0.5, chunkSizeXZ: 10,
+  };
+  const cams = [camera('a', [13, 1.5, 24]), camera('b', [5, 1.5, 24])];
+  const scene = box([12, 0, 12], [14, 3, 14]);
+
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...ws, backend: 'webgpu', solidDetection: true });
+  await engine.loadScene(scene);
+  await engine.setSampling({ regions: [{ type: 'heightBand', yMin: 0.5, yMax: 2 }] });
+  engine.setCameras(cams);
+
+  gpuCounters.reset();
+  const withVoxels = await engine.compute({ mode: 1, onChunkDone: () => {} });
+  const emitting = { ...gpuCounters };
+
+  gpuCounters.reset();
+  const statsOnly = await engine.compute({ mode: 1 });
+  const stats = { ...gpuCounters };
+  engine.dispose();
+
+  // §18.6d: exactly one submission and one mapping per computed chunk.
+  assert.ok(emitting.chunks > 1, `expected several chunks on the GPU, got ${emitting.chunks}`);
+  assert.equal(emitting.submits, emitting.chunks, 'one submit per chunk');
+  assert.equal(emitting.maps, emitting.chunks, 'one map per chunk');
+  assert.equal(stats.submits, stats.chunks, 'one submit per chunk (stats-only)');
+  assert.equal(stats.maps, stats.chunks, 'one map per chunk (stats-only)');
+  assert.equal(stats.chunks, emitting.chunks, 'same chunks reach the backend either way');
+
+  // §18.6c: a stats-only run reads back only the stats buffer.
+  const statsBytesPerChunk = (2 + cams.length) * 4;
+  assert.equal(stats.bytesRead, stats.chunks * statsBytesPerChunk, 'stats-only reads stats alone');
+  assert.ok(
+    emitting.bytesRead > stats.bytesRead * 100,
+    `voxel-emitting readback should dwarf stats-only: ${emitting.bytesRead} vs ${stats.bytesRead}`,
+  );
+
+  // ...and produces an identical summary.
+  assert.equal(statsOnly.validVoxels, withVoxels.validVoxels);
+  assert.equal(statsOnly.overallRate, withVoxels.overallRate);
+  assert.deepEqual(statsOnly.perCamera, withVoxels.perCamera);
+  assert.ok(withVoxels.overallRate > 0, 'sanity: non-zero coverage');
+});
+
+// §18.6f ------------------------------------------------------------------
+test('webgpu: oversized staging readback is rejected, not left to mapAsync', { skip: !available && 'no WebGPU adapter available' }, async () => {
+  const ws: WorkspaceConfig = {
+    worldMin: [0, 0, 0], worldMax: [10, 3, 10], voxelSize: 0.5, chunkSizeXZ: 10,
+  };
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...ws, backend: 'webgpu', solidDetection: true });
+  await engine.loadScene(box([4, 0, 4], [6, 3, 6]));
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+  engine.setCameras([camera('a', [5, 1.5, 9], LOOK_NEG_Z)]);
+
+  // A stats-only run needs a handful of bytes, so it must survive a ceiling
+  // that the voxel-emitting run cannot possibly meet.
+  const backend = (engine as unknown as { backend: { maxBufferSize: number } }).backend;
+  const real = backend.maxBufferSize;
+  backend.maxBufferSize = 64;
+
+  await assert.rejects(
+    () => engine.compute({ mode: 1, onChunkDone: () => {} }),
+    (err: unknown) => {
+      assert.ok(err instanceof EngineError, `expected EngineError, got ${String(err)}`);
+      assert.equal(err.code, EngineErrorCode.SCENE_TOO_LARGE);
+      assert.match(err.message, /maxBufferSize/);
+      return true;
+    },
+    'the combined staging buffer is checked before it is created',
+  );
+
+  // The rejection released everything: the same engine still computes.
+  backend.maxBufferSize = real;
+  const after = await engine.compute({ mode: 1, onChunkDone: () => {} });
+  assert.ok(after.validVoxels > 0, 'engine still usable after the rejected chunk');
+  engine.dispose();
 });

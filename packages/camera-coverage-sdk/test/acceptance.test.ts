@@ -6,6 +6,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CoverageEngine } from '../src/engine.ts';
+import { samplingCounters } from '../src/sampling.ts';
+import { tsKernels } from '../src/kernels.ts';
 import { accessor } from '../src/results.ts';
 import { EngineError, EngineErrorCode } from '../src/types.ts';
 import type {
@@ -166,6 +168,152 @@ test('determinism: two runs are bit-exact', async () => {
   const a = await collectAll(WS, cams, true, scene);
   const b = await collectAll(WS, cams, true, scene);
   assert.deepEqual(a, b);
+});
+
+// §18.6a ------------------------------------------------------------------
+test('validity cache: built once per chunk, never per compute', async () => {
+  // Multi-chunk workspace so the build count is a real number, not just 1.
+  const ws: WorkspaceConfig = {
+    worldMin: [0, 0, 0], worldMax: [26, 3, 26], voxelSize: 0.5, chunkSizeXZ: 10,
+  };
+  const scene = wallZ(12.5, 0, 26, 0, 3);
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...ws, backend: 'cpu', solidDetection: true });
+  await engine.loadScene(scene);
+
+  // loadScene must not build: no sampling config has been supplied yet (§6.4).
+  samplingCounters.reset();
+  const stats = await engine.setSampling({ regions: [{ type: 'heightBand', yMin: 0.5, yMax: 2 }] });
+  const afterSampling = samplingCounters.builds;
+  assert.equal(afterSampling, 9, 'setSampling builds every chunk of the 3x3 partition, once');
+  assert.ok(stats.activeChunks > 0);
+
+  // N computes with the cameras changed between them must add no builds, and
+  // must keep producing the same validity bits.
+  const validityOf = async (camX: number): Promise<Uint32Array[]> => {
+    engine.setCameras([camera('c', [camX, 1.5, 20], LOOK_NEG_Z)]);
+    const seen: Uint32Array[] = [];
+    await engine.compute({ mode: 1, onChunkDone: (_id, r) => {
+      // Repack the chunk's validity bits through the accessor, which reads
+      // through either encoding — a true bit-identity check, not a count.
+      const [nx, ny, nz] = r.dims;
+      const acc = accessor(r);
+      const bits = new Uint32Array(((nx * ny * nz) + 31) >> 5);
+      for (let k = 0; k < nz; k++)
+        for (let j = 0; j < ny; j++)
+          for (let i = 0; i < nx; i++) {
+            if (!acc.isValid(i, j, k)) continue;
+            const li = i + nx * (j + ny * k);
+            bits[li >> 5] |= 1 << (li & 31);
+          }
+      seen.push(bits);
+    } });
+    return seen;
+  };
+  const first = await validityOf(5);
+  const second = await validityOf(21);
+  const third = await validityOf(13);
+  assert.equal(samplingCounters.builds, afterSampling, 'compute() rebuilt nothing');
+  assert.deepEqual(second, first, 'validity is camera-independent');
+  assert.deepEqual(third, first, 'validity is camera-independent');
+  engine.dispose();
+});
+
+// §18.6b ------------------------------------------------------------------
+test('validity ownership: transferring a dense chunk\'s validity away is harmless', async () => {
+  // Force the dense encoding (§9.5) so ChunkResult carries `validity` at all.
+  const engine = new CoverageEngine({
+    onWarning: () => {},
+    kernels: { ...tsKernels, buildSvo: () => null },
+  });
+  await engine.init({ ...WS, backend: 'cpu', solidDetection: true });
+  await engine.loadScene(wallZ(2.5, 0, 6, 0, 3));
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+  engine.setCameras([camera('c', [3.15, 1.65, 5.4], LOOK_NEG_Z)]);
+
+  const detach = (r: ChunkResult) => {
+    assert.equal(r.encoding, 'dense');
+    const buf = r.validity!.buffer as ArrayBuffer;
+    structuredClone(buf, { transfer: [buf] }); // detaches the caller's copy
+    assert.equal(r.validity!.length, 0, 'buffer really was detached');
+  };
+
+  const a = await engine.compute({ mode: 1, onChunkDone: (_id, r) => detach(r) });
+  const b = await engine.compute({ mode: 1, onChunkDone: (_id, r) => detach(r) });
+  assert.equal(b.overallRate, a.overallRate, 'cache survived the transfer');
+  assert.equal(b.validVoxels, a.validVoxels);
+  assert.ok(a.validVoxels > 0);
+  engine.dispose();
+});
+
+// §18.6c ------------------------------------------------------------------
+test('stats-only equivalence: omitting onChunkDone changes nothing but readback', async () => {
+  const scene = wallZ(2.5, 0, 6, 0, 3);
+  const cams = [camera('a', [3.15, 1.65, 5.4], LOOK_NEG_Z), camera('b', [1.05, 1.65, 5.4], LOOK_NEG_Z)];
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...WS, backend: 'cpu', solidDetection: true });
+  await engine.loadScene(scene);
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+  engine.setCameras(cams);
+
+  let chunksSeen = 0;
+  const withVoxels = await engine.compute({ mode: 1, onChunkDone: () => { chunksSeen++; } });
+  const statsOnly = await engine.compute({ mode: 1 });
+  engine.dispose();
+
+  assert.ok(chunksSeen > 0, 'the voxel-emitting run streamed chunks');
+  assert.equal(statsOnly.validVoxels, withVoxels.validVoxels);
+  assert.equal(statsOnly.overallRate, withVoxels.overallRate);
+  assert.deepEqual(statsOnly.perCamera, withVoxels.perCamera);
+});
+
+// §18.6e ------------------------------------------------------------------
+test('regions outside a chunk contribute nothing', async () => {
+  // 3x3 chunk partition; one box region occupying only the first chunk. The
+  // build loops narrow to the region's index range, so every other chunk must
+  // fall out empty rather than collapsing onto a clamped edge index.
+  const ws: WorkspaceConfig = {
+    worldMin: [0, 0, 0], worldMax: [26, 3, 26], voxelSize: 0.5, chunkSizeXZ: 10,
+  };
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...ws, backend: 'cpu', solidDetection: true });
+  await engine.loadScene(EMPTY);
+
+  const corner = await engine.setSampling({
+    regions: [{ type: 'box', min: [0, 0, 0], max: [5, 2.9, 5] }],
+  });
+  assert.equal(corner.activeChunks, 1, 'only the chunk the box reaches is active');
+  // 10 x 6 x 10 voxel centers at 0.5 m inside [0,5] x [0,2.9] x [0,5].
+  assert.equal(corner.validVoxels, 600, 'no edge plane from the neighbouring chunks');
+
+  // Streamed chunks must agree with the summary: 8 of 9 report nothing.
+  engine.setCameras([camera('c', [13, 1.5, 13], LOOK_NEG_Z)]);
+  let nonEmpty = 0;
+  await engine.compute({ mode: 1, onChunkDone: (_id, r) => {
+    const [nx, ny, nz] = r.dims;
+    const acc = accessor(r);
+    let valid = 0;
+    for (let k = 0; k < nz; k++)
+      for (let j = 0; j < ny; j++)
+        for (let i = 0; i < nx; i++) if (acc.isValid(i, j, k)) valid++;
+    if (valid > 0) nonEmpty++;
+  } });
+  assert.equal(nonEmpty, 1, 'exactly one chunk carries valid voxels');
+
+  // A band entirely above the workspace reaches no chunk at all.
+  const above = await engine.setSampling({
+    regions: [{ type: 'heightBand', yMin: 50, yMax: 60 }],
+  });
+  assert.equal(above.validVoxels, 0, 'out-of-workspace band yields no voxels');
+  assert.equal(above.activeChunks, 0);
+
+  // ...and so does one entirely below it.
+  const below = await engine.setSampling({
+    regions: [{ type: 'heightBand', yMin: -60, yMax: -50 }],
+  });
+  assert.equal(below.validVoxels, 0);
+  assert.equal(below.activeChunks, 0);
+  engine.dispose();
 });
 
 // §18.7 -------------------------------------------------------------------

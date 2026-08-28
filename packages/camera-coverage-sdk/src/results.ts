@@ -28,17 +28,22 @@ export function assembleChunkResult(
     stats: out.stats,
   };
 
-  const dense: DenseChunk = { dims, camWords, visibility: out.visibility, validity };
+  const dense: DenseChunk = { dims, camWords, visibility: out.visibility!, validity };
   const svo = buildSvo(chunkId, dense);
 
   if (svo) {
+    // The SVO encodes the validity bits into `nodeValid` and carries no
+    // `validity` array, so the cache's mask is only read here — no copy needed.
     return { ...base, encoding: 'svo', svo };
   }
   return {
     ...base,
     encoding: 'dense',
     visibility: out.visibility,
-    validity,
+    // §6.4 ownership: `validity` is cache-owned and the worker transfers this
+    // result's buffers (detaching them). Hand out a copy, or the next
+    // `compute()` would upload a detached buffer.
+    validity: validity.slice(),
     coverage: out.coverage,
   };
 }

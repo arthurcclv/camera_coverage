@@ -110,6 +110,9 @@ export class WorkerClient implements VisibilityEngine {
       threshold: opts?.threshold,
       chunks: opts?.chunks,
       precull: opts?.precull,
+      // Callbacks don't survive postMessage, so forward the *intent* (§11.1):
+      // no handler here means the host runs a stats-only compute.
+      emitChunks: !!opts?.onChunkDone,
     };
     return this.call(id, 'compute', { opts: wire });
   }

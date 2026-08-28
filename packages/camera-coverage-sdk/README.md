@@ -85,11 +85,11 @@ engine.dispose();
 | §2–3 coordinate system, workspace + chunk partition | `src/grid.ts` |
 | §5.1 mesh cleaning (degenerate / NaN culling) | `src/geometry/mesh.ts` |
 | §6.2 occupancy (triangle–AABB SAT + flood-fill SOLID) | `src/occupancy.ts`, `src/geometry/triangle-aabb.ts` |
-| §6.3 sampling policy → validity mask | `src/sampling.ts` |
+| §6.3/§6.4 sampling policy → validity mask + per-chunk cache | `src/sampling.ts` |
 | §7 camera model (viewProj, 96-byte GPU struct, CAM_WORDS, pre-cull) | `src/camera.ts` |
 | §8/§10.3 ray occlusion (Möller–Trumbore, any-hit) | `src/kernel.ts` (CPU) / `src/shaders.ts` (WGSL) |
 | §10 binned-SAH BVH, threaded stackless node layout | `src/geometry/bvh.ts` |
-| §11 per-chunk pipeline (Pass 1/2/3) | `src/compute/cpu.ts`, `src/compute/webgpu.ts`, `src/shaders.ts` |
+| §11/§11.1 per-chunk pipeline (Pass 1/2/3), submission & readback | `src/compute/cpu.ts`, `src/compute/webgpu.ts`, `src/shaders.ts` |
 | §9.1–9.3 dense result buffers | `src/compute/cpu.ts`, `src/results.ts` |
 | §9.5 SVO merged storage + VoxelAccessor | `src/svo.ts` |
 | §16.1 engine API + orchestration | `src/engine.ts` |
@@ -168,6 +168,15 @@ await engine.init({ /* … */ });   // same VisibilityEngine API, now off-thread
   interior; a camera merely adjacent to a wall (in a `MIXED` voxel) stays active,
   as required by the t_max regression test §18.3.
 - **Pre-cull is lossless** (§7.2 / §18.5a) — toggle via `compute({ precull })`.
+- **Omitting `onChunkDone` means stats-only** (§11.1 / §18.6c). It is not merely
+  optional: with no callback the engine skips per-voxel readback entirely and
+  returns the same `CoverageSummary`. Pass a callback only if you consume the
+  chunks — the difference is up to 62 MB of allocation per `compute()`.
+- **The validity mask is cached** per chunk per (scene, sampling) generation
+  (§6.4 / §18.6a), so repeated `compute()` with only the cameras changed costs no
+  grid walk. The cached array is engine-owned; a `dense` `ChunkResult` receives a
+  copy, because the worker transfers (and thus detaches) what it hands out
+  (§18.6b).
 - **Mode 2 coverage** raw counts are carried on `ChunkResult.coverage` (dense
   encoding); the SVO always stores the threshold-derived visibility mask so the
   `VoxelAccessor` interface is identical across modes.

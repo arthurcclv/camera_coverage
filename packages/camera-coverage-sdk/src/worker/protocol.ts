@@ -31,7 +31,19 @@ export type Req =
   | {
       id: number;
       kind: 'compute';
-      opts: { mode?: 1 | 2; threshold?: number; chunks?: number[]; precull?: boolean };
+      /**
+       * `ComputeOptions` minus the callback, which cannot cross the boundary.
+       * `emitChunks` carries the caller's `onChunkDone` intent instead (§11.1,
+       * §16.1): the host installs a chunk stream only when it is set, and the
+       * engine then skips per-voxel readback.
+       */
+      opts: {
+        mode?: 1 | 2;
+        threshold?: number;
+        chunks?: number[];
+        precull?: boolean;
+        emitChunks?: boolean;
+      };
     }
   | { id: number; kind: 'dispose' };
 

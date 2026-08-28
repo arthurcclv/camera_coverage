@@ -6,6 +6,100 @@ decisions at the top when you add to this file.
 
 ---
 
+## Narrowed validity-build loops clamp inward only; an unreached chunk is empty
+
+**Why:** building the validity mask by testing every voxel center against every
+region is the whole cost of `setSampling()`, so the builder narrows its `i/j/k`
+loops to the region union's index range and — when that range is *exact*, which a
+single region of any kind makes it — skips the per-voxel region test entirely.
+Clamping the derived indices into `[0, n-1]` looks like the obvious way to keep
+them in bounds, and it is wrong: a region that misses a chunk on some axis
+collapses to a single edge index instead of an empty range, and with the per-voxel
+test skipped, that chunk hands back a whole plane of "valid" voxels it never
+contained. A single `box` volume — what `sample-app` emits for every sampling
+volume — inflates `validVoxels`/`activeChunks` and deflates every coverage rate.
+**Decision:** clamp only the *inward* side (`lo` up to 0, `hi` down to `n-1`) and
+return early when any axis leaves `lo > hi`. The narrowing stays an optimization
+that cannot change the answer, which is how §6.4 Build now states it.
+**Trade-off:** one extra three-way comparison per chunk, and a bug class that is
+invisible to any test whose region sits inside the workspace — so §18.6e pins a
+corner `box` across a 3×3 chunk partition and a `heightBand` above *and* below the
+workspace, and fails against the clamped version.
+
+## A zero-valid-voxel chunk reports a zero-length mask on every call
+
+**Why:** §6.4 caches a chunk with `validCount === 0` as a null entry that "caches
+no words", so cache hits returned a shared zero-length `EMPTY`. The *building*
+call, though, returned the full-length all-zero array it had just allocated — the
+same chunk answered differently depending on whether you were first. Nothing broke
+only because `compute()` skips on `validCount` before reading words.
+**Decision:** `build()` returns `EMPTY` too, so there is exactly one answer for an
+empty chunk, and the range check that precedes it means the words are never
+allocated in the first place. The `ChunkValidity` contract now reads "ceil(voxelCount/32)
+words, **or zero-length when validCount is 0**". **Trade-off:** consumers must gate
+on `validCount`, never on `validity.length` — stated in §6.4 Build rather than left
+to be discovered.
+
+## The validity mask is cached per chunk; the cache owns its buffers
+
+**Why:** the validity mask depends only on the scene and `SamplingConfig` — never
+on cameras — yet `compute()` rebuilt it from scratch on every call, walking every
+voxel of every chunk in JS. Measured at 0.1 m voxels that was 25–40% of a whole
+`compute()` and a *constant* floor: with one camera it was 73% of the total. Since
+repeated `compute()` with fixed scene and sampling is the primary interactive
+workload (dragging a camera) and the inner loop of any camera-placement search,
+this was the single largest waste in the engine. **Decision:** memoize per chunk on
+the `SamplingState` instance (§6.4); a fresh instance *is* a new cache generation,
+so "at most one build per chunk per generation" falls out of construction rather
+than needing invalidation logic. `loadScene()` deliberately builds **nothing** —
+the app's re-init path calls `setSampling()` immediately afterwards, so an eager
+build there would be discarded unused. **Trade-off:** the mask is now resident
+(≤ 25 MB for a full 100-chunk workspace) instead of transient, and it is
+**cache-owned**: `assembleChunkResult` must copy it into a `dense` `ChunkResult`,
+because the worker transfers those buffers to the main thread and thereby detaches
+them — without the copy the *next* `compute()` would hand a backend a detached
+buffer, and only on the dense fallback path, which makes it an intermittent. The
+`svo` encoding folds validity into `nodeValid` and carries no array, so the common
+path copies nothing. Guarded by §18.6a (build counter) and §18.6b (transfer-then-
+recompute).
+
+## Per-voxel readback is conditional on `onChunkDone`, not a new option
+
+**Why:** `compute()` always read the dense `visibility` buffer back — up to 62 MB
+per call at 0.1 m voxels with 128 cameras — even when the caller supplied no
+`onChunkDone` and `emitChunk` discarded it immediately. **Decision:** treat the
+absence of `onChunkDone` as a declaration of stats-only intent (§11.1) rather than
+adding a `ComputeOptions` flag: the callback is already the only thing that
+consumes per-voxel data, so a second switch could only ever disagree with it.
+Callbacks cannot cross a Worker boundary, so `WorkerClient.compute()` derives a
+boolean `emitChunks` onto the wire and the host installs a chunk stream only when
+it is set. **Trade-off:** the performance cliff is invisible at the call site —
+adding a `console.log` in `onChunkDone` silently restores the full readback. That
+is why §16.1 states the coupling explicitly instead of leaving it to the reader.
+Note the honest size of the win: on unified memory the copy itself is only ~5–10%
+of a `compute()`; the real gains are the allocation/GC churn and, on a discrete
+GPU, a PCIe transfer.
+
+## Pass 2 is bounded by `validCount`, not by a read-back candidate count
+
+**Why:** the per-chunk pipeline made three `submit()`s and blocked on a 4-byte
+`candidateCount` readback purely to size Pass 2's dispatch — ~1.1 ms of pure
+latency per chunk, which at coarse resolutions was *the entire cost* of a compute
+(10 of 12 ms at 0.5 m voxels). §11 offered either "a 1-thread pass or a CPU
+readback" to fill an indirect-dispatch buffer. **Decision:** neither. A candidate
+must be a valid voxel, so `candidateCount ≤ validCount`, and the validity cache
+already hands the CPU a per-chunk `validCount` — so dispatch `ceil(validCount/64)`
+statically and let the shader's existing `slot >= candidateCount` guard retire the
+surplus threads. The count never leaves the GPU, all three passes plus the staging
+copies go into one encoder and one `submit()`, and one `mapAsync` returns
+everything. §11's indirect-dispatch wording was narrowed accordingly.
+**Trade-off:** up to `validCount − candidateCount` threads launch and immediately
+return (each costing one buffer read), where true indirect dispatch would launch
+only what is needed — bought in exchange for no fourth pipeline, no `INDIRECT`
+buffer, and no GPU→CPU round trip mid-chunk. This decision is only available
+*because* of the validity cache; reverting that one re-opens the question.
+Guarded by §18.6d.
+
 ## `forEachLeaf` carries the full mask via a scratch `maskWords` buffer
 
 **Why:** the callback's `mask` parameter is a single `number`, so it could only

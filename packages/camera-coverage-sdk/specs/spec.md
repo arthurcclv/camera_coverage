@@ -179,7 +179,64 @@ interface SamplingConfig {
 
 Final valid sampling points = (union of regions ∩ non-SOLID voxels), one validity bit per voxel.
 
-### 6.4 Camera-driven Candidate Generation
+### 6.4 Validity Cache
+
+The validity mask (§9.2) is a pure function of the workspace grid, the occupancy
+classification (§6.2), and `SamplingConfig` — **cameras never appear in it**. It is
+therefore memoized per chunk and reused across `compute()` calls.
+
+**Cached entry** — exactly what §9.2 defines, plus its population count: the packed
+mask words for one chunk and its `validCount`. A chunk with `validCount === 0` caches
+**no words** (a null entry); `compute()` skips such chunks without allocating. Cache
+cost is thus 1 bit per voxel of the *active* chunks only — 0.25 MB per 2M-voxel chunk,
+≤ 25 MB for a full 100-chunk workspace: the §9.4 validity-mask budget paid **once**
+instead of once per `compute()`.
+
+**Build** — the mask is derived from the region union, occupancy, and stride (§6.3).
+The builder may narrow its voxel loops to the region union's index range rather than
+testing every voxel center, and may skip the per-voxel region test when that range is
+*exact* — which a single region of any kind is, the bounds being its own. Both are
+optimizations and must not change the result: a chunk the region union does not reach
+at all yields an **empty** index range, never a clamped edge index, and therefore
+`validCount === 0`.
+
+A chunk with `validCount === 0` carries a **zero-length** `validity` on *every* call —
+the building call and each cached call alike. Consumers gate on `validCount`, never on
+`validity.length`.
+
+**Generation** — a (scene, `SamplingConfig`) pair. `loadScene()` and `setSampling()`
+each begin a new generation and discard the previous cache; `setCameras()` and
+`compute()` never do.
+
+**Invariant** — within one generation, each chunk's mask is built **at most once**, by
+whichever of `setSampling()` / `compute()` first needs it:
+
+| Call | Effect on the cache |
+|---|---|
+| `loadScene()` | new generation, empty cache; **builds nothing** — a caller that reloads a scene normally replaces the sampling config immediately, so an eager build here would be discarded unused |
+| `setSampling()` | new generation; builds **every** chunk, because `SamplingStats.activeChunks` / `validVoxels` require a whole-grid pass anyway. Those stats are derived from that same pass — never a second walk to summarize |
+| `setCameras()` | **none** |
+| `compute()` | builds only the chunks it touches (`opts.chunks`, §16.1), and only those not already cached; **never** rebuilds a cached entry |
+
+**Ownership** — the cache owns its buffers, and any consumer that takes ownership gets
+a **copy**. Concretely that is `ChunkResult.validity` on the `dense` encoding (§9.5),
+which the worker transfers to the main thread (§16.1) and thereby *detaches*; without
+the copy the next `compute()` would hand a backend a detached buffer. Backends receive
+the cached array **read-only** and must not retain it beyond the chunk. The `svo`
+encoding reads the mask to fill `nodeValid` and carries no `validity`, so the common
+path copies nothing.
+
+**Why this is normative** — repeated `compute()` over a fixed scene and sampling is the
+primary interactive workload (moving a camera, §13) and the inner loop of any
+camera-placement search. Rebuilding validity there costs O(chunk voxel count) of CPU
+work per call, *independent of camera count* — measured at 25–40% of an entire
+`compute()` at 0.1 m voxels, and the dominant cost when few cameras are active.
+
+Non-normative build notes: derive the mask by restricting loop bounds to each region's
+index range (a `heightBand` is a contiguous `j` slice) instead of testing every voxel
+center, and allocate no per-voxel `Vec3`.
+
+### 6.5 Camera-driven Candidate Generation
 
 Candidate voxels are produced from the intersection of each camera frustum with the sampling space, implemented in GPU Pass 1 as frustum test + stream compaction (see §11).
 
@@ -275,6 +332,8 @@ Buffer layout: `visibility[voxelIndex * CAM_WORDS + w]`, words contiguous within
 ```
 
 Without a validity mask, "visibility = 0" cannot distinguish "occluded from all cameras" from "not an analysis point at all", polluting both statistics and visualization.
+
+The mask depends on the scene and `SamplingConfig` only, so it is built once and cached per chunk (§6.4) rather than derived per `compute()`.
 
 ### 9.3 Coverage Buffer (Mode 2 only)
 
@@ -448,11 +507,11 @@ The GPU uses no dynamic stack. Empty-space skipping is provided naturally by the
   2. For each camera in `activeMask` (§7.2), compute frustum containment, forming `frustumMask: u32[CAM_WORDS]`
   3. `frustumMask` all zero → return
   4. `slot = atomicAdd(&candidateCount, 1)`; write `candidates[slot] = voxelIndex`, `candMasks[slot] = frustumMask`
-- The output `candidateCount` is also written to the indirect dispatch buffer (`ceil(count/64)`, converted by a 1-thread pass or a CPU readback).
+- `candidateCount` stays **GPU-resident**: it is never read back to size Pass 2, and no indirect-dispatch buffer is built (§11.1).
 
 ### Pass 2: BVH Ray Visibility
 
-- `dispatchWorkgroupsIndirect`, one thread per candidate.
+- Dispatch: `ceil(validCount / 64)` workgroups — one thread per *potential* candidate slot — using the CPU-side `validCount` from the §6.4 validity cache. A candidate must be a valid voxel, so `candidateCount ≤ validCount` always; the bound is therefore safe, and at most `validCount − candidateCount` threads return immediately at the `slot >= candidateCount` guard. This is what keeps the count GPU-resident: no readback, no indirect buffer, no prep pass (§11.1), paid for with a few idle threads. The bound also inherits Pass 1's `maxComputeWorkgroupsPerDimension` validation, since `ceil(validCount/64) ≤ ceil(voxelCount/64)`.
 - Each thread iterates the set bits of `candMasks[slot * CAM_WORDS .. +CAM_WORDS]` (skipping any word that is 0), runs the §8 occlusion ray for each camera, and writes results to `visibility[voxelIndex * CAM_WORDS + w]`. Ray count is determined by the number of in-frustum cameras and does not grow linearly with numCameras.
 - Mode 2: an outer loop over the 8 sample offsets accumulates counts into the coverage buffer (§9.3).
 
@@ -479,6 +538,36 @@ Metric definitions:
 | `stats` | storage read_write, atomic | Pass 3 |
 | `chunkInfo` | uniform | chunk origin, grid dimensions, voxelSize, mode, threshold, `activeMask[4]` (§7.2) |
 
+### 11.1 Submission and Readback
+
+Per chunk, **every pass goes into one command encoder and one `submit()`, followed by
+exactly one GPU→CPU synchronization.** No intra-chunk readback may gate a dispatch.
+
+- The buffer clears (`candidateCount`, `visibility`, `stats`, and `coverage` in Mode 2)
+  and Passes 1–3 are recorded in that single encoder. Ordering is guaranteed by
+  recording them as successive compute passes; no explicit barrier is required.
+- Everything the caller needs is copied into **one** staging buffer and mapped once.
+  `copyBufferToBuffer` offsets and sizes are 4-byte aligned; `getMappedRange` offsets
+  are 8-byte aligned, so segments are padded to an 8-byte boundary.
+- **The staging buffer is validated before it is created.** `stats` and — when the
+  caller consumes them — `visibility` and `coverage` are resident in it *simultaneously*,
+  so its peak size is their **sum**, not their max. A chunk whose combined readback
+  exceeds the device's `maxBufferSize` is rejected with `SCENE_TOO_LARGE` naming the
+  required and available sizes, rather than being left to a swallowed
+  `GPUValidationError` and a rejected `mapAsync`. The per-chunk GPU buffers are released
+  on every exit path, failure included.
+- **Per-voxel readback is conditional.** When the caller supplies no `onChunkDone`
+  (§16.1), `visibility` and (Mode 2) `coverage` are neither copied nor mapped — the
+  staging buffer carries `stats` alone. The GPU-side buffers are still allocated and
+  written, because Pass 2 writes `visibility` and Pass 3 reads it; `CoverageSummary`
+  is bit-identical either way.
+
+  *Rationale.* A stats-only run is the inner loop of camera-placement search and of any
+  "how good is this layout" query. On unified memory the copy itself is cheap — measured
+  at ~5–10% of a whole `compute()` — but it also allocates a fresh dense `Uint32Array`
+  per chunk, up to 62 MB per `compute()` at 0.1 m voxels with 128 cameras, which is pure
+  GC churn; on a discrete GPU the same copy crosses PCIe.
+
 ---
 
 ## 12. Memory Budget and Supported Limits
@@ -497,7 +586,7 @@ WebGPU's default `maxStorageBufferBindingSize` is only 128 MiB; even requesting 
 Startup flow (Capability Detection):
 
 1. `navigator.gpu.requestAdapter()`; failure → explicit error (see §16.4)
-2. Read `adapter.limits`: `maxStorageBufferBindingSize`, `maxComputeWorkgroupsPerDimension`, `maxComputeInvocationsPerWorkgroup`
+2. Read `adapter.limits`: `maxStorageBufferBindingSize`, `maxBufferSize`, `maxComputeWorkgroupsPerDimension`, `maxComputeInvocationsPerWorkgroup`
 3. `requestDevice({ requiredLimits })`: requiredLimits = min(actual scene requirement, adapter ceiling)
 4. Based on the available binding size, decide: triangle ceiling, chunk size (may drop to 5 m × 5 m), and whether Mode 2 is available
 
@@ -508,7 +597,7 @@ Startup flow (Capability Detection):
 The scene is fixed → the BVH is immutable. When cameras are added, removed, or moved:
 
 1. The CPU recomputes viewProj for affected cameras and updates only the Camera buffer (`writeBuffer`, ≤ 12 KB @ 128 cameras)
-2. Re-run Passes 1–3 for all chunks (no BVH rebuild, no occupancy rebuild)
+2. Re-run Passes 1–3 for all chunks (no BVH rebuild, no occupancy rebuild, **no validity rebuild** — the mask is camera-independent and served from the §6.4 cache)
 3. Interactive optimization: recompute only the chunks touched by the union of the moving camera's old and new frusta
 
 ---
@@ -532,6 +621,9 @@ Raw scale: 200M voxels × 128 cameras = 25.6B rays — not viable as an interact
 | Chunk-level camera pre-cull (§7.2) | each chunk processes only the cameras that touch it; GPU cost decoupled from numCameras |
 | Frustum culling + compaction | each camera computes only in-frustum candidates |
 | Any-hit early termination | greatly reduces average traversal cost |
+| Validity cache (§6.4) | validity is built once per (scene, sampling); camera-only edits pay none of that CPU cost |
+| Single submission per chunk (§11.1) | Pass 2 is sized from the cached `validCount`, so no readback gates a dispatch: one submit and one map per chunk instead of three and three |
+| Conditional per-voxel readback (§11.1) | a `compute()` with no `onChunkDone` transfers and allocates only the stats buffer |
 
 **Performance targets (acceptance baseline, RTX 3060 class)**: Passes 1–3 combined for 500k candidates × 8 cameras × 500k triangles < 500 ms; full workspace (100 chunks, height band Y = 0.5–2.0 m, 8 cameras) < 30 s.
 
@@ -606,6 +698,12 @@ interface CoverageSummary {
 }
 ```
 
+Omitting `onChunkDone` is **meaningful, not merely optional**: it declares that the
+caller wants only the `CoverageSummary`, and the engine then skips per-voxel readback
+entirely (§11.1). Because callbacks cannot cross a Worker boundary, the worker client
+derives a boolean from the caller's `onChunkDone` and sends it with the compute request;
+the host installs a chunk stream only when it is set.
+
 All large TypedArrays between the Worker and the main thread are passed as **transferables**; structured-clone copying is forbidden.
 
 ### 16.2 Visualization Strategies (2M+ voxels must not be drawn as raw cubes)
@@ -650,6 +748,12 @@ All large TypedArrays between the Worker and the main thread are passed as **tra
 5. *Bitmask*: a voxel visible to cameras 0 and 3 has word[0] = `0b1001`; visible to camera 100 → bit 4 of word[3] = 1 (CAM_WORDS = 4 scenario)
 5a. *Pre-cull losslessness*: the same scene with chunk-level camera pre-cull on / off produces bit-exact identical visibility buffers
 6. *Determinism*: two runs on identical input produce bit-exact identical visibility / validity buffers
+6a. *Validity cache* (§6.4): with the scene and sampling fixed, `setCameras()` + `compute()` repeated N times yields validity bit-identical to the first run while each chunk's mask is built **exactly once** — the sampling module's internal build counter reads `chunkCount` (every chunk, built by `setSampling()`), not N × `chunkCount`
+6b. *Validity ownership* (§6.4): a `dense`-encoded chunk whose `ChunkResult.validity` buffer has been transferred away (detached) must not break a subsequent `compute()` — the cache hands out a copy, never its own buffer
+6c. *Stats-only equivalence* (§11.1): `compute()` with and without `onChunkDone` returns a bit-identical `CoverageSummary` (asserted on both backends); with it omitted, the WebGPU backend's internal `bytesRead` counter excludes the per-voxel buffers
+6d. *One submission per chunk* (§11.1): the WebGPU backend records exactly one `submit()` and one buffer mapping per computed chunk (internal counters), while its visibility output stays bit-identical to the CPU reference
+6e. *Regions outside a chunk* (§6.4 Build): with a single `box` region covering one corner of a multi-chunk workspace, every chunk the box does not reach reports `validCount === 0`, and a `heightBand` lying entirely above the workspace yields `validVoxels === 0` — the narrowed build loops must not manufacture an edge plane or line of valid voxels
+6f. *Oversized readback* (§11.1): a chunk whose combined staging size exceeds `maxBufferSize` throws `SCENE_TOO_LARGE` instead of failing inside `mapAsync`, and the staging plan's size is the sum of the segments it carries
 7. *Mode 2*: voxels at a door-frame edge have count ∈ (0, 8); threshold behavior is correct
 
 **Performance**: the baselines of §15. **Memory**: GPU residency throughout compute ≤ the declared requiredLimits.

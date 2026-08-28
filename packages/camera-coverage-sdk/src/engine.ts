@@ -200,6 +200,9 @@ export class CoverageEngine implements VisibilityEngine {
     const mode = opts?.mode ?? 1;
     const threshold = opts?.threshold ?? 1;
     const precull = opts?.precull ?? true;
+    // §11.1: omitting `onChunkDone` declares a stats-only run, so the backend
+    // skips per-voxel readback entirely. `CoverageSummary` is unaffected.
+    const emitVoxels = !!opts?.onChunkDone;
     const numCameras = this.cameras.length;
     const cw = computeCamWords(Math.max(1, numCameras));
 
@@ -219,10 +222,12 @@ export class CoverageEngine implements VisibilityEngine {
 
       const activeMask = this.chunkActiveMask(chunk, cw, precull);
       if (allZero(activeMask)) {
-        // Still emit a result so downstream sees the (all-zero) chunk.
+        // Still emit a result so downstream sees the (all-zero) chunk. The dense
+        // zero buffers are only materialized when someone consumes them (§11.1).
         const empty = {
-          visibility: new Uint32Array(chunk.voxelCount * cw),
-          coverage: mode === 2 ? new Uint32Array(chunk.voxelCount * 4 * cw) : undefined,
+          visibility: emitVoxels ? new Uint32Array(chunk.voxelCount * cw) : undefined,
+          coverage:
+            emitVoxels && mode === 2 ? new Uint32Array(chunk.voxelCount * 4 * cw) : undefined,
           stats: {
             validCount,
             coveredCount: 0,
@@ -239,6 +244,8 @@ export class CoverageEngine implements VisibilityEngine {
         origin: chunk.origin,
         voxelSize: this.grid.voxelSize,
         validity,
+        validCount,
+        emitVoxels,
         cameras: this.cameras,
         numCameras,
         camWords: cw,
@@ -275,10 +282,10 @@ export class CoverageEngine implements VisibilityEngine {
     cw: number,
     mode: 1 | 2,
     validity: Uint32Array,
-    out: { visibility: Uint32Array; coverage?: Uint32Array; stats: ChunkResult['stats'] },
+    out: { visibility?: Uint32Array; coverage?: Uint32Array; stats: ChunkResult['stats'] },
     opts?: ComputeOptions,
   ): void {
-    if (!opts?.onChunkDone) return;
+    if (!opts?.onChunkDone || !out.visibility) return;
     const result = assembleChunkResult(
       chunkId,
       dims,

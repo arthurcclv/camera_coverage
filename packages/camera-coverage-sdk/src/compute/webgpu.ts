@@ -1,11 +1,16 @@
 /**
- * WebGPU compute backend (§11, §12).
+ * WebGPU compute backend (§11, §11.1, §12).
  *
  * Implements the per-chunk pipeline with the WGSL shaders in `../shaders.ts`.
  * Scene buffers (BVH + triangles) are uploaded once and kept immutable; per-chunk
  * buffers are created and destroyed around each dispatch so only one chunk is
  * ever GPU-resident (§9.4). This module is imported lazily and only runs where
  * `navigator.gpu` exists.
+ *
+ * Submission contract (§11.1): every pass for one chunk goes into a single
+ * command encoder and a single `submit()`, followed by exactly one GPU→CPU
+ * synchronization. Nothing is read back to size a dispatch — Pass 2's bound
+ * comes from the CPU-side `validCount` of the §6.4 validity cache.
  */
 
 /// <reference types="@webgpu/types" />
@@ -20,9 +25,34 @@ import { PASS1_FRUSTUM, PASS2_VISIBILITY, PASS3_STATS } from '../shaders.ts';
 
 const WG = 64;
 
+/**
+ * Module-level observability for §18.6c / §18.6d. `submits` and `maps` must each
+ * advance by exactly 1 per computed chunk, and `bytesRead` must exclude the
+ * per-voxel buffers on a stats-only run. Not exported from `index.ts` — tests
+ * import this module directly.
+ */
+export const gpuCounters = {
+  chunks: 0,
+  submits: 0,
+  maps: 0,
+  bytesRead: 0,
+  reset(): void {
+    gpuCounters.chunks = 0;
+    gpuCounters.submits = 0;
+    gpuCounters.maps = 0;
+    gpuCounters.bytesRead = 0;
+  },
+};
+
 export class WebGpuBackend {
   private device: GPUDevice;
   private caps: GpuCapabilities;
+  /**
+   * `device.limits.maxBufferSize`, the ceiling on the §11.1 staging buffer.
+   * Not part of `GpuCapabilities` — it constrains readback, not scene size, and
+   * every public limit there is one a caller can act on.
+   */
+  private maxBufferSize: number;
 
   private bvhBuf: GPUBuffer | null = null;
   private triBuf: GPUBuffer | null = null;
@@ -37,6 +67,7 @@ export class WebGpuBackend {
   private constructor(device: GPUDevice, caps: GpuCapabilities) {
     this.device = device;
     this.caps = caps;
+    this.maxBufferSize = device.limits.maxBufferSize;
   }
 
   get capabilities(): GpuCapabilities {
@@ -80,10 +111,8 @@ export class WebGpuBackend {
     this.nodeCount = bvh.nodeCount;
     this.bvhBuf = this.upload(bvh.nodes, GPUBufferUsage.STORAGE);
     // bvh.triData is the leaf-reordered 12-f32/tri array the shader indexes.
-    this.triBuf = this.upload(
-      bvh.triData.buffer.slice(bvh.triData.byteOffset, bvh.triData.byteOffset + bvh.triData.byteLength),
-      GPUBufferUsage.STORAGE,
-    );
+    // `upload` honours the view's byteOffset/byteLength, so no manual slice.
+    this.triBuf = this.upload(bvh.triData, GPUBufferUsage.STORAGE);
   }
 
   private getPipelines(camWords: number) {
@@ -109,9 +138,11 @@ export class WebGpuBackend {
     const d = this.device;
     const cw = input.camWords;
     const voxelCount = input.dims[0] * input.dims[1] * input.dims[2];
+    const mode2 = input.mode === 2;
     const { p1, p2, p3 } = this.getPipelines(cw);
 
-    if (Math.ceil(voxelCount / WG) > this.caps.maxComputeWorkgroupsPerDimension) {
+    const voxelGroups = Math.ceil(voxelCount / WG);
+    if (voxelGroups > this.caps.maxComputeWorkgroupsPerDimension) {
       throw new EngineError(
         EngineErrorCode.SCENE_TOO_LARGE,
         `Chunk has ${voxelCount} voxels; exceeds 1D dispatch limit. Reduce chunkSizeXZ.`,
@@ -119,106 +150,159 @@ export class WebGpuBackend {
     }
 
     // --- buffers ------------------------------------------------------------
+    const visBytes = voxelCount * cw * 4;
+    const covBytes = mode2 ? voxelCount * 4 * cw * 4 : 0;
+    const statsBytes = (2 + input.numCameras) * 4;
+
     const chunkInfo = this.upload(buildChunkInfo(input, voxelCount), GPUBufferUsage.UNIFORM);
-    const camBuf = this.upload(packCameras(input.cameras.slice(0, input.numCameras)).buffer, GPUBufferUsage.STORAGE);
-    const validityBuf = this.upload(input.validity.buffer, GPUBufferUsage.STORAGE);
+    const camBuf = this.upload(
+      packCameras(input.cameras.slice(0, input.numCameras)),
+      GPUBufferUsage.STORAGE,
+    );
+    const validityBuf = this.upload(input.validity, GPUBufferUsage.STORAGE);
     const candidates = this.storage(voxelCount * 4);
     const candMasks = this.storage(voxelCount * cw * 4);
     const candidateCount = this.storage(4);
-    const visibility = this.storage(voxelCount * cw * 4);
-    const coverage = this.storage(Math.max(4, (input.mode === 2 ? voxelCount * 4 * cw : 1) * 4));
-    const statsBuf = this.storage((2 + input.numCameras) * 4);
+    const visibility = this.storage(visBytes);
+    const coverage = this.storage(Math.max(4, covBytes));
+    const statsBuf = this.storage(statsBytes);
 
-    // clear counters / result buffers
-    const enc = d.createCommandEncoder();
-    enc.clearBuffer(candidateCount);
-    enc.clearBuffer(visibility);
-    enc.clearBuffer(statsBuf);
-    if (input.mode === 2) enc.clearBuffer(coverage);
+    const perChunk = [
+      chunkInfo, camBuf, validityBuf, candidates, candMasks,
+      candidateCount, visibility, coverage, statsBuf,
+    ];
 
-    // --- Pass 1 -------------------------------------------------------------
-    const bg1 = d.createBindGroup({
-      layout: p1.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: chunkInfo } },
-        { binding: 1, resource: { buffer: camBuf } },
-        { binding: 2, resource: { buffer: validityBuf } },
-        { binding: 3, resource: { buffer: candidates } },
-        { binding: 4, resource: { buffer: candMasks } },
-        { binding: 5, resource: { buffer: candidateCount } },
-      ],
+    // --- staging plan (§11.1: one buffer, one map) ---------------------------
+    const plan = planStaging(statsBytes, input.emitVoxels ? visBytes : -1,
+      input.emitVoxels && mode2 ? covBytes : -1);
+
+    // The segments are resident together, so the peak is their sum (§11.1). A
+    // device whose per-buffer ceiling they exceed would otherwise surface this
+    // as a swallowed GPUValidationError and a rejected `mapAsync`.
+    if (plan.size > this.maxBufferSize) {
+      for (const b of perChunk) b.destroy();
+      throw new EngineError(
+        EngineErrorCode.SCENE_TOO_LARGE,
+        `Chunk readback needs a ${mib(plan.size)} staging buffer; device maxBufferSize is ` +
+          `${mib(this.maxBufferSize)}. Reduce chunkSizeXZ, raise voxelSize, or omit ` +
+          `onChunkDone to read stats only.`,
+      );
+    }
+
+    const bufferOf: Record<number, GPUBuffer> = { 0: statsBuf, 1: visibility, 2: coverage };
+    const segments = plan.segments.map((seg) => ({ ...seg, src: bufferOf[seg.slot]! }));
+    const [statsOffset, visOffset, covOffset] = plan.offsets;
+
+    const staging = d.createBuffer({
+      size: Math.max(4, plan.size),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
-    const pass1 = enc.beginComputePass();
-    pass1.setPipeline(p1);
-    pass1.setBindGroup(0, bg1);
-    pass1.dispatchWorkgroups(Math.ceil(voxelCount / WG));
-    pass1.end();
-    d.queue.submit([enc.finish()]);
 
-    // Read candidate count to size Pass 2 (§11: 1-thread pass or CPU readback).
-    const count = new Uint32Array(await this.read(candidateCount, 4))[0];
+    try {
+      // --- one encoder, one submit (§11.1) ------------------------------------
+      const enc = d.createCommandEncoder();
+      enc.clearBuffer(candidateCount);
+      enc.clearBuffer(visibility);
+      enc.clearBuffer(statsBuf);
+      if (mode2) enc.clearBuffer(coverage);
 
-    if (count > 0) {
-      const enc2 = d.createCommandEncoder();
-      const bg2 = d.createBindGroup({
-        layout: p2.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: chunkInfo } },
-          { binding: 1, resource: { buffer: camBuf } },
-          { binding: 2, resource: { buffer: this.bvhBuf! } },
-          { binding: 3, resource: { buffer: this.triBuf! } },
-          { binding: 4, resource: { buffer: candidates } },
-          { binding: 5, resource: { buffer: candMasks } },
-          { binding: 6, resource: { buffer: candidateCount } },
-          { binding: 7, resource: { buffer: visibility } },
-          { binding: 8, resource: { buffer: coverage } },
-        ],
-      });
-      const pass2 = enc2.beginComputePass();
+      const pass1 = enc.beginComputePass();
+      pass1.setPipeline(p1);
+      pass1.setBindGroup(
+        0,
+        d.createBindGroup({
+          layout: p1.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: chunkInfo } },
+            { binding: 1, resource: { buffer: camBuf } },
+            { binding: 2, resource: { buffer: validityBuf } },
+            { binding: 3, resource: { buffer: candidates } },
+            { binding: 4, resource: { buffer: candMasks } },
+            { binding: 5, resource: { buffer: candidateCount } },
+          ],
+        }),
+      );
+      pass1.dispatchWorkgroups(voxelGroups);
+      pass1.end();
+
+      // Pass 2 is bounded by validCount, not by a read-back candidateCount
+      // (§11 Pass 2): a candidate must be a valid voxel, so
+      // candidateCount <= validCount, and the shader's `slot >= candidateCount`
+      // guard retires the surplus threads.
+      const pass2 = enc.beginComputePass();
       pass2.setPipeline(p2);
-      pass2.setBindGroup(0, bg2);
-      pass2.dispatchWorkgroups(Math.ceil(count / WG));
+      pass2.setBindGroup(
+        0,
+        d.createBindGroup({
+          layout: p2.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: chunkInfo } },
+            { binding: 1, resource: { buffer: camBuf } },
+            { binding: 2, resource: { buffer: this.bvhBuf! } },
+            { binding: 3, resource: { buffer: this.triBuf! } },
+            { binding: 4, resource: { buffer: candidates } },
+            { binding: 5, resource: { buffer: candMasks } },
+            { binding: 6, resource: { buffer: candidateCount } },
+            { binding: 7, resource: { buffer: visibility } },
+            { binding: 8, resource: { buffer: coverage } },
+          ],
+        }),
+      );
+      pass2.dispatchWorkgroups(Math.ceil(input.validCount / WG));
       pass2.end();
-      d.queue.submit([enc2.finish()]);
+
+      const pass3 = enc.beginComputePass();
+      pass3.setPipeline(p3);
+      pass3.setBindGroup(
+        0,
+        d.createBindGroup({
+          layout: p3.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: chunkInfo } },
+            { binding: 1, resource: { buffer: validityBuf } },
+            { binding: 2, resource: { buffer: visibility } },
+            { binding: 3, resource: { buffer: statsBuf } },
+          ],
+        }),
+      );
+      pass3.dispatchWorkgroups(voxelGroups);
+      pass3.end();
+
+      for (const seg of segments) {
+        enc.copyBufferToBuffer(seg.src, 0, staging, seg.offset, seg.size);
+      }
+      d.queue.submit([enc.finish()]);
+      gpuCounters.submits++;
+      gpuCounters.chunks++;
+
+      // --- one synchronization (§11.1) ----------------------------------------
+      await staging.mapAsync(GPUMapMode.READ);
+      gpuCounters.maps++;
+      for (const seg of segments) gpuCounters.bytesRead += seg.size;
+
+      const statsArr = new Uint32Array(staging.getMappedRange(statsOffset, statsBytes).slice(0));
+      const visOut =
+        visOffset >= 0
+          ? new Uint32Array(staging.getMappedRange(visOffset, visBytes).slice(0))
+          : undefined;
+      const covOut =
+        covOffset >= 0
+          ? new Uint32Array(staging.getMappedRange(covOffset, covBytes).slice(0))
+          : undefined;
+      staging.unmap();
+
+      const visibleCount = Array.from(statsArr.subarray(2, 2 + input.numCameras));
+      return {
+        visibility: visOut,
+        coverage: covOut,
+        stats: { validCount: statsArr[0], coveredCount: statsArr[1], visibleCount },
+      };
+    } finally {
+      // release per-chunk buffers (§9.4) — including on a mapAsync rejection or
+      // a device loss part-way through, which would otherwise strand them.
+      staging.destroy();
+      for (const b of perChunk) b.destroy();
     }
-
-    // --- Pass 3 -------------------------------------------------------------
-    const enc3 = d.createCommandEncoder();
-    const bg3 = d.createBindGroup({
-      layout: p3.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: chunkInfo } },
-        { binding: 1, resource: { buffer: validityBuf } },
-        { binding: 2, resource: { buffer: visibility } },
-        { binding: 3, resource: { buffer: statsBuf } },
-      ],
-    });
-    const pass3 = enc3.beginComputePass();
-    pass3.setPipeline(p3);
-    pass3.setBindGroup(0, bg3);
-    pass3.dispatchWorkgroups(Math.ceil(voxelCount / WG));
-    pass3.end();
-    d.queue.submit([enc3.finish()]);
-
-    // --- readback -----------------------------------------------------------
-    const visOut = new Uint32Array(await this.read(visibility, voxelCount * cw * 4));
-    const covOut =
-      input.mode === 2
-        ? new Uint32Array(await this.read(coverage, voxelCount * 4 * cw * 4))
-        : undefined;
-    const statsArr = new Uint32Array(await this.read(statsBuf, (2 + input.numCameras) * 4));
-
-    // release per-chunk buffers (§9.4)
-    for (const b of [chunkInfo, camBuf, validityBuf, candidates, candMasks, candidateCount, visibility, coverage, statsBuf]) {
-      b.destroy();
-    }
-
-    const visibleCount = Array.from(statsArr.subarray(2, 2 + input.numCameras));
-    return {
-      visibility: visOut,
-      coverage: covOut,
-      stats: { validCount: statsArr[0], coveredCount: statsArr[1], visibleCount },
-    };
   }
 
   dispose(): void {
@@ -236,12 +320,21 @@ export class WebGpuBackend {
 
   // --- buffer helpers -------------------------------------------------------
 
-  private upload(data: ArrayBufferLike, usage: GPUBufferUsageFlags): GPUBuffer {
+  /**
+   * Upload an ArrayBuffer or a typed-array **view**. Views are uploaded over
+   * their own `byteOffset`/`byteLength`, never the whole backing buffer — the
+   * validity mask (§6.4) and `bvh.triData` may both be views into a larger
+   * allocation, and uploading `.buffer` wholesale would silently send the wrong
+   * bytes on the GPU path only, where the CPU reference still reads correctly.
+   */
+  private upload(data: ArrayBuffer | ArrayBufferView, usage: GPUBufferUsageFlags): GPUBuffer {
     const buf = this.device.createBuffer({
       size: Math.max(4, alignUp(data.byteLength, 4)),
       usage: usage | GPUBufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(buf, 0, data as ArrayBuffer);
+    if (data.byteLength > 0) {
+      this.device.queue.writeBuffer(buf, 0, data as GPUAllowSharedBufferSource);
+    }
     return buf;
   }
 
@@ -254,26 +347,41 @@ export class WebGpuBackend {
         GPUBufferUsage.COPY_DST,
     });
   }
-
-  private async read(src: GPUBuffer, size: number): Promise<ArrayBuffer> {
-    const sz = Math.max(4, alignUp(size, 4));
-    const staging = this.device.createBuffer({
-      size: sz,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const enc = this.device.createCommandEncoder();
-    enc.copyBufferToBuffer(src, 0, staging, 0, sz);
-    this.device.queue.submit([enc.finish()]);
-    await staging.mapAsync(GPUMapMode.READ);
-    const copy = staging.getMappedRange().slice(0, size);
-    staging.unmap();
-    staging.destroy();
-    return copy;
-  }
 }
 
 function alignUp(v: number, a: number): number {
   return Math.ceil(v / a) * a;
+}
+
+function mib(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/**
+ * Lay out the §11.1 staging buffer: `stats` always, then `visibility` and
+ * `coverage` when the caller consumes them (a negative size means "omitted").
+ * Segment offsets are padded to 8 bytes for `getMappedRange`; `size` is the sum
+ * of what is actually carried, which is what the `maxBufferSize` check needs.
+ *
+ * Pure and exported so §18.6f can assert the arithmetic without a GPU. `slot`
+ * indexes stats/visibility/coverage; `offsets` is that same triple, `-1` where
+ * the segment is omitted.
+ */
+export function planStaging(
+  statsBytes: number,
+  visBytes: number,
+  covBytes: number,
+): { size: number; segments: { slot: number; offset: number; size: number }[]; offsets: [number, number, number] } {
+  const segments: { slot: number; offset: number; size: number }[] = [];
+  const offsets: [number, number, number] = [-1, -1, -1];
+  let size = 0;
+  [statsBytes, visBytes, covBytes].forEach((bytes, slot) => {
+    if (bytes < 0) return;
+    offsets[slot] = size;
+    segments.push({ slot, offset: size, size: bytes });
+    size = alignUp(size + bytes, 8);
+  });
+  return { size, segments, offsets };
 }
 
 /** Build the 64-byte ChunkInfo uniform matching the WGSL struct. */
