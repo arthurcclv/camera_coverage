@@ -18,6 +18,7 @@ import type {
   SceneStats,
   WorkspaceConfig,
 } from '../types.ts';
+import type { AggregateResult, AggregateSpec } from '../aggregate.ts';
 
 export interface Transport {
   post(data: unknown, transfer?: Transferable[]): void;
@@ -45,9 +46,27 @@ export type Req =
         precull?: boolean;
         incremental?: boolean;
         emitChunks?: boolean;
+        /**
+         * §19 descriptor. Unlike the callbacks, this crosses unchanged — the
+         * descriptor is plain data by construction (§19.1), which is exactly why
+         * regions are boxes and not a caller predicate.
+         */
+        aggregate?: AggregateSpec;
+        /** The caller supplied `onAggregate`, so the host streams results back (§19.4). */
+        emitAggregate?: boolean;
         /** The caller passed a `signal`, so the host installs an AbortController (§13.2). */
         cancellable?: boolean;
       };
+    }
+  /** §19.4 standalone aggregation over chunks the *client* retained. */
+  | {
+      id: number;
+      kind: 'aggregate';
+      /** Empty ⇒ run over the host's retained chunks (§16.1 host-side retention). */
+      chunks: ChunkResult[];
+      useRetained?: boolean;
+      spec: AggregateSpec;
+      cancellable?: boolean;
     }
   /**
    * Abort the in-flight `compute` whose request id is `computeId` (§13.2). A
@@ -60,7 +79,16 @@ export type Req =
 
 export type Res =
   | { id: number; ok: true; value: ResultValue }
-  | { id: number; ok: false; error: { code: string; message: string } };
+  | {
+      id: number;
+      ok: false;
+      /**
+       * `stack` and `detail` are carried so a worker-side failure is diagnosable
+       * from the main thread (§17). Without them every non-`EngineError` throw —
+       * an allocation failure above all — arrives naming nothing.
+       */
+      error: { code: string; message: string; stack?: string; detail?: unknown };
+    };
 
 export type ResultValue =
   | GpuCapabilities
@@ -86,6 +114,13 @@ export interface ChunkEvent {
 export interface RunStartEvent extends RunStart {
   kind: 'runStart';
   computeId: number;
+}
+
+/** Streamed per chunk during `compute` or `aggregate` (§19.4). */
+export interface AggregateEvent {
+  kind: 'aggregate';
+  computeId: number;
+  result: AggregateResult;
 }
 
 // --- transport adapters ----------------------------------------------------
@@ -124,6 +159,37 @@ export function loopback(): [Transport, Transport] {
     onMessage: (h) => { handlerB = h; },
   };
   return [a, b];
+}
+
+/** Collect the transferable buffers of an AggregateResult (§19.4). */
+export function aggregateTransferables(result: AggregateResult): Transferable[] {
+  const t: Transferable[] = [];
+  const push = (a?: { buffer: ArrayBufferLike }) => {
+    if (a && a.buffer instanceof ArrayBuffer) t.push(a.buffer);
+  };
+  // Groups are region accumulators in every respect but which entries they sum
+  // (§19.2), so they carry a `seen` array of the same shape. Omitting them here
+  // left the one part of the result that is structured-clone *copied* while the
+  // rest was transferred — the exact cost §16.1 says this function removes.
+  for (const r of result.regions ?? []) push(r.seen);
+  for (const g of result.groups ?? []) push(g.seen);
+
+  for (const c of result.columns ?? []) {
+    push(c.camCountSum);
+    push(c.camCountMax);
+    push(c.camCountMin);
+    push(c.blindCount);
+    push(c.validCount);
+    push(c.obstacleCount);
+    push(c.filteredCount);
+    push(c.seenWords);
+  }
+  push(result.leafCounts?.index);
+  push(result.leafCounts?.size);
+  push(result.leafCounts?.count);
+  push(result.probeMasks);
+  push(result.probeHits);
+  return t;
 }
 
 /** Collect the transferable buffers of a ChunkResult (§16.1). */

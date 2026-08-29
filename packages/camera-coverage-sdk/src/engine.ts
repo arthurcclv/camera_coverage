@@ -28,7 +28,7 @@ import { CellType } from './types.ts';
 import { WorkspaceGrid } from './grid.ts';
 import type { CleanMesh } from './geometry/mesh.ts';
 import type { Bvh } from './geometry/bvh.ts';
-import type { Occupancy } from './occupancy.ts';
+import type { OccupancySource } from './occupancy.ts';
 import { SamplingState } from './sampling.ts';
 import {
   camWords as computeCamWords,
@@ -36,9 +36,17 @@ import {
   prepareCamera,
   type PreparedCamera,
 } from './camera.ts';
-import { assembleChunkResult } from './results.ts';
+import { assembleChunkResult, denseOf, DenseScratch } from './results.ts';
 import { IncrementalState, type ChunkStats, type RunOptions } from './incremental.ts';
 import { CpuBackend, type ComputeBackend } from './backend.ts';
+import {
+  aggregateIsEmpty,
+  packAggregate,
+  validateAggregateSpec,
+  type AggregateResult,
+  type AggregateSpec,
+  type PackedAggregate,
+} from './aggregate.ts';
 import { tsKernels, type Kernels } from './kernels.ts';
 
 export interface EngineInternalOptions {
@@ -85,7 +93,7 @@ export class CoverageEngine implements VisibilityEngine {
 
   private mesh: CleanMesh | null = null;
   private bvh: Bvh | null = null;
-  private occupancy: Occupancy | null = null;
+  private occupancy: OccupancySource | null = null;
   private sampling: SamplingState | null = null;
 
   private cameraConfigs: CameraConfig[] = [];
@@ -116,6 +124,11 @@ export class CoverageEngine implements VisibilityEngine {
 
     const backendKind = config.backend ?? 'auto';
     this.backend = await createBackend(backendKind);
+    if (config.maxChunkReadbackBytes !== undefined && this.backend.maxChunkReadbackBytes !== undefined) {
+      // Only a backend that reads back declares the property; the CPU reference
+      // builds its arrays directly and has no staging step to bound (§11.1).
+      this.backend.maxChunkReadbackBytes = config.maxChunkReadbackBytes;
+    }
     // A re-init reshapes the grid, so every retained chunk id means something else.
     this.incremental.drop();
     this.disposed = false;
@@ -199,6 +212,10 @@ export class CoverageEngine implements VisibilityEngine {
   private refreshCameraEnabled(): void {
     this.cameraEnabled = this.cameras.map((cam) => cam.enabled);
     if (!this.occupancy) return;
+    // With solid detection off no cell can ever be SOLID (§6.2), so the question
+    // below has one answer. Asking it anyway would make a camera pose edit
+    // voxelize the chunk the camera sits in — for a `false` it already knows.
+    if (!this.occupancy.solidDetection) return;
     const [nx, ny, nz] = this.occupancy.dims;
     const vs = this.grid.voxelSize;
     const wm = this.grid.worldMin;
@@ -209,7 +226,7 @@ export class CoverageEngine implements VisibilityEngine {
       const j = Math.floor((p[1] - wm[1]) / vs);
       const k = Math.floor((p[2] - wm[2]) / vs);
       if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) continue;
-      const cell = this.occupancy.cells[i + nx * (j + ny * k)];
+      const cell = this.occupancy.cellAt(i, j, k);
       // Only a camera enclosed in SOLID interior is "inside geometry"; a camera
       // merely adjacent to a wall sits in a MIXED voxel and stays active (§18.3).
       if (cell === CellType.SolidGeometry) {
@@ -237,6 +254,13 @@ export class CoverageEngine implements VisibilityEngine {
     // §11.1: omitting `onChunkDone` declares a stats-only run, so the backend
     // skips per-voxel readback entirely. `CoverageSummary` is unaffected.
     const emitVoxels = !!opts?.onChunkDone;
+    // §19: validated up front so a malformed descriptor fails before any chunk
+    // dispatches, rather than part-way through a run.
+    let packedAgg: PackedAggregate | undefined;
+    if (opts?.aggregate && !aggregateIsEmpty(opts.aggregate)) {
+      validateAggregateSpec(opts.aggregate);
+      packedAgg = packAggregate(opts.aggregate);
+    }
     const numCameras = this.cameras.length;
     const cw = computeCamWords(Math.max(1, numCameras));
     const runOptions: RunOptions = { mode, threshold, emitVoxels };
@@ -272,6 +296,27 @@ export class CoverageEngine implements VisibilityEngine {
     // Fired before the first chunk so a caller accumulating chunks knows whether
     // to clear its store or replace into it (§16.1).
     opts?.onRunStart?.({ incremental, chunkIds });
+
+    /**
+     * A reusable all-zero mask array for chunks pre-cull emptied (§7.2).
+     *
+     * Such a chunk still has to be *emitted* — a caller accumulating chunks needs
+     * one per chunk — and `assembleChunkResult` needs dense input to build the
+     * SVO from. The bytes are identical every time and the builder only reads
+     * them, so one array serves every pre-culled chunk instead of one each. On a
+     * large site most chunks take this path, and at 0.1 m each array is several
+     * MiB, so this is the difference between a few MiB and hundreds per run.
+     *
+     * The SVO builder can decline to compress, and the dense fallback **retains**
+     * the array it was given (`results.ts`) — so if that happens the scratch has
+     * escaped into a result and is surrendered rather than handed to the next
+     * chunk as well.
+     */
+    let zeroScratch: Uint32Array | null = null;
+    const zeroMasks = (n: number): Uint32Array => {
+      if (!zeroScratch || zeroScratch.length !== n) zeroScratch = new Uint32Array(n);
+      return zeroScratch;
+    };
 
     const totalVisible = new Array<number>(numCameras).fill(0);
     let totalValid = 0;
@@ -310,7 +355,7 @@ export class CoverageEngine implements VisibilityEngine {
         // Still emit a result so downstream sees the (all-zero) chunk. The dense
         // zero buffers are only materialized when someone consumes them (§11.1).
         const empty = {
-          visibility: emitVoxels ? new Uint32Array(chunk.voxelCount * cw) : undefined,
+          visibility: emitVoxels ? zeroMasks(chunk.voxelCount * cw) : undefined,
           coverage:
             emitVoxels && mode === 2 ? new Uint32Array(chunk.voxelCount * 4 * cw) : undefined,
           stats: {
@@ -321,13 +366,41 @@ export class CoverageEngine implements VisibilityEngine {
         };
         totalValid += validCount;
         if (!scoped) this.incremental.record(chunkId, empty.stats);
-        this.emitChunk(chunkId, chunk.dims, chunk.origin, cw, mode, validity, empty, opts);
+        if (packedAgg) {
+          // Every camera pre-culled away, but the chunk's *validity* still counts:
+          // a region here is fully blind, not absent, and a column here is valid
+          // data at coverage 0. Skipping the aggregation would make it read as
+          // no-data instead (§19.2).
+          //
+          // `visibility: null` says "every mask word is zero" without allocating
+          // a dense array of zeros to say it (§19.4). In a large workspace most
+          // chunks take this path, so that array was hundreds of MiB of churn per
+          // run — and on a tall site large enough to fail outright.
+          const aggOut = await this.backend!.aggregateChunk({
+            chunkId,
+            dims: chunk.dims,
+            origin: chunk.origin,
+            base: chunk.base,
+            voxelSize: this.grid.voxelSize,
+            camWords: cw,
+            numCameras,
+            validity,
+            visibility: null,
+            packed: packedAgg,
+          });
+          opts?.onAggregate?.(aggOut);
+        }
+        const emitted = this.emitChunk(chunkId, chunk.dims, chunk.origin, cw, mode, validity, empty, opts);
+        // The dense fallback keeps the buffer it was handed, so the scratch is
+        // now owned by that result and must not be reused (see `zeroScratch`).
+        if (emitted?.encoding === 'dense') zeroScratch = null;
         continue;
       }
 
       const out = await this.backend!.computeChunk({
         dims: chunk.dims,
         origin: chunk.origin,
+        base: chunk.base,
         voxelSize: this.grid.voxelSize,
         validity,
         validCount,
@@ -339,7 +412,15 @@ export class CoverageEngine implements VisibilityEngine {
         bvh: this.bvh,
         mode,
         threshold,
+        aggregate: packedAgg,
       });
+
+      if (out.aggregate) {
+        // The backend has no chunk identity — it is handed one chunk's buffers,
+        // not a place in the workspace — so the engine stamps it.
+        out.aggregate.chunkId = chunkId;
+        opts?.onAggregate?.(out.aggregate);
+      }
 
       totalValid += out.stats.validCount;
       totalCovered += out.stats.coveredCount;
@@ -383,6 +464,58 @@ export class CoverageEngine implements VisibilityEngine {
     };
   }
 
+  /**
+   * §19.4 standalone aggregation over retained chunks. Nothing is raycast: a
+   * descriptor edit — a zone moved, a section dragged, a filter toggled — changes
+   * what is *counted*, never what is *seen*, and paying a recompute for it would
+   * be paying for the one thing that cannot have changed.
+   */
+  async aggregate(
+    chunks: Iterable<ChunkResult>,
+    spec: AggregateSpec,
+    opts?: { signal?: AbortSignal; onAggregate?: (result: AggregateResult) => void },
+  ): Promise<void> {
+    this.assertReady();
+    if (aggregateIsEmpty(spec)) return;
+    validateAggregateSpec(spec);
+    const packed = packAggregate(spec);
+    const signal = opts?.signal;
+
+    // §19.4 expansion scratch, reused across chunks. `denseOf` inflates a
+    // retained SVO back to dense, and a descriptor edit re-reduces *every*
+    // retained chunk, so a fresh pair per chunk is the whole scene's per-voxel
+    // footprint churned on every zone drag. Neither backend keeps what it is
+    // handed — the CPU reduction reads it and the WebGPU one copies it into a
+    // device buffer before returning — so one pair, grown to the largest chunk
+    // seen, serves them all.
+    const scratch = new DenseScratch();
+
+    for (const chunk of chunks) {
+      if (signal?.aborted) throw canceled();
+      if (signal) {
+        await yieldToEvents();
+        if (signal.aborted) throw canceled();
+      }
+      const dense = denseOf(chunk, scratch);
+
+      const base = this.grid.chunk(chunk.chunkId).base;
+      const out = await this.backend!.aggregateChunk({
+        chunkId: chunk.chunkId,
+        dims: chunk.dims,
+        origin: chunk.origin,
+        base,
+        voxelSize: chunk.voxelSize,
+        camWords: chunk.camWords,
+        numCameras: this.cameras.length,
+        validity: dense.validity,
+        visibility: dense.visibility,
+        packed,
+      });
+      out.chunkId = chunk.chunkId;
+      opts?.onAggregate?.(out);
+    }
+  }
+
   private emitChunk(
     chunkId: number,
     dims: Vec3,
@@ -392,8 +525,8 @@ export class CoverageEngine implements VisibilityEngine {
     validity: Uint32Array,
     out: { visibility?: Uint32Array; coverage?: Uint32Array; stats: ChunkResult['stats'] },
     opts?: ComputeOptions,
-  ): void {
-    if (!opts?.onChunkDone || !out.visibility) return;
+  ): ChunkResult | undefined {
+    if (!opts?.onChunkDone || !out.visibility) return undefined;
     const result = assembleChunkResult(
       chunkId,
       dims,
@@ -406,6 +539,7 @@ export class CoverageEngine implements VisibilityEngine {
       this.kernels.buildSvo,
     );
     opts?.onChunkDone?.(chunkId, result);
+    return result;
   }
 
   /**

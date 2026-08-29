@@ -62,6 +62,25 @@ Derived defaults:
 
 Chunk count and size are derived from the workspace dimensions and **must not be hard-coded**.
 
+**`chunkSizeXZ` is derived from a target chunk size, not pinned.** The defaults above
+describe a 100 × 20 × 100 m site, where a fixed 10 m gives the intended ~100 chunks of
+2M voxels. Applied unchanged to a 440 × 201 × 1120 m site at 1.0 m voxels it gives **4,928
+chunks of 20,100 voxels** — 50× the chunk count, each 100× smaller. Nothing about that is
+a per-voxel cost: it multiplies every *per-chunk* fixed cost (the GPU buffer set, a
+submission, a mapping, a result message, a §19.3 leaf merge) by 50, and §11.1's buffer
+churn is what fails first.
+
+A caller therefore derives `chunkSizeXZ` so a chunk lands near a **target voxel count**
+(2M by default), clamped so that:
+
+- `voxelCount / WG` stays inside `maxComputeWorkgroupsPerDimension` (§11 Pass 1), and
+- the planned readback stays inside `maxChunkReadbackBytes` (§11.1),
+
+and never below one voxel. Because chunks partition XZ only, the height is a fixed
+multiplier: `chunkSizeXZ ≈ voxelSize × sqrt(targetVoxels / gridDims.y)`. On the defaults
+this reproduces 10 m exactly; on the 440 × 201 × 1120 m site it gives ~100 m — 60 chunks
+of 2.01M voxels, back on the intended operating point.
+
 ---
 
 ## 4. System Architecture
@@ -176,6 +195,43 @@ enum CellType { EmptySpace = 0, MixedSpace = 1, SolidGeometry = 2 }
 | SOLID_GEOMETRY | Voxels inside are marked invalid and excluded from analysis and statistics |
 
 **Key invariant**: occupancy only decides "does this point need analysis" and "can ray traversal skip empty nodes"; it must **never** be used to directly derive visible / blocked. An empty voxel can still have a wall between it and the camera.
+
+**Materialization: per chunk by default, workspace-wide only for the flood fill.**
+The classification above is a pure function of (grid, mesh) per voxel, and its only
+per-voxel consumer is §6.4's validity build, which compresses it 8× to one bit per voxel
+and caches *that*. A workspace-wide `CellType` array is therefore an intermediate that
+outlives its own output by the whole session: at 0.1 m over 100 × 10 × 100 m it is
+95.4 MiB feeding an 11.9 MiB cache, and on the 440 × 201 × 1120 m site of §3 it does not
+fit at all.
+
+Occupancy is consequently an **interface with two implementations**, chosen by
+`solidDetection`:
+
+| Source | When | Retains |
+|---|---|---|
+| per-chunk | `solidDetection: false` (the default path for open sites) | nothing per voxel — one chunk is voxelized on demand into a reused scratch |
+| dense workspace | `solidDetection: true` | the whole grid, because the flood fill asks a *global* reachability question no single chunk can answer |
+
+Both present the same two operations: one chunk's cells in chunk-local order (X fastest),
+and one voxel by global index. The chunk buffer is **reused** — valid until the next call,
+never retained or transferred — which is what makes "retains nothing" true.
+
+Consequences that follow from this split, and are asserted in §18:
+
+- **`solidDetection: false` can never yield `SOLID_GEOMETRY`.** Only the flood fill
+  produces that class, and only the dense source runs it. §17's "camera inside geometry"
+  test therefore has one possible answer with solid detection off, and is skipped rather
+  than asked — asking it would voxelize the chunk a camera sits in on every pose edit, to
+  compute a `false` already known from the configuration.
+- **The dense-grid ceiling is not a backend cap.** Occupancy is scene *preprocessing*: it
+  runs identically under `backend: 'cpu'` and `backend: 'webgpu'`, neither of which ever
+  sees it. The ceiling bounds the **dense** grid on every backend, and the per-chunk
+  source has no workspace-scale allocation to bound. Exceeding it throws `SCENE_TOO_LARGE`
+  (§17) naming `voxelSize`, the workspace, and `solidDetection: false` — the three things
+  that change it.
+- **Voxelizations are counted.** The engine exposes, per run, the number of chunks
+  voxelized and the number of whole-workspace grids materialized. Residency is the claim
+  being made here, and the results alone cannot tell a per-chunk source from a dense one.
 
 ### 6.3 Sampling Policy (analysis-point filtering)
 
@@ -568,6 +624,44 @@ exactly one GPU→CPU synchronization.** No intra-chunk readback may gate a disp
 - Everything the caller needs is copied into **one** staging buffer and mapped once.
   `copyBufferToBuffer` offsets and sizes are 4-byte aligned; `getMappedRange` offsets
   are 8-byte aligned, so segments are padded to an 8-byte boundary.
+- **The readback is validated against a host-memory budget, not only a device one.**
+  Every segment is copied out of the mapped range into a JS `TypedArray`, so a chunk's
+  readback has to fit the *host* heap as well as the device's `maxBufferSize`. Those are
+  unrelated limits: a device advertising a 2 GiB `maxBufferSize` will happily accept a
+  400 MiB staging buffer that the JavaScript heap cannot copy, and the failure surfaces
+  as a bare `Array buffer allocation failed` with nothing naming the cause. `EngineOptions`
+  therefore carries `maxChunkReadbackBytes` (default 256 MiB); a chunk whose planned
+  readback exceeds it is rejected with `SCENE_TOO_LARGE` naming `chunkSizeXZ` and
+  `voxelSize`, the two knobs that actually change it.
+
+  *Rationale.* Per-chunk readback is `voxelCount × CAM_WORDS × 4` for the masks plus
+  ~1.13 B/voxel for §19's `leafCounts`, and `voxelCount` scales with the **full workspace
+  height** — chunks partition XZ only (§3). A tall site at a fine voxel size therefore
+  crosses this long before it crosses anything the device reports, and the honest failure
+  is one that says "reduce chunkSizeXZ".
+- **Per-chunk GPU buffers are pooled, not churned.** The backend keeps **one** set of
+  per-chunk buffers, grown to the largest chunk it is asked for and reused for every
+  chunk, rather than creating and destroying them each time. Creating ~18 buffers per
+  chunk satisfies §9.4's one-chunk-resident rule but is a poor way to honour it: at a
+  4,928-chunk partition that is ~88,700 create/destroy cycles and 4,928 mappings in one
+  run. A driver releases a destroyed buffer's mappable shared memory *asynchronously*, so
+  a loop that outruns reclamation exhausts the host's mappable address space and fails as
+  a bare allocation error inside the readback. Pooling makes residency **bounded and
+  constant**, which is strictly stronger than §9.4 requires.
+
+  The correctness condition: WebGPU zero-initializes a buffer at **creation**, not at
+  reuse. Every pooled buffer the passes *accumulate* into rather than fully overwrite —
+  `candidateCount`, `stats`, `visibility`, the candidate masks, and §19's `regionAccum` /
+  `cellAccum` / `cellSeen` / `leafValid` — must be cleared per chunk. Those clears are
+  recorded into the **same encoder** as the passes, so the one-submit / one-map contract
+  is unchanged. Omitting one yields a plausible wrong number rather than a crash, which is
+  why §18 asserts a pooled run bit-identical to an unpooled one.
+
+  The backend counts, per run: buffers created, bytes mapped, and peak concurrent buffer
+  bytes. A readback allocation that fails is caught and rethrown as `SCENE_TOO_LARGE`
+  naming the **requested byte count**, the chunk id and dims, `CAM_WORDS`, the staging
+  plan's per-segment sizes, and those counters — never left to propagate anonymously
+  (§17).
 - **The staging buffer is validated before it is created.** `stats` and — when the
   caller consumes them — `visibility` and `coverage` are resident in it *simultaneously*,
   so its peak size is their **sum**, not their max. A chunk whose combined readback
@@ -586,6 +680,11 @@ exactly one GPU→CPU synchronization.** No intra-chunk readback may gate a disp
   at ~5–10% of a whole `compute()` — but it also allocates a fresh dense `Uint32Array`
   per chunk, up to 62 MB per `compute()` at 0.1 m voxels with 128 cameras, which is pure
   GC churn; on a discrete GPU the same copy crosses PCIe.
+- **Aggregation passes join this same submission.** The §19 passes are recorded in the
+  one encoder after Pass 2 and their accumulators become additional staging segments, so
+  a run with a full aggregation descriptor still records exactly one `submit()` and one
+  mapping per chunk. Aggregation never reads back to size a dispatch, for the same reason
+  Pass 2 does not (§11 Pass 2).
 
 ---
 
@@ -815,7 +914,15 @@ interface VisibilityEngine {
     signal?: AbortSignal;                                 // §13.2, cancel at a chunk boundary
     onRunStart?: (info: RunStart) => void;                // fired before the first chunk
     onChunkDone?: (chunkId: number, result: ChunkResult) => void;  // streaming callback
+    aggregate?: AggregateSpec;                            // §19, evaluated inside the chunk pipeline
+    onAggregate?: (result: AggregateResult) => void;      // §19.4, one per computed chunk
   }): Promise<CoverageSummary>;
+  /** §19.4: re-evaluate a descriptor over chunks the caller retained. No raycasting. */
+  aggregate(
+    chunks: Iterable<ChunkResult>,
+    spec: AggregateSpec,
+    opts?: { signal?: AbortSignal; onAggregate?: (result: AggregateResult) => void },
+  ): Promise<void>;
   dispose(): void;
 }
 
@@ -890,6 +997,12 @@ cannot tell whether the engine was in-process or in a Worker.
 sends `incremental` as a plain field on the compute request, and the host posts a
 `runStart` message before the first `chunk` message.
 
+`aggregate` crosses it unchanged — the descriptor (§19.1) is plain data by construction,
+which is the point of expressing regions as boxes rather than as a caller predicate. As
+with `onChunkDone`, the client derives a boolean from `onAggregate` and the host posts an
+`aggregate` message per chunk; results are transferred, not cloned. A caller that runs the
+engine in-process passes the callback directly and nothing is serialized at all.
+
 **Host-side chunk consumption.** `installHost` accepts `onRunStart` and `onChunk` hooks
 of its own. When `onChunk` is supplied, the host feeds each `ChunkResult` to it and
 **never posts a `chunk` message**: the consumer lives in the worker, so the per-voxel
@@ -905,6 +1018,38 @@ hooks are the seam that lets a caller do that without the SDK knowing anything a
 what it derives. The `CoverageSummary` a run returns
 covers the whole scene either way (§13.1), so a host that ignores `onRunStart` entirely
 and requests full runs behaves exactly as before this feature existed.
+
+A host with an `onChunk` hook is also the natural owner of the retention that §19.4's
+standalone `aggregate()` needs: it already holds every `ChunkResult` of the current run,
+in the Worker, and can hand them straight back to `aggregate()` when the descriptor
+changes. That is the whole loop — masks are produced, reduced, and re-reduced without the
+per-voxel data ever crossing to the main thread.
+
+**Host-side retention.** `installHost` therefore accepts `retainChunks`. With it set the
+host keeps the current run's `ChunkResult`s itself — clearing them on a full run and
+replacing by `chunkId` on an incremental one, the §13.1 rule the host already has to
+follow for `onRunStart` — and `WorkerClient.aggregateRetained(spec)` re-runs §19.4 over
+them. That call carries a descriptor and returns accumulators; **no per-voxel data moves
+in either direction**.
+
+**Errors keep their context across the boundary.** The reply carries the worker-side
+`stack` and the `EngineError`'s `detail` alongside `code`/`message`, and `WorkerClient`
+attaches both to the error it rethrows. Without this every non-`EngineError` throw in the
+worker reaches the caller as an anonymous `INVALID_STATE` naming nothing — not the
+allocation that failed, not its size, not the chunk it was for — which makes an
+out-of-memory report undiagnosable from the outside, and that is exactly the class of
+failure a worker is most likely to produce.
+
+**Re-`init` releases the previous engine.** `init` disposes the engine it is replacing and
+clears any retained chunks before creating the new one. A re-init reshapes the grid, so
+every retained chunk id already means something else — and waiting for GC means the new
+workspace's allocations are attempted while the old workspace's are still live, which at
+scale is the difference between holding one occupancy grid (§6.2) and two.
+
+`aggregateRetained` is on `WorkerClient`, not on `VisibilityEngine`. An in-process engine
+retains nothing by design (§9.4), so putting it on the shared interface would be
+promising something only one implementation can keep. A caller that holds its own chunks
+uses `aggregate(chunks, spec)` on either.
 
 All large TypedArrays between the Worker and the main thread are passed as **transferables**; structured-clone copying is forbidden.
 
@@ -937,6 +1082,9 @@ All large TypedArrays between the Worker and the main thread are passed as **tra
 | Device lost | event reported to the UI; engine enters the disposed state and requires a new `init` |
 | Malformed mesh (NaN, degenerate faces) | cleaned at load time; the number of removed elements is reported |
 | `compute()` aborted via its signal (§13.2) | rejects with `COMPUTE_CANCELED` at the next chunk boundary; the incremental baseline is dropped and the engine stays usable. Not a failure — a caller that cancels deliberately should not surface it as an error |
+| Aggregation descriptor over a §19.6 cap | `compute()` / `aggregate()` throws `AGGREGATE_TOO_LARGE`, naming the limit and the requested count |
+| Malformed aggregation descriptor (§19.6) | `compute()` / `aggregate()` throws `INVALID_AGGREGATE` |
+| `aggregate()` aborted via its signal | rejects with `COMPUTE_CANCELED`, exactly as `compute()` does |
 
 ---
 
@@ -962,13 +1110,321 @@ All large TypedArrays between the Worker and the main thread are passed as **tra
 6i. *Incremental fallback* (§13.1): adding, deleting, or reordering a camera, or changing `mode`/`threshold`/`onChunkDone` presence between runs, reports `onRunStart.incremental === false` and streams every non-empty chunk; toggling `enabled` (§5.2) stays `true`; toggling `precull` stays `true`
 6j. *Cancellation* (§13.2): a `compute()` aborted mid-run rejects with `COMPUTE_CANCELED`, stops dispatching further chunks, and leaves the engine usable — a subsequent `compute()` returns a summary bit-identical to an uninterrupted run at the same cameras. Aborting before the first chunk dispatches nothing at all; aborting a run that already finished is a no-op
 6k. *Cancellation drops the baseline* (§13.2): the `compute()` following a cancelled one reports `onRunStart.incremental === false` even when the camera edit would otherwise have been eligible
+6l. *Aggregate backend parity* (§19.5): for a fixed scene and descriptor, every `AggregateResult` field is **bit-identical** between the `cpu` and `webgpu` backends — integral accumulators (§19.2) make this exact, so a tolerance here would be hiding a bug
+6m. *Aggregate matches a reference scan* (§19.2): region, column, and leaf-count outputs equal a straightforward scalar scan over the same `ChunkResult`s — the reduction the caller would otherwise have written by hand
+6n. *Inline equals standalone* (§19.4): `compute({ aggregate })` and `aggregate(retainedChunks, spec)` over that run's chunks produce identical results, so a descriptor edit never has to fall back to a recompute to stay correct
+6o. *Still one submission per chunk* (§11.1): with `regions`, `columns`, `leafCounts`, and `probes` all populated, the WebGPU backend still records exactly one `submit()` and one mapping per computed chunk
+6p. *Groups count once* (§19.2): a voxel inside two regions of the same group increments that group's accumulator exactly once while both per-region accumulators count it — summing the per-region entries must **not** reproduce the group, which is why it is a separate accumulator. A region in two groups feeds both; a region in none feeds only its own entry
+6q. *Column merge is chunk-invariant* (§19.2): per-chunk column accumulators summed across a multi-chunk workspace equal a single run over a chunk size that contains the slab whole, including the `camCountMin` sentinel path where a chunk counts nothing
+6r. *Aggregate validation* (§19.6): exceeding the region / slab / probe caps throws `AGGREGATE_TOO_LARGE`; a degenerate `halfSize`, a non-finite field, or a `maskRegions` index out of range throws `INVALID_AGGREGATE`
+6s. *Leaf merging is voxel-proportional* (§19.3): the collapse's scratch stays within a small constant × the chunk's voxel count and is **independent of the chunk's aspect ratio** — a tall chunk must not pay `maxDim³` — and merging a chunk whose dimensions are not powers of two is lossless, with no emitted cube extending past `dims`
+6t. *Re-aggregation does not scale with chunk count* (§19.4): `aggregate()` over N retained chunks performs `O(1)` dense expansions, not N, and expands no chunk whose `stats.coveredCount` is 0, while returning the same results as the inline run (6n)
+6x. *Pooled buffers are bit-identical* (§11.1): a run whose per-chunk GPU buffers are pooled and cleared produces visibility, stats, and every `AggregateResult` field bit-identical to one that creates them fresh per chunk — the clear-on-reuse condition has no other proof, since omitting a clear yields a wrong number rather than an error
+6y. *Buffer creation does not scale with chunk count* (§11.1): the backend's buffers-created counter is constant as the same workspace is partitioned into progressively more chunks, while the results stay identical
+6z. *A failed readback names itself* (§11.1, §17): an allocation failure inside a chunk's readback surfaces as `SCENE_TOO_LARGE` carrying the requested byte count, chunk id, dims, `CAM_WORDS`, and segment sizes — and a non-`EngineError` thrown in the worker reaches the client with its `stack` and `detail` intact rather than as a bare `INVALID_STATE`
 7. *Mode 2*: voxels at a door-frame edge have count ∈ (0, 8); threshold behavior is correct
 
 **Performance**: the baselines of §15. **Memory**: GPU residency throughout compute ≤ the declared requiredLimits.
 
 ---
 
-## 19. Known Limitations
+## 19. Aggregation
+
+Every consumer of a run reduces per-voxel masks to a few kilobytes of derived data:
+counts inside a box, a per-column summary, a popcount per voxel, the mask at a point.
+Doing that downstream pays three times — the readback, the transfer to wherever the
+consumer lives, and a scalar scan over millions of voxels. The engine already holds the
+masks at the moment they are produced, on the GPU, one chunk resident (§9.4). **Aggregation
+is a caller-supplied descriptor the engine evaluates there**, returning the reduced result
+instead of (or alongside) the per-voxel buffers.
+
+The SDK stays domain-free. It knows oriented boxes, voxel columns, popcounts, and points;
+it does not know zones, sections, overlays, or probes. Those are the caller's names for
+these four primitives, and the mapping is the caller's to keep.
+
+### 19.1 The descriptor
+
+```ts
+interface AggregateSpec {
+  regions?: AggregateRegion[];      // ≤ 64
+  columns?: AggregateSlab[];        // ≤ 32, batched into one pass
+  leafCounts?: AggregateLeafCounts;
+  probes?: Vec3[];                  // ≤ 256, world space
+}
+
+interface AggregateRegion {
+  center: Vec3;
+  rotation: Quat;        // identity ⇒ axis-aligned
+  halfSize: Vec3;        // all components > 0
+  /** Group indices (0..31) this region feeds; a voxel counts once per group (§19.2). */
+  groups: number[];
+}
+
+interface AggregateSlab {
+  /** Collapse axis: this slab's columns run along it and reduce to one cell. */
+  axis: 0 | 1 | 2;
+  /** Inclusive global voxel-index range per axis, in workspace grid coordinates. */
+  range: [[number, number], [number, number], [number, number]];
+  /** Count only voxels inside the union of these region indices; empty ⇒ no filter. */
+  maskRegions: number[];
+}
+
+interface AggregateLeafCounts {
+  /** Report voxels outside the union of these region indices as invalid; empty ⇒ no filter. */
+  maskRegions: number[];
+}
+```
+
+A region is an **OBB**, not the AABB of §7.1's `SamplingRegion`. Sampling regions bound
+*what is computed* and may be conservative; aggregation regions decide *what is counted*
+and must be exact, so they carry their rotation and the shader transforms each voxel
+center into the region's local frame.
+
+### 19.2 Outputs
+
+```ts
+interface AggregateResult {
+  chunkId: number;
+  /** One per descriptor region. */
+  regions?: RegionAccum[];
+  /** 32 entries, one per group index; a group nothing declared is all zeros. */
+  groups?: RegionAccum[];
+  /** One per slab, in descriptor order. */
+  columns?: ColumnAccum[];
+  /** Merged uniform cubes, not one entry per voxel — see below. */
+  leafCounts?: {
+    /** Per leaf: linear index of its minimum corner, chunk-local order. */
+    index: Uint32Array;
+    /** Per leaf: cube edge length in voxels (a power of two; 1 = a single voxel). */
+    size: Uint16Array;
+    /** Per leaf: popcount of every mask word, shared by every voxel it covers. */
+    count: Uint8Array;
+  };
+  /** `probes.length × camWords`; words are 0 where the probe missed this chunk. */
+  probeMasks?: Uint32Array;
+  /** Per probe: 0 = not in this chunk, 1 = in this chunk and valid, 2 = in this chunk and invalid. */
+  probeHits?: Uint8Array;
+}
+
+interface RegionAccum {
+  valid: number;                 // valid voxels whose center falls inside
+  covered: number;               // …of those, seen by ≥ 1 enabled camera
+  blind: number;                 // …of those, seen by none
+  seen: Uint32Array;             // numCameras entries, per-camera hit counts
+}
+
+interface ColumnAccum {
+  dimsA: number;                 // cells along the lower-numbered non-collapse axis
+  dimsB: number;
+  /** All arrays are `dimsA * dimsB`, row-major: index = a + dimsA * b. */
+  camCountSum: Uint32Array;      // Σ popcount over the cell's counted voxels
+  camCountMax: Uint8Array;       // 0 when the cell counted nothing
+  camCountMin: Uint8Array;       // 0xFF sentinel when the cell counted nothing
+  blindCount: Uint32Array;       // counted voxels with popcount 0
+  validCount: Uint32Array;       // counted voxels
+  obstacleCount: Uint32Array;    // in-filter voxels this chunk holds but marks invalid
+  filteredCount: Uint32Array;    // voxels the `maskRegions` filter removed
+  seenWords: Uint32Array;        // dimsA * dimsB * camWords, OR of every counted mask
+}
+```
+
+**Integer accumulators only — no float atomics, and none needed.** WGSL has no float
+atomic, which would ordinarily force a fixed-point encoding for a mean/max/min of
+coverage fractions. It does not here: every §13.3 fraction is `popcount / enabledCount`
+over a denominator that is constant for the whole run, so accumulating the integer
+popcount and dividing once at the end is not an approximation of the float reduction —
+it is exact, and it is exactly what the CPU backend does. This is what makes bit-identical
+cross-backend parity (§18, 6l) achievable rather than approximate.
+
+**Groups are how overlapping regions get counted once.** A caller whose domain object
+owns several boxes — a zone made of volumes, a floor made of rooms — cannot recover its
+total by summing the per-region entries, because a voxel inside two of them would be
+counted twice. Declaring those regions into a group yields an accumulator that counts each
+voxel once however many of the group's regions contain it. A region may belong to several
+groups (its own object's, and a wider union), and a region in none still reports its own
+entry. This replaces what would otherwise be the caller's only recourse — an inclusion–
+exclusion pass over region intersections, which is exponential and needs geometry the
+caller no longer has.
+
+**Merging across chunks is the caller's, and every accumulator is built to survive it.**
+Counts add; `seen` and `seenWords` OR; `camCountMax` takes the maximum and `camCountMin`
+the minimum, with the `0xFF` sentinel so a chunk that counted nothing cannot drag a
+minimum to 0. A chunk that a region or slab does not reach contributes zeros and is
+omitted from the result entirely rather than reported empty.
+
+**The engine does not classify.** `columns` reports what it counted — `validCount`,
+`obstacleCount`, `filteredCount` — and nothing about what a cell *means*. A caller that
+knows a slab's column length derives "this cell had voxels no chunk covered" by
+subtraction, and applies its own precedence (§13.3's colored / transparent / black is the
+sample app's, not the SDK's).
+
+### 19.3 Passes
+
+Aggregation adds passes to the §11 per-chunk pipeline. They run **after Pass 2** (the
+visibility buffer must be complete) and share Pass 3's encoder, so the §11.1 contract is
+unchanged: one encoder, one `submit()`, one map per chunk.
+
+**Pass 4: Region reduce.** One thread per voxel. Invalid → return. Compute the voxel
+center, transform it into each region's local frame by the conjugate rotation, and test
+the three half-extents. On a hit, `atomicAdd` into that region's `valid`, into `covered`
+or `blind` by whether any mask word is non-zero, and into `seen[c]` for each set bit. The
+group masks of every containing region are OR-ed into one word first and each set bit is
+then accumulated **once**, which is why a group cannot be recovered by summing regions.
+
+**Pass 5: Column reduce.** One thread per voxel per slab, over the intersection of the
+slab's global range with this chunk — every slab is batched into a single dispatch keyed
+by slab index, because §11.1 allows one submission and 32 dispatches would not fit the
+budget it protects. Each slab carries its own collapse `axis`, so one descriptor can hold
+a horizontal slab and a vertical one without a second pass. `atomicAdd` for the counts, `atomicMax` / `atomicMin` for the
+extrema, `atomicOr` for `seenWords`.
+
+**Pass 6: Leaf counts.** One thread per voxel, no atomics: `countOneBits` across
+`CAM_WORDS` packed four voxels to a `u32`, plus the filtered validity bit. That dense
+byte-per-voxel form is **intermediate**, not the output.
+
+**Leaves are then merged into uniform cubes, on the CPU, before they are returned.** A
+bottom-up octree collapse combines any 2×2×2 block whose eight children are all valid and
+all share one count, repeatedly — the same idea as §9.5's SVO, on the count rather than on
+the mask, which merges strictly better because two different camera sets with the same
+popcount collapse together. Anything outside the chunk's dimensions reads as invalid, so it
+never blocks a merge and never produces a leaf; consequently no emitted cube ever extends
+past `dims`.
+
+**The collapse's levels are the chunk's own dimensions, halved with a ceiling — not a
+padded power-of-two cube (§9.5's virtual padding does not apply here).** The two agree
+leaf-for-leaf, because padding was only ever empty and an out-of-range child reads the
+same way, but their working sets do not: a cube costs `maxDim³` cells where ceiling-halved
+levels cost `Σ voxels/8ⁱ ≈ 1.14 × voxels`. Chunks partition XZ only (§9.1), so a tall
+workspace makes `maxDim` the *height* while `voxels` stays bounded by §11's dispatch limit
+— a 100 × 400 × 100 chunk pads to 512³, which is 268 MiB for 4M voxels of input, in a
+single allocation, in the Worker. The collapse's scratch is therefore **bounded at 2 bytes
+per voxel × ~1.14**, and the merged list is accumulated into growable typed arrays rather
+than boxed-number arrays for the same reason: a chunk whose coverage field barely merges
+emits a leaf per voxel, and the transient must stay within a small factor of the 7-bytes-
+per-leaf output.
+
+Because a 2×2×2 block needs two cells on every axis, the collapse stops as soon as any
+axis is down to a single cell, and whatever survives that level is emitted. Nothing is
+lost by stopping there: a cube of that level's edge would have to reach past the short
+axis's extent, and the region it would cover past `dims` reads as empty, so such a block
+is never uniform.
+
+*Rationale.* The consumer of this is a renderer, and a renderer's cost is **per drawn
+instance**, not per byte. On a 30 × 8 × 30 m room at 0.1 m with 8 cameras, 7.0M valid
+voxels collapse to 612k leaves — a 11.5× reduction, and the difference between an instance
+buffer that fits a device's default 256 MiB limit and one that does not. A caller handed
+the dense form would have to do this merge itself, on the main thread, over every voxel.
+The collapse is `O(voxels)` (the level sizes form a geometric series) and runs in the
+Worker beside the masks.
+
+**Probes are resolved on the CPU**, from the chunk's masks after readback. A handful of
+`O(1)` point lookups do not repay a dispatch and a readback segment; they are an
+aggregation *output* rather than a pass because the value of carrying them here is that
+they cross a Worker boundary as a few hundred bytes instead of keeping the caller's probe
+logic on the far side of the per-voxel buffers.
+
+All aggregation outputs join the §11.1 staging plan as additional segments and are
+validated against `maxBufferSize` by the same check. Their combined size is bounded and
+small — regions and groups at the 64-region / 32-group, 128-camera ceiling are 50 KB, columns at the 32-slab
+ceiling are `Σ dimsA·dimsB · (28 + 4·CAM_WORDS)` bytes — with the single exception of
+`leafCounts`, whose *intermediate* dense form is chunk-proportional and therefore counted
+by the §11.1 readback budget. What is returned is the merged leaf list, which is bounded
+by the coverage field's complexity rather than by the voxel count.
+
+### 19.4 Entry points
+
+```ts
+compute(opts?: {
+  // …§16.1
+  aggregate?: AggregateSpec;
+  onAggregate?: (result: AggregateResult) => void;   // one per computed chunk
+}): Promise<CoverageSummary>;
+
+aggregate(
+  chunks: Iterable<ChunkResult>,
+  spec: AggregateSpec,
+  opts?: { signal?: AbortSignal; onAggregate?: (result: AggregateResult) => void },
+): Promise<void>;
+```
+
+**Inline**, on `compute()`: aggregation rides the run it belongs to. The masks are already
+GPU-resident, so Passes 4–6 cost a dispatch each and no readback beyond their own
+accumulators. This is the path every run takes.
+
+**Standalone**, on retained chunks: re-runs Passes 4–6 alone, uploading **one chunk at a
+time** and releasing it before the next, so §9.4's one-chunk-resident rule holds exactly
+as it does during `compute()`. Nothing is raycast and no BVH is touched.
+
+A retained chunk is normally SVO-encoded (§9.5) and the reduction needs a flat mask array,
+so the engine expands it. That expansion uses **one buffer pair, reused across every chunk
+of the call** and grown to the largest chunk it is asked for. Neither backend keeps what it
+is handed — the CPU reduction reads it, and the WebGPU one copies it into a device buffer
+before returning — so the alternative is a fresh pair per chunk, and since a descriptor
+edit re-reduces *every* retained chunk, that is the whole scene's per-voxel footprint
+churned on each zone drag. A chunk retained in dense form is passed through directly, with
+no expansion and no copy.
+
+**A chunk with no active cameras still aggregates, without materializing its masks.**
+Chunk-level pre-cull (§7.2) leaves whole chunks with an all-zero active mask, and in a
+large workspace those are the *majority* — the cameras cover part of the site. Such a
+chunk is not absent from the aggregation: its voxels are valid and fully blind, and
+omitting it would make a region there read as empty and a column there read as no-data
+(§19.2). But its masks are known to be zero, so the engine passes **no visibility buffer
+at all** rather than allocating a dense array of zeros to describe them. Both backends
+treat an absent buffer as all-zero: the CPU reference reads 0, and the WebGPU backend
+binds a zero-cleared storage buffer it never uploads to. At 0.1 m voxels a chunk's dense
+masks are several MiB, so on a large site the array that is *not* allocated here is
+hundreds of MiB of pure churn per run.
+
+The standalone form applies the same rule to a chunk it did not just compute, deciding it
+from the retained result's `stats.coveredCount`: masks are only ever written for valid
+voxels, so nothing covered means every mask word is zero, and the chunk is reduced from an
+absent visibility buffer. Deciding it is `O(1)` — it reads one number, not the chunk — and
+what it skips is the `voxelCount × CAM_WORDS` **mask** expansion, which is the bulk of a
+retained chunk and the whole reason expansion was expensive. A `dense` chunk skips all
+expansion, since it already carries both arrays. An `svo` one still walks its accessor to
+rebuild `validity`, because aggregation counts valid voxels whether or not any camera saw
+them (§19.2), and that walk produces one bit per voxel rather than `CAM_WORDS` words.
+After pre-cull the zero-coverage case is true of most chunks of a large site.
+
+The standalone form exists because the descriptor changes far more often than the scene
+does. Moving a zone, dragging a section, or toggling the marked filter changes only what
+is *counted*, not what is *seen* — and a caller that had to recompute visibility to
+re-count would pay a raycast for an edit that cannot change a single mask bit. Retention
+is deliberately the **caller's**: the engine holds one chunk at a time by design, and a
+caller that keeps a run's `ChunkResult`s (a host with an `onChunk` hook, §16.1, keeps them
+in the Worker) can hand them straight back. A caller that retains nothing simply does not
+use this form.
+
+`aggregate()` honours `signal` at chunk boundaries and rejects with `COMPUTE_CANCELED`
+(§13.2, §17), matching `compute()`.
+
+### 19.5 Backend parity
+
+`computeChunkCPU` implements the identical reduction in JavaScript, and both entry points
+work under `backend: 'cpu'`. Because every accumulator is integral (§19.2), the CPU and
+WebGPU outputs are **bit-identical**, not merely close.
+
+This is what makes the CPU path a genuine fallback rather than a second implementation of
+the caller's domain logic. Without it, a caller on a WebGL2-only browser would either
+lose the feature or maintain a parallel scalar path that drifts from the shader — and the
+drift would surface as a plausible wrong number, not a crash.
+
+### 19.6 Limits and validation
+
+| Constraint | Behavior |
+|---|---|
+| `regions.length > 64`, `columns.length > 32`, `probes.length > 256` | throws `AGGREGATE_TOO_LARGE` naming the limit and the requested count |
+| a `groups` index outside `0..31`, or a slab `axis` outside `0..2` | throws `INVALID_AGGREGATE` |
+| a region `halfSize` component ≤ 0, or a non-finite field | throws `INVALID_AGGREGATE` |
+| a `maskRegions` index outside `regions` | throws `INVALID_AGGREGATE` |
+| a `maskRegions` on a descriptor that declares no regions | throws `INVALID_AGGREGATE` |
+| combined staging size over `maxBufferSize` | throws `SCENE_TOO_LARGE` (§11.1), unchanged |
+| a chunk's readback over `maxChunkReadbackBytes` | throws `SCENE_TOO_LARGE` (§11.1) naming the knobs that fix it |
+| `aggregate` set with no sub-descriptor populated | no passes are added; `onAggregate` does not fire |
+
+---
+## 20. Known Limitations
 
 - SOLID determination is unreliable for non-watertight meshes (documented fallback exists)
 - All geometry is treated as opaque; glass and wire mesh will overestimate occlusion

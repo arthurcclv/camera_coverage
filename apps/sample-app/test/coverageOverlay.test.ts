@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { accessor, type ChunkResult } from '@linkervision/camera-coverage-sdk';
-import { coverageFraction, hueToRgb, popcountWords } from '../src/scene/coverageOverlay.ts';
+import { coverageFraction, hueToRgb } from '../src/scene/coverageOverlay.ts';
 
 test('voxel seen by all involved cameras has coverage fraction 1', () => {
   assert.equal(coverageFraction(4, 4), 1);
@@ -27,44 +26,6 @@ test('zero involved cameras does not divide by zero', () => {
 });
 
 // --- Camera count above 32 cameras (§9, SDK spec §7.1/§9.5) -----------------
-
-test('popcountWords counts every mask word, not just word 0', () => {
-  assert.equal(popcountWords(new Uint32Array([0b1011])), 3);
-  // cameras 32 and 34 only — word 0 empty
-  assert.equal(popcountWords(new Uint32Array([0, 0b101])), 2);
-  assert.equal(popcountWords(new Uint32Array([0xffffffff, 0xffffffff])), 64);
-  assert.equal(popcountWords(new Uint32Array([0, 0, 0, 0])), 0);
-});
-
-/** Dense 2×1×1 chunk: voxel 0 seen by camera 33 only, voxel 1 blind. */
-function highCameraChunk(): ChunkResult {
-  const visibility = new Uint32Array([0, 0b10, 0, 0]); // 2 voxels × camWords 2
-  const validity = new Uint32Array([0b11]); // both valid
-  return {
-    chunkId: 0,
-    encoding: 'dense',
-    dims: [2, 1, 1],
-    origin: [0, 0, 0],
-    voxelSize: 1,
-    camWords: 2,
-    mode: 1,
-    visibility,
-    validity,
-    stats: { validCount: 2, coveredCount: 1, visibleCount: [] },
-  };
-}
-
-test('a voxel seen only by a camera at index >= 32 is not read as a blind spot', () => {
-  // Regression: the overlay used forEachLeaf's word-0 `mask`, so voxels covered
-  // only by cameras 32+ got camCount 0 — invisible in Coverage mode and drawn as
-  // false blind spots in Blind spots mode.
-  const counts: number[] = [];
-  accessor(highCameraChunk()).forEachLeaf((_min, _size, _mask, valid, maskWords) => {
-    if (valid) counts.push(popcountWords(maskWords));
-  });
-  assert.deepEqual(counts, [1, 0], 'voxel 0 is seen by one camera; voxel 1 is blind');
-  assert.ok(coverageFraction(counts[0], 40) > 0, 'covered voxel renders with intensity');
-});
 
 // --- Overlay color (spec §9.2): hue → hsl(hue,100%,50%) RGB -----------------
 
@@ -99,6 +60,8 @@ test('every hue is fully saturated: one channel 1, one 0', () => {
 
 import * as THREE from 'three';
 import { CoverageOverlay } from '../src/scene/coverageOverlay.ts';
+import { MAX_INSTANCES } from '../src/scene/volumetric.ts';
+import type { AggregateResult } from '@linkervision/camera-coverage-sdk';
 
 /** The instance count actually uploaded to the renderer — one per drawn voxel. */
 function drawn(overlay: CoverageOverlay): number {
@@ -106,34 +69,39 @@ function drawn(overlay: CoverageOverlay): number {
   return mesh ? (mesh as THREE.InstancedMesh).count : 0;
 }
 
-/** A dense 2×1×1 chunk with both voxels valid, seen by `cams` cameras. */
-function simpleChunk(chunkId: number, cams: number): ChunkResult {
-  const mask = cams === 0 ? 0 : (1 << cams) - 1;
+/**
+ * One chunk's `leafCounts` aggregation (spec §3.3): a 2×1×1 chunk whose two
+ * voxels are valid and seen by `cams` cameras. Deliberately **unmerged** — two
+ * single-voxel leaves rather than one cube — so the counts below read as
+ * instances, which is what the overlay is being asserted on.
+ */
+function counts(chunkId: number, cams: number): AggregateResult {
   return {
     chunkId,
-    encoding: 'dense',
-    dims: [2, 1, 1],
-    origin: [chunkId * 2, 0, 0],
-    voxelSize: 1,
-    camWords: 1,
-    mode: 1,
-    visibility: new Uint32Array([mask, mask]),
-    validity: new Uint32Array([0b11]),
-    stats: { validCount: 2, coveredCount: cams > 0 ? 2 : 0, visibleCount: [] },
+    leafCounts: {
+      index: Uint32Array.of(0, 1),
+      size: Uint16Array.of(1, 1),
+      count: Uint8Array.of(cams, cams),
+    },
   };
 }
 
-test('a re-sent chunk replaces its leaves rather than piling on (spec §9)', () => {
+/** Feed one chunk's counts, supplying the geometry SceneView would. */
+function add(overlay: CoverageOverlay, chunkId: number, cams: number): void {
+  overlay.addResult(counts(chunkId, cams), [chunkId * 2, 0, 0], [2, 1, 1], 1);
+}
+
+test('a re-sent chunk replaces its counts rather than piling on (spec §9)', () => {
   const overlay = new CoverageOverlay();
   overlay.reset();
-  overlay.addChunk(simpleChunk(0, 1));
-  overlay.addChunk(simpleChunk(1, 1));
+  add(overlay, 0, 1);
+  add(overlay, 1, 1);
   overlay.flush();
   assert.equal(drawn(overlay), 4, 'two chunks × two voxels');
 
   // What an incremental run does: re-send chunk 0 only, without a reset.
   overlay.beginRun();
-  overlay.addChunk(simpleChunk(0, 2));
+  add(overlay, 0, 2);
   overlay.flush();
   assert.equal(drawn(overlay), 4, 'chunk 0 replaced, chunk 1 still standing');
   overlay.dispose();
@@ -142,14 +110,14 @@ test('a re-sent chunk replaces its leaves rather than piling on (spec §9)', () 
 test('an incremental run leaves untouched chunks in place (spec §8)', () => {
   const overlay = new CoverageOverlay();
   overlay.reset();
-  for (let id = 0; id < 5; id++) overlay.addChunk(simpleChunk(id, 1));
+  for (let id = 0; id < 5; id++) add(overlay, id, 1);
   overlay.flush();
   assert.equal(drawn(overlay), 10);
 
   // The failure this guards: calling reset() on an incremental run would blank
   // the four chunks the run never re-sent, with no error anywhere.
   overlay.beginRun();
-  overlay.addChunk(simpleChunk(2, 1));
+  add(overlay, 2, 1);
   overlay.flush();
   assert.equal(drawn(overlay), 10);
   overlay.dispose();
@@ -159,9 +127,9 @@ test('the rebuild is deferred to flush, not run per chunk (spec §9)', () => {
   const overlay = new CoverageOverlay();
   overlay.reset();
   overlay.beginRun();
-  overlay.addChunk(simpleChunk(0, 1));
-  overlay.addChunk(simpleChunk(1, 1));
-  // Nothing uploaded yet: rebuild walks *every* retained leaf, so doing it per
+  add(overlay, 0, 1);
+  add(overlay, 1, 1);
+  // Nothing uploaded yet: rebuild walks *every* retained chunk, so doing it per
   // chunk is quadratic in chunk count.
   assert.equal(drawn(overlay), 0);
   overlay.flush();
@@ -172,12 +140,84 @@ test('the rebuild is deferred to flush, not run per chunk (spec §9)', () => {
 test('reset empties the overlay immediately, without waiting for a flush (spec §14.4)', () => {
   const overlay = new CoverageOverlay();
   overlay.reset();
-  overlay.addChunk(simpleChunk(0, 1));
+  add(overlay, 0, 1);
   overlay.flush();
   assert.equal(drawn(overlay), 2);
 
   // A scene replace clears the overlay with no run following it.
   overlay.reset();
   assert.equal(drawn(overlay), 0);
+  overlay.dispose();
+});
+
+test('a merged leaf draws one instance covering its whole cube (spec §3.3, §9)', () => {
+  // One 2-voxel cube at the chunk's origin: its center is a full voxel in, not
+  // half — getting that wrong offsets the whole overlay by half a leaf.
+  const overlay = new CoverageOverlay();
+  overlay.reset();
+  overlay.addResult(
+    { chunkId: 0, leafCounts: { index: Uint32Array.of(0), size: Uint16Array.of(2), count: Uint8Array.of(1) } },
+    [10, 20, 30],
+    [4, 4, 4],
+    0.5,
+  );
+  overlay.flush();
+  assert.equal(drawn(overlay), 1, 'one leaf ⇒ one instance, not eight');
+
+  const mesh = overlay.object.children.find((c) => (c as THREE.InstancedMesh).isInstancedMesh) as THREE.InstancedMesh;
+  const m = new THREE.Matrix4();
+  mesh.getMatrixAt(0, m);
+  const pos = new THREE.Vector3().setFromMatrixPosition(m);
+  const scale = new THREE.Vector3().setFromMatrixScale(m);
+  // 2 voxels × 0.5 m = 1 m cube, centred half an edge in from the chunk origin.
+  assert.ok(Math.abs(scale.x - 1) < 1e-6, `edge ${scale.x}`);
+  assert.deepEqual(
+    [pos.x, pos.y, pos.z].map((v) => Math.round(v * 1e6) / 1e6),
+    [10.5, 20.5, 30.5],
+  );
+  overlay.dispose();
+});
+
+test('blind-spots mode keys off the leaf count, dropping covered leaves (spec §9.1)', () => {
+  const overlay = new CoverageOverlay();
+  overlay.setOptions({ mode: 'blindspots', involvedCameraCount: 4 });
+  overlay.reset();
+  overlay.addResult(
+    {
+      chunkId: 0,
+      leafCounts: { index: Uint32Array.of(0, 1, 2), size: Uint16Array.of(1, 1, 1), count: Uint8Array.of(0, 2, 0) },
+    },
+    [0, 0, 0],
+    [4, 1, 1],
+    1,
+  );
+  overlay.flush();
+  assert.equal(drawn(overlay), 2, 'only the two blind leaves');
+  overlay.dispose();
+});
+
+test('the instance cap truncates instead of losing the GPU device', () => {
+  // An InstancedMesh carries 64 B of matrix per instance; unbounded, a large
+  // scene walks past a device's default 256 MiB buffer limit and the device is
+  // lost. Truncation is reported so the caller can say so.
+  const overlay = new CoverageOverlay();
+  overlay.reset();
+  const n = MAX_INSTANCES + 1000;
+  overlay.addResult(
+    {
+      chunkId: 0,
+      leafCounts: {
+        index: Uint32Array.from({ length: n }, (_, i) => i),
+        size: new Uint16Array(n).fill(1),
+        count: new Uint8Array(n).fill(1),
+      },
+    },
+    [0, 0, 0],
+    [n, 1, 1],
+    1,
+  );
+  overlay.flush();
+  assert.equal(drawn(overlay), MAX_INSTANCES);
+  assert.equal(overlay.droppedLeaves, 1000, 'the overflow is reported, not silent');
   overlay.dispose();
 });

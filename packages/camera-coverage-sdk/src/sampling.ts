@@ -15,7 +15,7 @@
 import type { SamplingConfig, SamplingRegion, Vec3 } from './types.ts';
 import { CellType } from './types.ts';
 import type { ChunkGrid, WorkspaceGrid } from './grid.ts';
-import type { Occupancy } from './occupancy.ts';
+import type { OccupancySource } from './occupancy.ts';
 
 export interface ChunkValidity {
   validity: Uint32Array; // ceil(voxelCount/32) words, or zero-length when validCount is 0
@@ -38,7 +38,7 @@ export class SamplingState {
   private regions: SamplingRegion[];
   private stride: number;
   private grid: WorkspaceGrid;
-  private occ: Occupancy;
+  private occ: OccupancySource;
 
   /**
    * Per-chunk cache (§6.4). `null` = built and empty (validCount 0, no words);
@@ -56,7 +56,7 @@ export class SamplingState {
    */
   private boundsExact: boolean;
 
-  constructor(grid: WorkspaceGrid, occ: Occupancy, config: SamplingConfig) {
+  constructor(grid: WorkspaceGrid, occ: OccupancySource, config: SamplingConfig) {
     this.grid = grid;
     this.occ = occ;
     this.regions = config.regions.length ? config.regions : [{ type: 'full' }];
@@ -102,8 +102,6 @@ export class SamplingState {
     const [nx, ny, nz] = chunk.dims;
     const voxelCount = nx * ny * nz;
     const vs = this.grid.voxelSize;
-    const [gx, gy] = this.occ.dims;
-    const cells = this.occ.cells;
     const [i0, j0, k0] = chunk.base;
     const s = this.stride;
     const [ox, oy, oz] = chunk.origin;
@@ -130,8 +128,14 @@ export class SamplingState {
     const kLo = loIdx(this.lo[2], oz);
     const kHi = hiIdx(this.hi[2], oz, nz);
 
-    // The union misses this chunk entirely on at least one axis.
+    // The union misses this chunk entirely on at least one axis. Checked *before*
+    // asking for occupancy: a chunk the regions never reach must not be
+    // voxelized to be told it has no valid voxels (§6.2).
     if (iLo > iHi || jLo > jHi || kLo > kHi) return EMPTY;
+
+    // §6.2: one chunk's cells, in a reused buffer owned by the source. Read
+    // here, never retained — the validity mask below is what gets cached.
+    const cells = this.occ.cellsForChunk(chunk);
 
     const validity = new Uint32Array((voxelCount + 31) >> 5);
 
@@ -142,19 +146,15 @@ export class SamplingState {
 
     let count = 0;
     for (let k = start(kLo, k0); k <= kHi; k += s) {
-      const gk = k0 + k;
       const cz = oz + (k + 0.5) * vs;
-      const kBase = gy * gk;
       for (let j = start(jLo, j0); j <= jHi; j += s) {
-        const gj = j0 + j;
         const cy = oy + (j + 0.5) * vs;
-        const rowBase = gx * (gj + kBase);
         const localRow = nx * (j + ny * k);
         for (let i = start(iLo, i0); i <= iHi; i += s) {
-          if (cells[i0 + i + rowBase] !== CellType.EmptySpace) continue;
+          const li = localRow + i;
+          if (cells[li] !== CellType.EmptySpace) continue;
           if (!exact && !this.inRegions(ox + (i + 0.5) * vs, cy, cz)) continue;
 
-          const li = localRow + i;
           validity[li >> 5] |= 1 << (li & 31);
           count++;
         }

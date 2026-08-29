@@ -6,6 +6,383 @@ decisions at the top when you add to this file.
 
 ---
 
+## An `AggregateResult` is not gated on having read the masks back
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19.4, §19.5.
+
+**Why.** `WebGpuBackend.computeChunk` decided whether to decode the §19 accumulators
+with `aggBufs && visOut` — that is, only if the visibility segment had been read back.
+But `visOut` exists only when `emitVoxels` is set or the descriptor asks for probes,
+because probes are the *one* §19 primitive resolved from the masks on the CPU (§19.3).
+
+So a run with regions, columns and `leafCounts` but **no probes and no `onChunkDone`**
+ran Passes 4–6, copied every accumulator into the staging buffer, mapped it — and
+returned `undefined`. `onAggregate` never fired, while the CPU backend returned the
+result: a §19.5 parity break in the one direction nothing asserted. The app never saw
+it because `retainChunks` forces `emitVoxels` on.
+
+**Decision.** The decode is gated on `aggBufs` alone; `visibility` is passed as
+`visOut ?? null`, which `readAggregate` already handles (it reads the masks only when
+`probeCount > 0`). `test/webgpu.test.ts` covers the stats-only shape against the CPU
+reference, and fails against the old condition.
+
+**The general lesson.** A guard built from "what did we happen to read?" rather than
+"what did the caller ask for?" is a guard that will drift the first time the readback
+becomes more conditional than it was.
+
+---
+
+## `suggestChunkSizeXZ` clamps on readback, not only on the dispatch limit
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §3, §11.1.
+
+**Why.** §3 requires the suggestion be clamped so *both* `voxelCount / WG` stays inside
+`maxComputeWorkgroupsPerDimension` **and** the planned readback stays inside
+`maxChunkReadbackBytes`. Only the first was implemented. That left the suggestion free
+to propose a chunk `computeChunk` would then reject — the helper whose whole purpose is
+to land on a workable operating point handing the backend an unworkable one.
+
+**Decision.** The function takes optional `numCameras` and `maxReadbackBytes` and
+clamps on `CAM_WORDS × 4 + 1 + 1/8` bytes per voxel (masks, plus §19's `leafCounts`
+byte and validity bit). Both default to the permissive end — 1 camera, the same 256 MiB
+`EngineOptions` uses — so an existing caller's answer never silently tightens.
+
+**Trade-off.** The camera count is not known at `init` time in every app, and a caller
+that omits it gets the 1-word clamp, which is weaker than reality at 96 cameras. That
+is the honest default: a suggestion that guessed high would tighten chunks nobody asked
+to tighten. `sample-app` passes `cameras.length`.
+
+---
+
+## The readback budget is part of `ComputeBackend`, not a cast target
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §11.1.
+
+**Why.** `init` set the backend's `maxChunkReadbackBytes` through
+`this.backend as { maxChunkReadbackBytes?: number }` plus an `in` check — a cast that
+compiles against any backend and silently does nothing if the property is ever renamed.
+
+**Decision.** `ComputeBackend` declares `maxChunkReadbackBytes?: number`. It is
+**optional rather than `Infinity`** because "not applicable" is the honest state for
+the CPU reference: it builds its arrays directly and has no staging step to bound, and
+a numeric sentinel would invite code that compares against it.
+
+---
+
+## Per-chunk GPU buffers are pooled, and a worker failure keeps its stack
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §11.1, §17, §3, §18 (6x–6z).
+
+**Why.** `computeChunk` created ~18 `GPUBuffer`s per chunk — chunk info, cameras,
+validity, candidates, candidate masks, candidate count, visibility, coverage, stats, §19's
+eight accumulators, and a staging buffer — and destroyed them in a `finally`. That honours
+§9.4's one-chunk-resident rule, but poorly: a driver releases a destroyed buffer's mappable
+shared memory *asynchronously*, and a loop that outruns reclamation exhausts the host's
+mappable address space. On a real 440 × 201 × 1120 m site that meant **~88,700 buffer
+create/destroy cycles and 4,928 mappings in one run**, failing partway with
+`Array buffer allocation failed` inside the readback.
+
+**Decision:** one pooled set, grown to the largest chunk and reused. Chunk dimensions are
+uniform except at the workspace edge, where they are *smaller*, so the first chunk sizes
+the pool and nothing reallocates after it. Residency becomes bounded and constant, which is
+strictly stronger than §9.4 asks. Buffers created per run: **O(chunks) → O(1)**, asserted
+by §18 6y.
+
+**The correctness condition, and why it needs its own test.** WebGPU zero-initializes a
+buffer at **creation**, not at reuse. Every pooled buffer the passes accumulate into rather
+than fully overwrite — `candidateCount`, `stats`, `visibility`, `regionAccum`, `cellAccum`,
+`cellSeen`, `leafCounts`, `leafValid` — must be cleared per chunk, in the same encoder so
+the one-submit/one-map contract holds. `candidates` and `candMasks` are exempt: Pass 1
+writes them at compacted slots and Pass 2 reads only slots below `candidateCount`. Omitting
+a clear yields a plausible wrong number, never an error, so §18 6x proves it by asserting a
+multi-chunk run equals running each chunk against a *fresh engine*, whose pool starts empty.
+
+**Second half: the error stopped naming itself.** `installHost`'s `replyError` sent only
+`{ code, message }`, so every non-`EngineError` throw in the worker arrived as an anonymous
+`INVALID_STATE` — no allocation, no size, no chunk. Finding the site above took the user
+reading `webgpu.ts` themselves. The reply now carries the worker `stack` and the
+`EngineError`'s `detail`, and a failed readback allocation is rethrown as `SCENE_TOO_LARGE`
+naming the requested bytes, chunk dims, `CAM_WORDS`, the staging plan's segment sizes, and
+the run's counters. A diagnostic that costs two fields should not have been optional.
+
+**Third: `chunkSizeXZ` was pinned at 10 m.** That constant describes the §3 default room.
+On the site above it gave **4,928 chunks of 20,100 voxels** — 50× the intended count, each
+100× smaller — multiplying every per-chunk fixed cost by 50 for no per-voxel benefit.
+`suggestChunkSizeXZ` derives it from a 2M-voxel target: `vpc = floor(sqrt(target/gridY))`,
+since chunks partition XZ only and the height is a fixed multiplier. It reproduces 10 m
+exactly on the §3 defaults and gives 99 m — **60 chunks of 1.97M voxels** — on the real site.
+
+**Trade-off.** The pool holds one chunk's buffers between `compute()` calls instead of
+releasing them, so an idle engine retains a chunk's worth of device memory until `dispose()`.
+That is the same peak a run already needs, moved from transient to resident, and it is what
+buys the bounded behaviour. A pooled buffer also hands back the previous chunk's bytes,
+which is a live hazard for anything added later: the rule in `ARCHITECTURE.md` is that a
+reused buffer must be fully written or explicitly cleared, and it now covers GPU buffers as
+well as host scratch.
+
+**What this cost to find.** Four measured fixes preceded it — the leaf-merge cube, the
+`denseOf` churn, occupancy retention, and a retention hypothesis that measurement
+disproved — and none was the reported failure. Two things would have collapsed that: an
+error carrying its own context, and a note that the chunk-count assumption in
+`ARCHITECTURE.md` ("100 chunks of 2M voxels") was an assumption rather than a fact.
+
+---
+
+## Occupancy is materialized per chunk and retained nowhere
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §6.2, §6.4, §16.1, §18 (6u–6w).
+
+**Why.** `computeOccupancy` allocated one dense `Uint8Array` over the whole
+workspace grid — one byte per voxel — and the engine held it for the session. At a
+real site's scale (1000 × 100 × 1000 = 100M voxels, `chunkSizeXZ: 10`) that is
+**95.4 MiB in a single allocation**, and it was **89% of the worker's live
+`ArrayBuffer` bytes before a single chunk ran**: measured 95.4 MiB after
+`loadScene`, 107.3 MiB after `setSampling`, of which the validity cache is 11.9.
+It was the largest allocation left in the SDK and the last workspace-scale one.
+
+Two things about it were mis-stated in its own header, and both were why it went
+unrevisited: it claimed the dense grid was "appropriate for the CPU reference
+backend" and that "the GPU path is the production route" for large workspaces.
+**Occupancy is not part of either backend** — `loadScene` calls it before
+`backend.setScene(...)`, and neither `compute/cpu.ts` nor `compute/webgpu.ts`
+mentions it. There is no GPU occupancy path; `MAX_CPU_VOXELS` was never a
+CPU-backend cap.
+
+The shape of the fix comes from what the array is *for*. Its only per-voxel
+consumer is §6.4's validity build, which compresses it 8× to one bit per voxel and
+caches **that**. The 95.4 MiB is an intermediate outliving its own output by the
+entire session.
+
+**Decision:** two `OccupancySource` implementations. `ChunkOccupancy` (the
+default) voxelizes one chunk on demand into a reused scratch and retains nothing
+per voxel; a CSR triangle→chunk index built once at `loadScene` keeps a chunk's
+build proportional to the geometry near it instead of rescanning the mesh.
+`DenseOccupancy` survives only for `solidDetection: true`, because deciding
+whether an EMPTY cell is enclosed is a *global* reachability question — a sealed
+interior can span chunks, so no chunk-local pass can answer it. That path also
+lost its `Int32Array(total)` flood-fill worklist (381.6 MiB at 100M voxels) in
+favour of one grown to the frontier, and its ceiling now throws `SCENE_TOO_LARGE`
+naming `voxelSize` rather than a bare `Error` — which crossed the Worker boundary
+as `INVALID_STATE` naming nothing.
+
+Measured at 100M voxels, 78k triangles:
+
+| | before | after |
+|---|---|---|
+| live `ArrayBuffer` after `loadScene` | 95.4 MiB | 17.0 MiB (mesh + BVH + index) |
+| `loadScene` | 486 ms | 110 ms |
+| `setSampling` (full) | 341 ms | 483 ms |
+| `setSampling` (a volume edit) | 257 ms | 415 ms |
+| `setCameras` + `compute` | — | unchanged, **0** voxelizations |
+
+**Trade-off — this is a memory-for-time trade, and it lands on one path.**
+`setSampling` rebuilds every chunk's validity mask (§6.4), and each now
+re-derives that chunk's occupancy rather than reading a standing array, so
+sampling-volume edits get ~1.6× slower. Nothing else does: `setCameras` does not
+invalidate the validity cache, `compute()` reads the cached mask, and §19.4
+aggregation never touches occupancy. `loadScene` gets faster by more than the
+first `setSampling` loses. The alternatives considered were packing the grid to
+2 bits/voxel (4×, no time cost) and a 1-bit "not empty" plane (8×, no time cost);
+per-chunk was chosen for removing the ceiling outright rather than moving it.
+
+**The trap, and it is not hypothetical.** The first cut computed voxel centers and
+AABB ranges off the *chunk* origin. `worldMin + (i0 + i + 0.5) * vs` is not
+bit-identical to `(worldMin + i0 * vs) + (i + 0.5) * vs`, and that drift
+reclassified **~48k of 97M voxels at chunk seams** — `validVoxels` came back
+97,135,802 instead of 97,183,592. A small-grid parity test passed the whole time.
+Both are computed in global index space now, so the two sources agree by
+construction; only the storage is chunk-local. §18 6u's seam test (unaligned
+origin, 0.1 m voxels, 400 chunks, geometry lying *on* the boundaries) is the one
+that catches it.
+
+**Also here:** `installHost`'s `init` now disposes the engine it replaces and
+clears the retained chunks (§16.1). It did neither, so a re-init — which the
+sample app does on every debounced `voxelSize` change, and twice per attempt on
+the WebGPU→CPU fallback — allocated the new workspace while the old one was still
+live. Measured a **2× peak** at re-init (26.8 → 53.7 MiB at a 25M-voxel scale).
+Retained chunk ids also describe a different partition after a re-init, so
+keeping them was wrong independently of the memory.
+
+---
+
+## Leaf merging collapses on ceiling-halved levels, not on a padded power-of-two cube
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19.3, §18 (6s).
+
+**Why.** §19.3's bottom-up count collapse was first written the textbook way: pad the
+chunk to `side³` where `side` is the next power of two ≥ every dimension, then halve
+uniformly. That is the shape §9.5's SVO uses, and there it is harmless — the SVO's cube is
+*virtual*, a traversal convention, and nothing allocates it. The collapse is not a
+traversal; it materializes one cell per level, so the padding became real memory.
+
+Chunks partition XZ only (§9.1), so a chunk's Y extent is the **whole workspace height**.
+That makes `side` the height while the voxel count stays bounded by §11's 1D dispatch
+limit — the two decouple, and the cube's cost is `maxDim³` against an input of `voxels`.
+Measured: a 100 × 400 × 100 chunk (4.0M voxels, within the dispatch cap) pads to 512³ and
+allocates **292.5 MiB of `Int16Array` scratch, 268 MiB of it in a single array**, in the
+Worker. That is `Array buffer allocation failed`, reported to the client as
+`INVALID_STATE` because `installHost` maps any non-`EngineError` to it.
+
+**Decision:** levels are the chunk's own dimensions, halved with a ceiling, and a child
+past the level's edge reads as empty — which is what padding meant in the first place, so
+the two agree leaf-for-leaf (verified over ~4,000 randomized shapes and count fields
+against the previous implementation). Cost drops from `maxDim³` to `Σ voxels/8ⁱ ≈ 1.14 ×
+voxels`: **292.5 MiB → 8.7 MiB (33.6×)** on that chunk, with an identical leaf list. The
+collapse now stops when any axis reaches a single cell rather than at a cube root, which
+loses no merge — a cube of that edge would have to reach past the short axis, and what it
+would cover past `dims` is empty, so it could never have been uniform.
+
+The merged list is also accumulated into doubling typed arrays instead of `number[]`
+triples. A chunk whose coverage field barely merges emits a leaf per voxel, and boxed
+doubles plus the conversion copy were ~7× the 7-bytes-per-leaf output.
+
+**Trade-off.** The inner loop gained a bounds test per child (eight per block) that the
+padded cube did not need, because an out-of-range child now has to be recognized rather
+than read from padding. That is a predictable branch on a pass that is already
+memory-bound, and it buys a working set that no longer depends on the chunk's aspect
+ratio. It also means the level dimensions are no longer equal, so the code carries three
+of them instead of one `curSide`.
+
+**Where the previous two rounds were wrong.** The obvious suspect was `denseOf` (below),
+the only place that inflates compressed data, and it *was* churning — but its peak is one
+chunk and it never failed. The allocation that actually failed was in code whose comment
+called its own cost "negligible", copied from a place where it was. Both earlier fixes
+were found by tracing the global `Uint32Array` constructor; this one was invisible to that
+trace because it allocates `Int16Array`.
+
+---
+
+## Re-aggregating retained chunks reuses one expansion buffer and skips uncovered chunks
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19.4, §18 (6t).
+
+**Why.** A retained chunk is normally SVO-encoded (§9.5), and the §19 reduction needs a
+flat mask array, so `aggregate()` expands it back to dense — undoing the compression that
+made retention affordable. It runs on **every descriptor edit** (a zone moved, a section
+dragged, a filter toggled) over **every retained chunk**, and the first cut allocated a
+fresh `Uint32Array` pair per chunk. Measured on a 40 × 20 × 40 m workspace at 0.1 m, 16
+chunks: **122.1 MiB of expansion buffers per edit**, one 7.6 MiB array per chunk.
+
+**Decision:** one buffer pair per `aggregate()` call, grown to the largest chunk it is
+asked for and handed out as an exact `subarray` so a backend still sees the chunk's own
+length. This is safe because neither backend keeps what it is given — the CPU reduction
+reads it, the WebGPU one copies it into a device buffer before returning, and
+`resolveProbes` copies the words it needs. The expansion loop had to change to *write*
+zeros at invalid voxels rather than skipping them, or a reused buffer would leak the
+previous chunk's masks. A chunk retained in dense form is still passed through untouched.
+
+Separately, a chunk whose `stats.coveredCount` is 0 is not expanded at all: Pass 3 only
+increments `coveredCount` for a valid voxel with a set mask bit, and masks are only written
+for valid voxels, so 0 means every mask word is zero — which is exactly §19.4's absent-
+buffer case, decided in `O(1)` on data the retained result already carries. After pre-cull
+that is most chunks of a large site. Together: **122.1 MiB → 7.6 MiB per edit**, and the
+edit itself got ~30% faster.
+
+**Trade-off.** The scratch is held for the duration of the call and sized to the largest
+chunk, so peak residency is one chunk's dense form either way — the churn is what goes,
+not the peak. It is deliberately per-call rather than per-engine: holding it between edits
+would keep several MiB alive for a user who edits once.
+
+---
+
+## A pre-culled chunk aggregates without materializing its zeros, and readback is budgeted against the *host*
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19.4, §11.1, §17.
+
+**Why.** Chunk-level pre-cull (§7.2) leaves whole chunks with an all-zero active mask, and
+on a large site those are the *majority* — the cameras cover part of it. Those chunks are
+not absent from the aggregation: their voxels are valid and fully blind, and dropping them
+would make a region read as empty and a column read as no-data (§19.2). The first cut fed
+them a dense array of zeros to say so, and a second one to emit the chunk. Measured on a
+60 × 20 × 60 m workspace at 0.1 m — 36 chunks, 35 pre-culled — that was **534 MiB of
+transient allocation per run**, and it surfaced in the sample app as
+`Array buffer allocation failed`.
+
+**Decision:** `AggregateChunkInput.visibility` is nullable, meaning "every mask word is
+zero". The CPU reference reads 0; the WebGPU backend binds a zero-cleared storage buffer
+it never uploads to. Separately, the array needed to *emit* such a chunk is a single
+reused scratch — the bytes are identical every time and `buildSvo` only reads them. The
+subtle part is that the SVO builder may decline to compress, and the dense fallback
+**retains** the buffer it was handed (`results.ts`), so an escaped scratch is surrendered
+rather than handed to the next chunk as well. Same workspace: **534 MiB → 77 MiB**.
+
+**The second half is that the failure was undiagnosable.** §11.1 validated the staging
+buffer against the device's `maxBufferSize`, which says nothing about whether the JS heap
+can copy the mapped range out — and those limits are unrelated, so a device advertising
+2 GiB will accept a readback the heap cannot take. `maxChunkReadbackBytes` (default
+256 MiB) now bounds the host side and throws `SCENE_TOO_LARGE` naming `chunkSizeXZ` and
+`voxelSize`, the knobs that actually change it.
+
+**Trade-off.** On most hardware the 1D dispatch limit (§11 Pass 1) caps a chunk near 4M
+voxels, so the host budget rarely binds — it exists for devices reporting a permissive
+`maxComputeWorkgroupsPerDimension`, where nothing else would catch it. A guard that
+usually does not fire is still worth its cost when the alternative failure names nothing.
+
+---
+
+## Reductions run where the masks are, behind a domain-neutral descriptor
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19, §16.1, §11.1.
+
+**Why.** Every consumer of a run reduces per-voxel masks to a few kilobytes — counts in a
+box, a per-column summary, a popcount per voxel, a mask at a point. Done downstream that
+is paid three times: the readback, the transfer to wherever the consumer lives, and a
+scalar scan over millions of voxels. The sample app's zone aggregation was 257 ms of
+blocked main thread per run at 0.1 m voxels. **Decision:** the caller hands the engine a
+descriptor and gets the reduction back.
+
+**Four primitives, not an extension point.** The alternative considered was letting a
+caller inject its own WGSL pass. That is strictly more general and much larger — a buffer
+binding model, a readback budget inside §11.1's one-submission rule, and no CPU-backend
+parity unless the caller also hand-writes a JavaScript twin, which would drift. Oriented
+boxes, voxel columns, per-voxel popcounts, and point lookups cover every consumer we have
+while keeping the SDK domain-free: it knows boxes and columns, not zones and sections.
+
+**Groups are the non-obvious part.** A caller whose domain object owns several boxes — a
+zone made of volumes — cannot total it by summing the per-region entries, because a voxel
+in two of them counts twice. The alternative is inclusion–exclusion over region
+intersections, which is exponential and needs geometry the caller no longer has. A group
+accumulator counts each voxel once however many of that group's regions contain it, for
+one OR and one popcount loop per voxel.
+
+**No float atomics, and none needed.** WGSL has no float atomic, which normally forces a
+fixed-point encoding for a mean/max/min. It does not here: every fraction the app wants is
+`popcount / enabledCameras` over a denominator constant for the run, so the passes
+accumulate integer popcounts and the caller divides once. That is exact, not an
+approximation — which is what makes bit-identical CPU/GPU parity (§18 6l) an assertion
+rather than a tolerance.
+
+**Trade-off.** The reduction now exists twice, in WGSL and in JavaScript, and they must
+agree. `regionMask` is the sharp edge — see ARCHITECTURE.md's duplication axes.
+
+---
+
+## Retention is the caller's, and that is what makes a descriptor edit free
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19.4, §16.1, §9.4.
+
+**Why.** §9.4 keeps exactly one chunk GPU-resident, which is what holds a 200M-voxel
+workspace inside a 128 MiB binding budget. So the §19 passes cannot be a downstream
+stage — the masks are gone by then — and must run inside the per-chunk pipeline. But a
+descriptor changes far more often than a scene does: moving a zone, dragging a section,
+toggling a filter changes *what is counted*, never *what is seen*.
+
+**Decision:** two entry points over one WGSL body. `compute({ aggregate })` rides the run;
+`aggregate(chunks, spec)` re-runs Passes 4–6 alone over chunks **the caller retained**,
+uploading one at a time so §9.4 holds unchanged. Nothing is raycast and no BVH is touched.
+
+Retention is deliberately not the engine's: it holds one chunk at a time by design, and a
+caller that keeps a run's `ChunkResult`s can hand them straight back. `installHost`'s
+`retainChunks` makes the **Worker host** that caller, so `WorkerClient.aggregateRetained`
+re-reduces without any per-voxel data crossing the boundary in either direction. That is
+the whole loop: masks produced, reduced, and re-reduced, all in the worker.
+
+**Trade-off.** `aggregateRetained` is on `WorkerClient`, not on `VisibilityEngine` — an
+in-process engine retains nothing, so putting it on the shared interface would promise
+something only one implementation can keep.
+
+---
+
 ## Cancellation is cooperative, chunk-granular, and needs a macrotask yield to work
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.2, §16.1, §17.
@@ -331,8 +708,16 @@ proxy; large arrays cross as transferables (structured-clone forbidden).
 - **`loopback()` doesn't simulate buffer detachment** — worker tests cover
   message/streaming logic, not transfer-ownership semantics.
 - **Occupancy is computed at voxel resolution, not the hierarchical L0/L1/L2
-  sparse grid** — exact and simple, but allocates over the logical grid, so
-  CPU/WASM preprocessing rejects very large workspaces.
+  sparse grid** — exact and simple. No longer a memory gap: it is materialized
+  per chunk and retained nowhere (see the entry above), so only the
+  `solidDetection` path still allocates over the logical grid. The remaining gap
+  is that the Rust crate exports only the whole-workspace `compute_occupancy`, so
+  the per-chunk voxelizer is TS on both kernel sets.
+- **The coverage rate is not exactly partition-invariant** — §11 takes a voxel
+  centre from the chunk origin, so a different `chunkSizeXZ` drifts the centre and
+  flips voxels on an occlusion boundary (~4e-4 of the rate on a 30 m room, both
+  backends). §6.2's per-chunk occupancy computes in global index space to avoid
+  exactly this; the compute path has not been changed to match.
 - **No production CPU compute fallback** (see "WebGPU compute is the production
   path" above) — the CPU backend does not scale to the full 200 M-voxel
   workspace.

@@ -36,10 +36,17 @@ naturally subdivides space to hug the geometry). Concretely:
   Sections): selectable, deletable, addable via "+".
 - **Generate from geometry** seeds zones+volumes from the first BVH levels.
 
-## 1.1 SDK is not touched
+## 1.1 SDK involvement
 
-The whole feature lives in the sample app. Three facts make this possible with
-**zero SDK changes**:
+> **Superseded in part.** This section originally recorded that the feature needed
+> **zero SDK changes**. Points 2 and 3 no longer hold: the SDK gained an aggregation
+> API (`camera-coverage-sdk` §19), and zones now reach it as oriented **regions** and
+> **groups** rather than as a client-side filter over retained masks. What changed is
+> *where* the work runs, not what a zone means — the definitions below and in §2 are
+> unchanged. Point 1 (BVH seeding) still holds exactly as written. See §7.2 for the
+> current path and `spec.md` §3.3 for the descriptor.
+
+The three facts as originally recorded:
 
 1. **BVH seeding uses already-public SDK building blocks.** `@linkervision/camera-coverage-sdk`
    already exports `cleanMesh` and `buildBvh` (`src/index.ts`, "building blocks for
@@ -48,16 +55,16 @@ The whole feature lives in the sample app. Three facts make this possible with
    client-side from that mesh — identical to the worker's (both use the default TS
    kernels) — and walks its node array to extract boxes. Nothing new crosses the
    worker boundary.
-2. **Marking reuses existing sampling.** Axis-aligned boxes are expressed with the
-   SDK's existing `{ type: 'box' }` sampling region (a `regions[]` union). Rotation
-   — the only thing the SDK can't express — is an app-side filter over the
-   `ChunkResult`s the app already retains (`spec.md` §12.2, §13.4). No oriented-box
-   (OBB) region type is added to the SDK.
-3. **Per-zone results are client-side aggregation.** Visibility is computed per
-   voxel independent of any grouping, so **one** `compute()` pass over the union of
-   all zones' voxels suffices; the app partitions the retained masks per zone and
-   produces a separate summary for each. Zones never change what the SDK computes,
-   only how the app aggregates it.
+2. ~~**Marking reuses existing sampling.**~~ Axis-aligned boxes are still expressed
+   with the SDK's `{ type: 'box' }` sampling region to bound *what is computed*
+   (§7.1, unchanged). But rotation is no longer an app-side filter: an aggregation
+   **region** is an OBB and carries the volume's rotation exactly
+   (`camera-coverage-sdk` §19.1), so the marked set is evaluated where the masks are.
+3. ~~**Per-zone results are client-side aggregation.**~~ Still true that visibility is
+   computed per voxel independent of any grouping, so **one** `compute()` pass
+   suffices, and still true that zones never change what the SDK *computes*. But the
+   partitioning is no longer client-side: a zone is an aggregation **group** and the
+   engine returns its summary directly (§7.2).
 
 ---
 
@@ -398,48 +405,56 @@ covers every zone — grouping is purely an aggregation concern. This is the "na
 SDK" half of the earlier decision: the SDK computes only the boxes' neighborhood,
 cutting empty voxels out of the calculation and reducing compute.
 
-### 7.2 Per-zone aggregation (client-side)
+### 7.2 Per-zone aggregation (engine-side)
 
-After each run, from the retained `ChunkResult`s (the same masks backing probes and
-sections), the app computes a **summary per zone** over `M(z)`:
+Per-zone summaries come back from the SDK's aggregation (`camera-coverage-sdk` §19,
+`spec.md` §3.3), evaluated next to the masks rather than scanned on the main thread.
+The mapping is direct:
 
-- iterate voxel centers of the retained chunks once; for each valid voxel, decode
-  its camera mask (all words, up to `MAX_CAMERAS`), then for **each zone** test
-  `inZone(center, z)` and accumulate that zone's `validCount`, `coveredCount`
-  (≥1 camera), and per-camera `visibleCount`;
-- also accumulate the **enabled-zones union** (each voxel counted once if in any
-  *enabled* zone) — the summary that drives the overlay/main stats (§7.3, §7.4);
-- derive each zone's `overallRate`, per-camera `coverageRate`, `validVoxels`, and
-  blind-spot count — the same quantities as the SDK `CoverageSummary` (`spec.md`
-  §16.1), but per zone.
+- each **volume** is one aggregation **region** — an OBB carrying the volume's
+  `position`, `rotation`, and half-`size`, so a rotated volume is exact rather than a
+  conservative AABB refined afterwards;
+- each **zone** is a **group** its volumes declare. A zone's volumes may overlap, so a
+  zone's total is *not* the sum of its volumes' — a group is what counts each voxel
+  once no matter how many of that zone's volumes contain it (`camera-coverage-sdk`
+  §19.2);
+- the **enabled-zones union** (§7.3, §7.4) is one more group, declared additionally by
+  every **enabled** zone's volumes. One descriptor yields both answers in one pass.
 
-This reuses the mask-decoding the section stats already do (`spec.md` §13.7). The
-single pass handles any number of zones.
+Each group's accumulator carries `valid`, `covered`, `blind`, and per-camera `seen`,
+per chunk. The app sums them across chunks and derives each zone's `overallRate`,
+per-camera `coverageRate`, `validVoxels`, and blind-spot count — the same quantities as
+the SDK `CoverageSummary` (`spec.md` §16.1), but per zone.
 
-**The pass is cached per chunk.** The aggregation is a sum over voxels, so it
-decomposes: each chunk's contribution to every zone's accumulator (and to the union)
-is computed once and retained, and a run that replaces only some chunks — an
-incremental run, `spec.md` §8 — rescans only those and re-adds the rest. The cache is
-invalidated per chunk when that chunk's masks are replaced, and wholesale when the
-zone set (ids or `enabled`), the volumes' geometry/membership, or the run's camera
-list changes, since the accumulators depend on all of those. Those are a handful of
-small entities, so detecting the change is cheap next to the scan it protects.
+**Merging across chunks replaces the old per-chunk cache.** The accumulators are
+additive, so an incremental run (`spec.md` §8) that replaces a few chunks replaces only
+their contributions and every other chunk's stands. The client-side cache that used to
+buy this by hand — keyed on the zone set, the volumes' geometry, and the run's camera
+list — is gone: it existed to avoid a main-thread rescan that no longer happens.
 
-**The pass is skipped entirely when no zone holds a volume.** With nothing to test
-membership against, every accumulator finalizes to zero, so the scan cannot change the
-answer — and it is not cheap to run for nothing: it is `O(valid voxels × cameras)` over
-the *whole* retained run, on the main thread, after **every** `compute()`. At a fine
-voxel size that is hundreds of milliseconds of blocked UI per run, and with auto-run
-firing up to 10×/sec during a camera drag (`spec.md` §8.1) it is the dominant cost of an
-edit. The guard is on the volumes rather than on `useZones`, so a scene that has zones
-but no volumes in them is covered too; with the pass skipped, the SDK's own
-`CoverageSummary` populates the stats panel exactly as it does with the feature off.
+**A zone or volume edit does not recompute.** Moving a volume, resizing it, changing its
+`zoneId`, or toggling a zone changes only the descriptor, and none of those can change a
+mask bit. The app re-requests `aggregateRetained` (`spec.md` §3.3) over the masks the
+worker still holds. A volume edit *also* marks sampling dirty (§8), because it changes
+what the SDK should *sample* next run — but the summaries update immediately, without
+waiting for that run.
+
+*Historical note.* This scan used to run on the main thread after every `compute()`, at
+`O(valid voxels × cameras)` over the whole retained run — hundreds of milliseconds at a
+fine voxel size, with auto-run firing up to 10×/sec during a camera drag. It carried two
+optimizations that are now unnecessary and have been removed: the per-chunk cache above,
+and an early-out when no zone held a volume. The latter is subsumed by the descriptor
+itself — a run with no volumes declares no regions and adds no pass at all
+(`camera-coverage-sdk` §19.6).
 
 ### 7.3 Visualization follows the enabled zones
 
 A voxel is included in the overlay / section aggregation iff it is valid **and**
 `inMarked(center)`, where the marked set is the **union of the enabled zones**
-(§2.2): `M(enabled) = ⋃_{z enabled} M(z)`. Voxels outside it read as unmarked — the
+(§2.2): `M(enabled) = ⋃_{z enabled} M(z)`. It is applied by the aggregation, not by the
+app: the enabled zones' volumes are named in `maskRegions` on each section slab and on
+`leafCounts` (`camera-coverage-sdk` §19.1), so a voxel outside the union never reaches
+the app in the first place. Voxels outside it read as unmarked — the
 overlay draws nothing there. For **sections**, an unmarked voxel is **skipped** (it
 does not black the cell): a section cell aggregates only its in-marked valid voxels
 and is black only when its column has none (§13.3). The skip is applied **before** the
@@ -451,9 +466,10 @@ Which zones are enabled is set **only** by the per-zone **enabled checkbox** in 
 hierarchy row (§4.1), **decoupled from selection** (selecting a zone never changes
 it) — exactly like a camera's enabled state or a section's visibility. Each zone
 toggles independently: enabling one isolates it, enabling several shows their union,
-disabling all marks nothing. **Toggling a zone never triggers a recompute** — it
-only re-filters the retained masks client-side (instant), like changing a section's
-orientation. Overlay/sections **dim** when the retained run is stale, as today.
+disabling all marks nothing. **Toggling a zone never triggers a recompute** — it changes
+which regions the marked-set group and the slab/`leafCounts` filters name, and the app
+re-reduces the retained masks through `aggregateRetained` (`spec.md` §3.3), like
+changing a section's orientation. Overlay/sections **dim** when the retained run is stale, as today.
 
 - **Sections (`spec.md` §13.3).** Voxels **outside the enabled union** are **skipped
   first**, not blacked. Among the **in-union** voxels, if any is invalid the cell is

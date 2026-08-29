@@ -245,3 +245,244 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (any) { atomicAdd(&stats[1], 1u); }
 }
 `;
+
+// ---------------------------------------------------------------------------
+// §19.3 Aggregation passes
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared aggregation declarations. `regionMask` is the hot primitive: it is
+ * computed once per voxel and reused by the region accumulators, the column
+ * filter, and the leaf filter — which is why a slab and a leaf-count descriptor
+ * name region *indices* rather than carrying boxes of their own (§19.1).
+ *
+ * It must agree bit-for-bit with `regionMask` in `aggregate.ts`: same conjugated
+ * quaternion, same operand order, same `<=`. A divergence here would surface as
+ * a plausible wrong count, never as a crash (§19.5).
+ */
+const AGG_COMMON = /* wgsl */ `
+struct AggInfo {
+  regionCount : u32,
+  groupCount  : u32,
+  slabCount   : u32,
+  numCameras  : u32,
+  leafMaskLo  : u32,
+  leafMaskHi  : u32,
+  baseI       : u32,
+  baseJ       : u32,
+  baseK       : u32,
+};
+
+// 3 × vec4<f32> per region: [center.xyz, unionFlag], [half.xyz, _], [conj rotation]
+fn regionMask(p: vec3<f32>, count: u32) -> vec2<u32> {
+  var lo = 0u;
+  var hi = 0u;
+  for (var r = 0u; r < count; r = r + 1u) {
+    let c = regions[r * 3u + 0u];
+    let h = regions[r * 3u + 1u];
+    let q = regions[r * 3u + 2u];
+    let d = p - c.xyz;
+    let t = 2.0 * cross(q.xyz, d);
+    let l = d + q.w * t + cross(q.xyz, t);
+    if (all(abs(l) <= h.xyz)) {
+      if (r < 32u) { lo = lo | (1u << r); } else { hi = hi | (1u << (r - 32u)); }
+    }
+  }
+  return vec2<u32>(lo, hi);
+}
+
+fn regionIn(m: vec2<u32>, r: u32) -> bool {
+  if (r < 32u) { return ((m.x >> r) & 1u) == 1u; }
+  return ((m.y >> (r - 32u)) & 1u) == 1u;
+}
+
+/** An empty filter admits everything; otherwise the voxel must be in one of its regions. */
+fn maskAllows(fLo: u32, fHi: u32, m: vec2<u32>) -> bool {
+  if (fLo == 0u && fHi == 0u) { return true; }
+  return ((fLo & m.x) | (fHi & m.y)) != 0u;
+}
+
+fn popcountVoxel(li: u32) -> u32 {
+  var n = 0u;
+  for (var w = 0u; w < CAM_WORDS; w = w + 1u) {
+    n = n + countOneBits(visibility[li * CAM_WORDS + w]);
+  }
+  return n;
+}
+`;
+
+/** §19.3 Pass 4: per-region reduce. One thread per voxel; atomics into a tiny buffer. */
+export const PASS4_REGIONS = /* wgsl */ `${COMMON}
+@group(0) @binding(0) var<uniform> chunk : ChunkInfo;
+@group(0) @binding(1) var<storage, read> validity : array<u32>;
+@group(0) @binding(2) var<storage, read> visibility : array<u32>;
+@group(0) @binding(3) var<storage, read> regions : array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> accum : array<atomic<u32>>;
+@group(0) @binding(5) var<uniform> agg : AggInfo;
+${AGG_COMMON}
+
+const REGION_BASE : u32 = 3u;   // valid, covered, blind
+
+fn addRegion(entry: u32, li: u32, camCount: u32) {
+  let o = entry * (REGION_BASE + agg.numCameras);
+  atomicAdd(&accum[o], 1u);
+  if (camCount > 0u) { atomicAdd(&accum[o + 1u], 1u); } else { atomicAdd(&accum[o + 2u], 1u); }
+  for (var w = 0u; w < CAM_WORDS; w = w + 1u) {
+    var word = visibility[li * CAM_WORDS + w];
+    while (word != 0u) {
+      let bit = firstTrailingBit(word);
+      word = word & (word - 1u);
+      let c = w * 32u + bit;
+      if (c < agg.numCameras) { atomicAdd(&accum[o + REGION_BASE + c], 1u); }
+    }
+  }
+}
+
+@compute @workgroup_size(WG_SIZE)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let li = gid.x;
+  if (li >= chunk.dims.w) { return; }
+  if (((validity[li >> 5u] >> (li & 31u)) & 1u) == 0u) { return; }
+
+  let m = regionMask(voxelCenter(chunk, li), agg.regionCount);
+  if ((m.x | m.y) == 0u) { return; }
+  let camCount = popcountVoxel(li);
+
+  // Collect the group masks first, accumulate after: a group must count this
+  // voxel once however many of its regions contain it, which is why summing the
+  // per-region entries cannot reproduce a group (§19.2).
+  var groups = 0u;
+  for (var r = 0u; r < agg.regionCount; r = r + 1u) {
+    if (!regionIn(m, r)) { continue; }
+    addRegion(r, li, camCount);
+    groups = groups | bitcast<u32>(regions[r * 3u + 0u].w);
+  }
+  while (groups != 0u) {
+    let g = firstTrailingBit(groups);
+    groups = groups & (groups - 1u);
+    addRegion(agg.regionCount + g, li, camCount);
+  }
+}
+`;
+
+/**
+ * §19.3 Pass 5: per-column reduce. One thread per voxel, looping the ≤ 32 slabs
+ * inside — a thread per (voxel × slab) would multiply the dispatch by 32 for a
+ * loop that almost always exits on the first range test.
+ */
+export const PASS5_COLUMNS = /* wgsl */ `${COMMON}
+@group(0) @binding(0) var<uniform> chunk : ChunkInfo;
+@group(0) @binding(1) var<storage, read> validity : array<u32>;
+@group(0) @binding(2) var<storage, read> visibility : array<u32>;
+@group(0) @binding(3) var<storage, read> regions : array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> slabs : array<u32>;
+@group(0) @binding(5) var<storage, read_write> cells : array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> cellSeen : array<atomic<u32>>;
+@group(0) @binding(7) var<uniform> agg : AggInfo;
+${AGG_COMMON}
+
+const SLAB_STRIDE : u32 = 20u;
+const CELL_STRIDE : u32 = 7u;
+const F_SUM : u32 = 0u;
+const F_BLIND : u32 = 1u;
+const F_VALID : u32 = 2u;
+const F_OBSTACLE : u32 = 3u;
+const F_FILTERED : u32 = 4u;
+const F_MININV : u32 = 5u;
+const F_MAX : u32 = 6u;
+const MIN_EMPTY : u32 = 255u;
+
+@compute @workgroup_size(WG_SIZE)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let li = gid.x;
+  if (li >= chunk.dims.w) { return; }
+
+  let nx = chunk.dims.x;
+  let ny = chunk.dims.y;
+  let g = vec3<u32>(
+    agg.baseI + (li % nx),
+    agg.baseJ + ((li / nx) % ny),
+    agg.baseK + (li / (nx * ny)),
+  );
+
+  let isValid = ((validity[li >> 5u] >> (li & 31u)) & 1u) == 1u;
+  let m = regionMask(voxelCenter(chunk, li), agg.regionCount);
+  var camCount = 0u;
+  if (isValid) { camCount = popcountVoxel(li); }
+
+  for (var s = 0u; s < agg.slabCount; s = s + 1u) {
+    let o = s * SLAB_STRIDE;
+    let lo = vec3<u32>(slabs[o + 0u], slabs[o + 1u], slabs[o + 2u]);
+    let hi = vec3<u32>(slabs[o + 4u], slabs[o + 5u], slabs[o + 6u]);
+    if (any(g < lo) || any(g > hi)) { continue; }
+
+    // The two non-collapse axes in ascending order (§19.2): the collapse axis
+    // alone determines the in-plane mapping. Selected branchwise rather than by
+    // dynamic vector indexing, which WGSL allows only on function-scope vars.
+    let axis = slabs[o + 13u];
+    let d = g - lo;
+    var a = 0u;
+    var b = 0u;
+    if (axis == 0u) { a = d.y; b = d.z; }
+    else if (axis == 1u) { a = d.x; b = d.z; }
+    else { a = d.x; b = d.y; }
+
+    let dimsA = slabs[o + 11u];
+    let ci = slabs[o + 10u] + a + dimsA * b;
+    let co = ci * CELL_STRIDE;
+
+    if (!maskAllows(slabs[o + 8u], slabs[o + 9u], m)) {
+      atomicAdd(&cells[co + F_FILTERED], 1u);
+      continue;
+    }
+    if (!isValid) {
+      atomicAdd(&cells[co + F_OBSTACLE], 1u);
+      continue;
+    }
+    atomicAdd(&cells[co + F_VALID], 1u);
+    atomicAdd(&cells[co + F_SUM], camCount);
+    if (camCount == 0u) { atomicAdd(&cells[co + F_BLIND], 1u); }
+    let capped = min(camCount, 255u);
+    // Stored as the complement so a zero-cleared cell already reads as the
+    // §19.2 "counted nothing" sentinel — no initialization pass, no atomicMin.
+    atomicMax(&cells[co + F_MININV], MIN_EMPTY - capped);
+    atomicMax(&cells[co + F_MAX], capped);
+    for (var w = 0u; w < CAM_WORDS; w = w + 1u) {
+      atomicOr(&cellSeen[ci * CAM_WORDS + w], visibility[li * CAM_WORDS + w]);
+    }
+  }
+}
+`;
+
+/**
+ * §19.3 Pass 6: per-voxel popcount, packed four voxels to a word. The only
+ * aggregation output whose size scales with the chunk — 1 B/voxel against the
+ * visibility buffer's 4 × CAM_WORDS. Lanes within a word are disjoint, so the
+ * `atomicOr` is a write, not contention.
+ */
+export const PASS6_LEAFCOUNTS = /* wgsl */ `${COMMON}
+@group(0) @binding(0) var<uniform> chunk : ChunkInfo;
+@group(0) @binding(1) var<storage, read> validity : array<u32>;
+@group(0) @binding(2) var<storage, read> visibility : array<u32>;
+@group(0) @binding(3) var<storage, read> regions : array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> counts : array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> leafValid : array<atomic<u32>>;
+@group(0) @binding(6) var<uniform> agg : AggInfo;
+${AGG_COMMON}
+
+@compute @workgroup_size(WG_SIZE)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let li = gid.x;
+  if (li >= chunk.dims.w) { return; }
+  if (((validity[li >> 5u] >> (li & 31u)) & 1u) == 0u) { return; }
+
+  if (agg.leafMaskLo != 0u || agg.leafMaskHi != 0u) {
+    let m = regionMask(voxelCenter(chunk, li), agg.regionCount);
+    if (!maskAllows(agg.leafMaskLo, agg.leafMaskHi, m)) { return; }
+  }
+
+  let n = min(popcountVoxel(li), 255u);
+  atomicOr(&counts[li >> 2u], n << ((li & 3u) * 8u));
+  atomicOr(&leafValid[li >> 5u], 1u << (li & 31u));
+}
+`;

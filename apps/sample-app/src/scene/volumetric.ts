@@ -60,6 +60,18 @@ export const DEFAULT_COMPOSITE_MODE: CompositeMode = 'max';
 const EPS = 1e-6;
 const INITIAL_CAPACITY = 1024;
 
+/**
+ * Hard ceiling on drawn instances (`camera-coverage-sdk` §16.2 uses the same
+ * order for filtered instancing).
+ *
+ * `InstancedMesh` allocates a 64-byte `instanceMatrix` per instance on top of
+ * this module's own ~32 bytes of attributes, and a WebGPU device's *default*
+ * `maxBufferSize` is 256 MiB — so ~4.2M instances is where the renderer's device
+ * is lost, not merely slowed. The cap turns that into a visibly truncated
+ * overlay, which the caller can report.
+ */
+export const MAX_INSTANCES = 2_000_000;
+
 // --- Pure-TS reference math (the tested truth the TSL node graph mirrors) ----
 
 /**
@@ -186,6 +198,90 @@ export class VoxelVolumetricRenderer {
       this.count++;
     }
     this.commit();
+  }
+
+  /**
+   * Bulk append merged voxel cubes, writing straight into the instance buffers.
+   *
+   * Each entry is a cube of `edge` voxels a side whose voxels all share one
+   * key — for the coverage overlay, the camera count (`spec.md` §9, §3.3). The
+   * per-entry value is looked up through two 256-entry tables: `draw` says
+   * whether a key is rendered at all, `intensity` gives its value. A table
+   * rather than a callback because this loop can run over hundreds of thousands
+   * of entries per rebuild, and the array-of-objects form this replaces spent
+   * more time allocating `{center, size, ...}` than the upload it was preparing.
+   *
+   * Beyond {@link MAX_INSTANCES} the append stops and reports how many it
+   * dropped. An `InstancedMesh` carries a 64-byte matrix per instance on top of
+   * these attributes, so an unbounded count walks into a GPU device's buffer
+   * limit and takes the device down with it — a truncated overlay is a far
+   * better failure than a lost renderer.
+   */
+  addVoxelLeaves(g: {
+    origin: readonly [number, number, number];
+    dims: readonly [number, number, number];
+    voxelSize: number;
+    /** Per entry: linear index of its minimum corner, chunk-local order. */
+    index: Uint32Array;
+    /** Per entry: cube edge in voxels. */
+    edge: Uint16Array;
+    /** Per entry: the lookup key shared by every voxel it covers. */
+    keys: Uint8Array;
+    /** 256 entries: whether a key is drawn. */
+    draw: Uint8Array;
+    /** 256 entries: the intensity for a key. */
+    intensity: Float32Array;
+    color: readonly [number, number, number];
+  }): { dropped: number } {
+    const total = g.index.length;
+    if (total === 0) return { dropped: 0 };
+
+    // One pass to count, one to write: growing mid-loop would reallocate the
+    // very buffers being written into.
+    let drawn = 0;
+    for (let n = 0; n < total; n++) if (g.draw[g.keys[n]]) drawn++;
+    if (drawn === 0) return { dropped: 0 };
+
+    const room = Math.max(0, MAX_INSTANCES - this.count);
+    const dropped = Math.max(0, drawn - room);
+    drawn = Math.min(drawn, room);
+    if (drawn === 0) return { dropped };
+    this.ensureCapacity(this.count + drawn);
+
+    const [ox, oy, oz] = g.origin;
+    const [nx, ny] = g.dims;
+    const vs = g.voxelSize;
+    const [r, gg, b] = g.color;
+    const mesh = this.mesh!;
+    let i = this.count;
+    const limit = this.count + drawn;
+    for (let n = 0; n < total && i < limit; n++) {
+      const key = g.keys[n];
+      if (!g.draw[key]) continue;
+      const li = g.index[n];
+      const e = g.edge[n];
+      const world = e * vs;
+      // The cube spans `e` voxels from its minimum corner, so its center is half
+      // an edge in, not half a voxel.
+      const cx = ox + ((li % nx) + e / 2) * vs;
+      const cy = oy + ((Math.floor(li / nx) % ny) + e / 2) * vs;
+      const cz = oz + (Math.floor(li / (nx * ny)) + e / 2) * vs;
+      this.centerArr[i * 3] = cx;
+      this.centerArr[i * 3 + 1] = cy;
+      this.centerArr[i * 3 + 2] = cz;
+      this.halfArr[i] = world / 2;
+      this.intensityArr[i] = g.intensity[key];
+      this.colorArr[i * 3] = r;
+      this.colorArr[i * 3 + 1] = gg;
+      this.colorArr[i * 3 + 2] = b;
+      this.matrix.makeScale(world, world, world);
+      this.matrix.setPosition(cx, cy, cz);
+      mesh.setMatrixAt(i, this.matrix);
+      i++;
+    }
+    this.count = i;
+    this.commit();
+    return { dropped };
   }
 
   /** Overall brightness multiplier applied to every voxel's contribution. */

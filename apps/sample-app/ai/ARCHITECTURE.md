@@ -87,11 +87,14 @@ options, `voxelSize` (debounced 250 ms), summary, `autoRun`, transform
 mode/space, gizmo visibility, `sectionsVisible` (viewport master toggle), probe
 queries, `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`/
 `saveTarget`/`lastSave` (§14.5 — session-only, never persisted), and inspector
-split height. The retained-chunk stores and the run-generation
-guard live on one `coverageRun` (`useMemo(() => new CoverageRun())`, see
-`scene/coverageRun.ts`); the three derived reads (`sectionCellGrids`,
+split height. The merged per-chunk aggregation results and the
+run-generation guard live on one `coverageRun` (`useMemo(() => new CoverageRun())`,
+see `scene/coverageRun.ts`); the three derived reads (`sectionCellGrids`,
 `zoneCoverage`, `probeQueries`) call its `sectionCells`/`zoneCoverage`/
-`probeQueries`, keyed on `masksVersion`. All of that, plus two derived `useMemo`s
+`probeQueries`, keyed on `masksVersion`. What a run derives is one `aggregate`
+`useMemo` (`scene/aggregateSpec.ts`) — descriptor plus read-back index — and an
+effect re-requests it through `engine.reaggregate` whenever it changes, which is
+what makes a zone move or a section drag cost no recompute (spec §3.3). All of that, plus two derived `useMemo`s
 (`clipBand`, `sightlines`), is bundled into one immutable `sceneViewState`
 (`useMemo`) and pushed to `SceneView.sync()` in a single effect — SceneView diffs
 each field by reference, so an expensive op runs only on its own change. The only
@@ -133,7 +136,7 @@ default" — see DECISIONS.md).
   the `SceneView` class: it constructs and owns the viewport + all gizmo sets +
   the overlay, wires the pick raycaster and the pointer/`objectChange` listeners,
   and presents `create` · `sync(SceneViewState)` · `onSelect` · `onTransform` ·
-  `onPlace` · `resetCoverage`/`addCoverageChunk` · `dispose`. `sync` diffs each
+  `onPlace` · `resetCoverage`/`addCoverageCounts` · `dispose`. `sync` diffs each
   snapshot field by reference and fans it out to the objects below; drags come back
   as resolved `onTransform` events, clicks as resolved `onSelect`, and an armed
   "Place on surface" hit as an `onPlace` world point. The decision logic it owns
@@ -142,6 +145,19 @@ default" — see DECISIONS.md).
   (`floorVolumeSize`, `sectionBoundsFromCenters`), plus `types.ts`
   (`SceneViewState`, `TransformChange`). The gizmo/overlay/viewport modules below
   are its internal parts — App never touches them directly.
+- `aggregateSpec.ts` — the app → SDK aggregation mapping (spec §3.3), in one
+  place and in both directions: `buildAggregateSpec` turns zones/volumes/
+  sections/probes into an `AggregateSpec` (volume → OBB region, zone → group,
+  marked set → the enabled zones' group plus `maskRegions`, section → `columns`
+  slab, overlay → `leafCounts`, probe → `probes`) and returns the
+  `AggregateIndex` that reads the results back. Kept whole rather than split
+  across the four consumers because a zone's group index and the group its
+  numbers are read from drifting apart produces a plausible wrong number, never
+  an error. Unit-tested in `test/aggregateSpec.test.ts`.
+- `coverageRun.ts` — the merged store of a run's `AggregateResult`s plus the
+  §14.4 generation guard. Merges on **read**, not on arrival: an incremental run
+  re-sends a few chunks and each must *replace* its predecessor, which a running
+  total could not distinguish from an addition.
 - `geometryModel.ts` — the `GeometryObject` union (`room`/`box`/`gltf`, spec
   §14.1, §14.3) + pure triangle-mesh math shared by the default room and
   imported geometry: `boxTris`/`roomTris`/`mergeTris`, `transformTriMesh`
@@ -221,19 +237,13 @@ default" — see DECISIONS.md).
 - `runCameras.ts` — the bridge between a camera's **mask-bit index** (its position
   in the full list passed to `setCameras()`, disabled cameras included since spec
   §5.4) and its position among the cameras that *count*. Resolved once per run in
-  `reset()` and shared by all four retained-chunk consumers, so no readout
+  `CoverageRun.reset()` and shared by every readout derived from it, so no readout
   re-derives it — or forgets to. Pure, no deps.
-- `coverageRun.ts` — the coordinator for a run's three retained-chunk stores +
-  the generation guard. Owns `ProbeVisibility`/`SectionHeatmapStore`/
-  `ZoneCoverageStore`, fans out `reset`/`addChunk`/`clear` over the shared
-  `RetainedRun` interface, and fronts their reads (`sectionCells`/`probeQueries`/
-  `zoneCoverage`) so App never touches a store. `clear()` (scene replaced) also
-  bumps the generation `handleRun` guards its awaits against; `reset()` does not.
-  The overlay (the fourth consumer) stays in `SceneView`, driven inline by App.
-  See DECISIONS.md's CoverageRun entry.
-- `probeVisibility.ts` — `Probe` type, retained-chunk store, world-point → voxel
-  mask decode (pure `locateVoxel` / `chunkLocalForGlobalIndex`, the latter shared
-  with the section column walker).
+- `probeVisibility.ts` — the `Probe` model (`defaultProbeName`/`probeLabel`) and
+  the `ProbeVisibilityResult` shape App renders. No store and no mask decode:
+  probes are an SDK aggregation primitive now (`spec.probes`, SDK spec §19.2), so
+  the answer arrives already resolved and `CoverageRun.probeQueries` reads it.
+  Pure, no deps.
 - `volumetric.ts` — instanced-cube TSL volumetric renderer + pure-TS
   slab/chord/composite reference. Exposes `setRenderOrder` (draw order forwarded to
   the mesh, re-applied across buffer reallocation); the primitive stays agnostic to
@@ -242,14 +252,14 @@ default" — see DECISIONS.md).
   transparent layers (section heatmap plane → coverage fog → volume fill). The plane
   is the only depth writer, so it draws first and the depth test resolves the rest
   per viewpoint (spec §9, §13.5). See DECISIONS.md's transparent-layer draw-order entry.
-- `coverageOverlay.ts` — maps `ChunkResult` leaves → volumetric voxels per mode.
-  Retains leaves **keyed by `chunkId`** so a re-sent chunk replaces rather than
-  duplicates (spec §9), and defers the whole-overlay rebuild to an explicit flush at the
-  end of a run; client-side re-filters (mode, hue/intensity, zone toggle) still rebuild
-  immediately. Also the hue helper; exports `popcount32` (shared with `sectionHeatmap.ts`) and
-  `popcountWords`, which counts across all `CAM_WORDS` words. The app's only
-  `forEachLeaf` caller: it must read the callback's `maskWords`, never the word-0
-  `mask`, or cameras at index ≥ 32 vanish from the overlay (see DECISIONS.md).
+- `coverageOverlay.ts` — maps an `AggregateResult`'s `leafCounts` → volumetric
+  voxels per mode. The per-voxel camera *count* is reduced in the SDK now (§19.2),
+  so this module counts nothing itself — it retains the merged leaf list **keyed
+  by `chunkId`** so a re-sent chunk replaces rather than duplicates (spec §9), and
+  defers the whole-overlay rebuild to an explicit flush at the end of a run;
+  client-side re-filters (mode, hue/intensity) still rebuild immediately. Also the
+  hue helper (`hueToRgb`, `coverageFraction`) and `droppedLeaves`, the count the
+  last rebuild could not draw within the renderer's instance cap.
 - `sectionHeatmap.ts` — `Section` model, retained-chunk store, cross-chunk column
   aggregation, texture-data + stats generation, the section-legend visibility
   predicate (`sectionLegendVisible`, §13.6/§13.9), plus
@@ -297,10 +307,11 @@ default" — see DECISIONS.md).
 - `samplingVolumes.ts` — the region-of-interest core (`sampling_volumes.md`): the
   `Zone`/`SamplingVolume` types, OBB math (`inVolume`/`inZone`/`obbWorldAabb`),
   `buildSceneBvh` + `extractZonesAndVolumes` (BVH two-level seeding via the SDK's
-  public `cleanMesh`/`buildBvh`), `makeMarkedFilter` (the enabled-zones union filter the overlay
-  and sections apply), `regionsFromVolumes` (SDK `box` regions from OBB world
-  AABBs), and `ZoneCoverageStore`/`computeZoneCoverage` (a 4th retained-chunk
-  consumer that aggregates per-zone coverage client-side). Pure — no Three.js.
+  public `cleanMesh`/`buildBvh`), `regionsFromVolumes` (SDK `box` regions from OBB
+  world AABBs), and `summaryFromAccum` (a `ZoneSummary` from one SDK `RegionAccum`).
+  The enabled-zones union filter and per-zone coverage are no longer computed
+  here: both are descriptor primitives now — a group and `maskRegions` — built in
+  `aggregateSpec.ts` and reduced in the SDK. Pure — no Three.js.
 - `statsDisplay.ts` — the one place the *displayed* coverage numbers are chosen
   (spec §10, §5.5, `sampling_volumes.md` §7.4): `displayCoverageSummary` picks the
   enabled-zones union when zones are active and the SDK summary otherwise, and

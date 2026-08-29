@@ -8,12 +8,14 @@ export interface RunBarProps {
   stale: boolean;
   backend: 'webgpu' | 'cpu' | null;
   errorMessage: string | null;
+  /** Non-fatal §3.3 cap drops (§11). Shown alongside, never instead of, results. */
+  warnings?: string[];
   autoRun: boolean;
   onAutoRunChange(autoRun: boolean): void;
   onRun(): void;
 }
 
-export function RunBar({ status, stale, backend, errorMessage, autoRun, onAutoRunChange, onRun }: RunBarProps) {
+export function RunBar({ status, stale, backend, errorMessage, warnings, autoRun, onAutoRunChange, onRun }: RunBarProps) {
   const busy = status === 'initializing' || status === 'computing';
   return (
     <div className="panel">
@@ -32,6 +34,11 @@ export function RunBar({ status, stale, backend, errorMessage, autoRun, onAutoRu
         {stale && !busy && <span className="badge stale">Recompute — inputs changed</span>}
       </div>
       {errorMessage && <div className="error-banner">{errorMessage}</div>}
+      {warnings?.map((w) => (
+        <div className="warning-banner" key={w}>
+          {w}
+        </div>
+      ))}
     </div>
   );
 }

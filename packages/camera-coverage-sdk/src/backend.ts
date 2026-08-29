@@ -9,12 +9,25 @@ import type { CleanMesh } from './geometry/mesh.ts';
 import type { GpuCapabilities } from './types.ts';
 import type { ChunkComputeInput, ChunkComputeOutput } from './compute/cpu.ts';
 import { computeChunkCPU } from './compute/cpu.ts';
+import { aggregateChunkCPU, type AggregateChunkInput, type AggregateResult } from './aggregate.ts';
 
 export interface ComputeBackend {
   readonly capabilities: GpuCapabilities;
+  /**
+   * Host-heap ceiling on one chunk's readback (§11.1), when the backend has a
+   * readback to bound. The CPU reference builds its arrays directly and has no
+   * staging step, so it declares none — an absent property is "not applicable",
+   * which is why this is optional rather than `Infinity`.
+   */
+  maxChunkReadbackBytes?: number;
   /** Upload immutable scene data (BVH + triangles). */
   setScene(bvh: Bvh, mesh: CleanMesh): void | Promise<void>;
   computeChunk(input: ChunkComputeInput): ChunkComputeOutput | Promise<ChunkComputeOutput>;
+  /**
+   * §19.4 standalone aggregation over masks the caller retained. Uploads and
+   * releases one chunk at a time (§9.4) and touches neither the BVH nor a ray.
+   */
+  aggregateChunk(input: AggregateChunkInput): AggregateResult | Promise<AggregateResult>;
   dispose(): void;
 }
 
@@ -36,6 +49,10 @@ export class CpuBackend implements ComputeBackend {
 
   computeChunk(input: ChunkComputeInput): ChunkComputeOutput {
     return computeChunkCPU(input);
+  }
+
+  aggregateChunk(input: AggregateChunkInput): AggregateResult {
+    return aggregateChunkCPU(input);
   }
 
   dispose(): void {

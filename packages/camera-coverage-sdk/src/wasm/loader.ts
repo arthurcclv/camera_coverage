@@ -10,7 +10,7 @@ import type { Kernels } from '../kernels.ts';
 import type { CleanMesh } from '../geometry/mesh.ts';
 import type { Bvh } from '../geometry/bvh.ts';
 import { BVH_NODE_WORDS } from '../geometry/bvh.ts';
-import type { Occupancy } from '../occupancy.ts';
+import { ChunkOccupancy, DenseOccupancy, type OccupancySource } from '../occupancy.ts';
 import type { DenseChunk } from '../svo.ts';
 import type { SceneMesh, SvoChunk, Vec3 } from '../types.ts';
 import type { WorkspaceGrid } from '../grid.ts';
@@ -121,7 +121,18 @@ class Wasm {
     };
   }
 
-  computeOccupancy(grid: WorkspaceGrid, clean: CleanMesh, solidDetection: boolean): Occupancy {
+  computeOccupancy(
+    grid: WorkspaceGrid,
+    clean: CleanMesh,
+    solidDetection: boolean,
+  ): OccupancySource {
+    // Only the solid-detection path materializes a workspace grid (§6.2), and
+    // that is the only thing the crate exports. Without it the per-chunk source
+    // is the answer, and it is TS on both kernel sets until the crate gains a
+    // per-chunk voxelize export — the classification is identical either way,
+    // which is what the §18 parity test asserts.
+    if (!solidDetection) return new ChunkOccupancy(grid, clean);
+
     const [nx, ny, nz] = grid.gridDims;
     const triPtr = this.write(clean.triVerts);
     const hp = this.ex.compute_occupancy(
@@ -137,7 +148,7 @@ class Wasm {
     this.free(cellsPtr, cellsLen);
     this.free(hp, 4 * 4);
 
-    return { dims: grid.gridDims, cells, solidDetection, solidCount, mixedCount };
+    return new DenseOccupancy(grid, cells, solidCount, mixedCount);
   }
 
   buildSvo(chunkId: number, dense: DenseChunk): SvoChunk | null {

@@ -42,10 +42,10 @@ import { threeSpace, type TransformSpace } from '../transformSpace.ts';
 import { axisMapping, type ClipBand, type Section, type SectionCellGrid } from '../sectionHeatmap.ts';
 import { clipBandPlanes, setGeometryClippingPlanes, type GeometryBuild } from '../sceneGeometryBuild.ts';
 import { isClick, selectionAfterClick, type PointerPos, type Selection } from '../viewportSelection.ts';
-import type { MarkedFilter, SamplingVolume } from '../samplingVolumes.ts';
+import type { SamplingVolume } from '../samplingVolumes.ts';
 import type { SceneCamera } from '../../cameras/camera.ts';
 import type { Probe } from '../probeVisibility.ts';
-import type { ChunkResult } from '@linkervision/camera-coverage-sdk';
+import type { AggregateResult } from '@linkervision/camera-coverage-sdk';
 import type { ViewId } from '../viewCameras.ts';
 
 import { nearestHit, type PickCandidate } from './pick.ts';
@@ -75,8 +75,6 @@ export interface SceneViewState {
   sectionCellGrids: ReadonlyMap<string, SectionCellGrid | null>;
   /** Ids of enabled zones — dims volumes of disabled zones (spec §5); `useMemo`. */
   enabledZoneIds: ReadonlySet<string>;
-  /** Union-of-enabled-zones marked filter, or null for full volume (§7.3); `useMemo`. */
-  markedFilter: MarkedFilter | null;
   overlayOptions: OverlayOptions;
   transformMode: 'translate' | 'rotate' | 'scale';
   transformSpace: TransformSpace;
@@ -273,9 +271,18 @@ export class SceneView {
     this.overlay.beginRun();
   }
 
-  /** Feed a streamed `ChunkResult` into the coverage overlay (spec §9). */
-  addCoverageChunk(chunk: ChunkResult): void {
-    this.overlay.addChunk(chunk);
+  /**
+   * Feed one chunk's `leafCounts` aggregation into the coverage overlay (spec
+   * §3.3, §9). The chunk's geometry comes from the caller's `WorkspaceGrid`,
+   * since an `AggregateResult` carries a `chunkId` and accumulators, not a place.
+   */
+  addCoverageCounts(
+    result: AggregateResult,
+    origin: Vec3,
+    dims: [number, number, number],
+    voxelSize: number,
+  ): void {
+    this.overlay.addResult(result, origin, dims, voxelSize);
   }
 
   /** Rebuild the overlay once, after a run's last chunk (spec §9). */
@@ -325,11 +332,6 @@ export class SceneView {
     // --- volume gizmos (spec §5, §7.3): [volumes, selectedVolumeId, enabledZoneIds] ---
     if (!prev || prev.volumes !== next.volumes || volumeId(prev.selection) !== volumeId(next.selection) || prev.enabledZoneIds !== next.enabledZoneIds) {
       this.volumeGizmos.update(next.volumes, volumeId(next.selection), next.enabledZoneIds);
-    }
-
-    // --- overlay marked filter (spec §7.3): a pure client-side re-filter --------
-    if (!prev || prev.markedFilter !== next.markedFilter) {
-      this.overlay.setMarkedFilter(next.markedFilter);
     }
 
     // --- overlay options (spec §9) ---------------------------------------------

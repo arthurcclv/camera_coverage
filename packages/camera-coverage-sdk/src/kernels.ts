@@ -12,7 +12,7 @@
 import type { SvoChunk } from './types.ts';
 import { cleanMesh, type CleanMesh } from './geometry/mesh.ts';
 import { buildBvh, type Bvh } from './geometry/bvh.ts';
-import { computeOccupancy, type Occupancy } from './occupancy.ts';
+import { computeOccupancy, type OccupancySource } from './occupancy.ts';
 import { buildSvo, type DenseChunk } from './svo.ts';
 import type { SceneMesh } from './types.ts';
 import type { WorkspaceGrid } from './grid.ts';
@@ -20,7 +20,7 @@ import type { WorkspaceGrid } from './grid.ts';
 export interface Kernels {
   cleanMesh(mesh: SceneMesh): CleanMesh;
   buildBvh(clean: CleanMesh): Bvh;
-  computeOccupancy(grid: WorkspaceGrid, clean: CleanMesh, solidDetection: boolean): Occupancy;
+  computeOccupancy(grid: WorkspaceGrid, clean: CleanMesh, solidDetection: boolean): OccupancySource;
   buildSvo(chunkId: number, dense: DenseChunk): SvoChunk | null;
 }
 

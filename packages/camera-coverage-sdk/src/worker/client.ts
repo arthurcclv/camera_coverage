@@ -9,6 +9,7 @@ import {
   EngineErrorCode,
   MAX_CAMERAS,
   type CameraConfig,
+  type ChunkResult,
   type ComputeOptions,
   type CoverageSummary,
   type EngineOptions,
@@ -21,12 +22,15 @@ import {
   type WorkspaceConfig,
 } from '../types.ts';
 import {
+  chunkTransferables,
   messageTransport,
+  type AggregateEvent,
   type ChunkEvent,
   type Res,
   type RunStartEvent,
   type Transport,
 } from './protocol.ts';
+import type { AggregateResult, AggregateSpec } from '../aggregate.ts';
 
 interface Pending {
   resolve: (v: unknown) => void;
@@ -39,6 +43,7 @@ export class WorkerClient implements VisibilityEngine {
   private pending = new Map<number, Pending>();
   private chunkHandlers = new Map<number, NonNullable<ComputeOptions['onChunkDone']>>();
   private runStartHandlers = new Map<number, NonNullable<ComputeOptions['onRunStart']>>();
+  private aggregateHandlers = new Map<number, (result: AggregateResult) => void>();
 
   constructor(transport: Transport) {
     this.transport = transport;
@@ -51,7 +56,12 @@ export class WorkerClient implements VisibilityEngine {
   }
 
   private handle(raw: unknown): void {
-    const msg = raw as Res | ChunkEvent | RunStartEvent;
+    const msg = raw as Res | ChunkEvent | RunStartEvent | AggregateEvent;
+    if ((msg as AggregateEvent).kind === 'aggregate') {
+      const ev = msg as AggregateEvent;
+      this.aggregateHandlers.get(ev.computeId)?.(ev.result);
+      return;
+    }
     if ((msg as ChunkEvent).kind === 'chunk') {
       const ev = msg as ChunkEvent;
       this.chunkHandlers.get(ev.computeId)?.(ev.chunkId, ev.result);
@@ -71,8 +81,19 @@ export class WorkerClient implements VisibilityEngine {
     this.pending.delete(res.id);
     this.chunkHandlers.delete(res.id);
     this.runStartHandlers.delete(res.id);
+    this.aggregateHandlers.delete(res.id);
     if (res.ok) p.resolve(res.value);
-    else p.reject(new EngineError(res.error.code as EngineErrorCode, res.error.message));
+    else {
+      const err = new EngineError(
+        res.error.code as EngineErrorCode,
+        res.error.message,
+        res.error.detail,
+      );
+      // The worker's stack, appended rather than replacing this one: both frames
+      // matter — where it failed, and which call asked for it (§17).
+      if (res.error.stack) err.stack = `${err.stack ?? ''}\n--- worker ---\n${res.error.stack}`;
+      p.reject(err);
+    }
   }
 
   private call<T>(id: number, kind: string, payload: object, transfer?: Transferable[]): Promise<T> {
@@ -117,6 +138,7 @@ export class WorkerClient implements VisibilityEngine {
     const id = ++this.seq;
     if (opts?.onChunkDone) this.chunkHandlers.set(id, opts.onChunkDone);
     if (opts?.onRunStart) this.runStartHandlers.set(id, opts.onRunStart);
+    if (opts?.onAggregate) this.aggregateHandlers.set(id, opts.onAggregate);
     const wire = {
       mode: opts?.mode,
       threshold: opts?.threshold,
@@ -128,6 +150,10 @@ export class WorkerClient implements VisibilityEngine {
       // doesn't survive it either (§13.2) — the signal stays here and a firing is
       // relayed as a `cancel` message naming this request.
       emitChunks: !!opts?.onChunkDone,
+      // The §19 descriptor is plain data and crosses as-is; only the callback's
+      // presence has to be forwarded as intent, exactly like `onChunkDone`.
+      aggregate: opts?.aggregate,
+      emitAggregate: !!opts?.onAggregate,
       cancellable: !!opts?.signal,
     };
     const promise = this.call<CoverageSummary>(id, 'compute', { opts: wire });
@@ -139,6 +165,67 @@ export class WorkerClient implements VisibilityEngine {
         signal.addEventListener('abort', onAbort, { once: true });
         // Drop the listener whichever way the run ends, so a long-lived signal
         // doesn't accumulate one per run.
+        void promise.catch(() => {}).finally(() => signal.removeEventListener('abort', onAbort));
+      }
+    }
+    return promise;
+  }
+
+  /**
+   * §19.4 standalone aggregation from the main thread. The retained chunks are
+   * *transferred* into the worker, so a caller that keeps chunks on the main
+   * thread loses them here — which is the honest cost of holding per-voxel data
+   * on the wrong side of the boundary. A worker-side consumer (`HostOptions.onChunk`
+   * plus `onEngine`) never pays it, because its chunks never left.
+   */
+  aggregate(
+    chunks: Iterable<ChunkResult>,
+    spec: AggregateSpec,
+    opts?: { signal?: AbortSignal; onAggregate?: (result: AggregateResult) => void },
+  ): Promise<void> {
+    const id = ++this.seq;
+    if (opts?.onAggregate) this.aggregateHandlers.set(id, opts.onAggregate);
+    const list = [...chunks];
+    const transfer = list.flatMap(chunkTransferables);
+    const promise = this.call<null>(
+      id,
+      'aggregate',
+      { chunks: list, spec, cancellable: !!opts?.signal },
+      transfer,
+    ).then(() => undefined);
+    return this.trackAbort(id, promise, opts?.signal);
+  }
+
+  /**
+   * §19.4 over the chunks the **host** retained (`HostOptions.retainChunks`).
+   * A descriptor goes in, accumulators come back, and no per-voxel data moves in
+   * either direction — this is the path a zone move or a section drag takes.
+   *
+   * Not on `VisibilityEngine`: an in-process engine retains nothing (§9.4), so
+   * the interface must not promise it.
+   */
+  aggregateRetained(
+    spec: AggregateSpec,
+    opts?: { signal?: AbortSignal; onAggregate?: (result: AggregateResult) => void },
+  ): Promise<void> {
+    const id = ++this.seq;
+    if (opts?.onAggregate) this.aggregateHandlers.set(id, opts.onAggregate);
+    const promise = this.call<null>(id, 'aggregate', {
+      chunks: [],
+      useRetained: true,
+      spec,
+      cancellable: !!opts?.signal,
+    }).then(() => undefined);
+    return this.trackAbort(id, promise, opts?.signal);
+  }
+
+  /** Relay a firing signal to the host as a `cancel` for `id` (§13.2). */
+  private trackAbort<T>(id: number, promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (signal) {
+      if (signal.aborted) this.postCancel(id);
+      else {
+        const onAbort = () => this.postCancel(id);
+        signal.addEventListener('abort', onAbort, { once: true });
         void promise.catch(() => {}).finally(() => signal.removeEventListener('abort', onAbort));
       }
     }

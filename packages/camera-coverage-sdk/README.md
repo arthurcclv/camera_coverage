@@ -97,7 +97,9 @@ engine.dispose();
 | §4/§16 Web Worker host + main-thread client | `src/worker/*` |
 | §4/§6.2/§9.5/§10 Rust WASM kernels | `crates/camera_coverage_wasm/` + `src/wasm/loader.ts` |
 | §17 error handling | `src/types.ts` (`EngineError` / `EngineErrorCode`) |
-| §18 acceptance tests | `test/acceptance.test.ts` |
+| §18 acceptance tests | `test/acceptance.test.ts`, `test/aggregate.test.ts` |
+| §19 aggregation (descriptor, packing, CPU reduction, merge) | `src/aggregate.ts` |
+| §19.3 aggregation passes (region / column / leaf-count reduce) | `src/shaders.ts`, `src/compute/webgpu.ts` |
 
 ### Rust WASM kernels
 
@@ -143,11 +145,11 @@ await engine.init({ /* … */ });   // same VisibilityEngine API, now off-thread
 
 ### Backends
 
-- **`cpu`** — the behavioral reference. Occupancy and flood-fill run over the
-  logical voxel grid directly (rather than the spec's hierarchical L0/L1/L2
-  sparse grid); this is exact and simple and is what the acceptance tests
-  exercise. Very large workspaces are rejected with a clear error — the WebGPU
-  path is the production route for full-scale scenes.
+- **`cpu`** — the behavioral reference for the *compute* pipeline. Note that
+  occupancy and flood-fill are **not** part of either backend: they are scene
+  preprocessing (§6.2) that runs identically under `cpu` and `webgpu`, and
+  neither backend ever sees the cell array. There is no GPU occupancy path, so
+  the `solidDetection` voxel ceiling applies on both.
 - **`webgpu`** — the production compute path (`src/compute/webgpu.ts` +
   `src/shaders.ts`). It uploads the immutable BVH/triangle buffers once and
   creates/destroys per-chunk buffers around each dispatch so only one chunk is
@@ -202,9 +204,18 @@ Where this implementation stops short of the full spec:
   does pass the buffers as transferables, so callers must not reuse a mesh's
   typed arrays after handing them off.
 - **Occupancy is computed at voxel resolution, not the hierarchical L0/L1/L2
-  sparse grid** (§6). This is exact and simple but allocates over the logical
-  grid, so the CPU/WASM preprocessing rejects very large workspaces with a clear
-  error; full-workspace scale is the WebGPU path's responsibility.
+  sparse grid** (§6.2). This is exact and simple. It is also **materialized per
+  chunk and retained nowhere** (§6.2), so voxel resolution no longer implies a
+  workspace-scale allocation — a 100M-voxel grid costs one chunk of transient
+  instead of 95.4 MiB for the session. The dense workspace grid survives only for
+  `solidDetection: true`, whose flood fill is a global reachability question, and
+  only that path has a voxel ceiling (`SCENE_TOO_LARGE`).
+- **The coverage rate is not exactly partition-invariant.** §11 computes a voxel
+  centre from the chunk origin, so `worldMin + i0·vs + (i+0.5)·vs` drifts against
+  a different `chunkSizeXZ` and voxels sitting on an occlusion boundary flip —
+  measured at ~4e-4 of the rate on a 30 m room, on both backends. §6.2's
+  per-chunk occupancy avoids this by computing in global index space; the compute
+  path has not been changed to match.
 - **No CPU fallback for the compute pipeline in production** (§16.4): `backend:
   'auto'`/`'webgpu'` reject with `WEBGPU_UNAVAILABLE` when WebGPU is missing. The
   `'cpu'` backend exists for headless/reference use and does not scale to the

@@ -18,6 +18,8 @@ import {
   type SceneMesh,
   type SceneStats,
   type Vec3,
+  type AggregateResult,
+  type AggregateSpec,
 } from '@linkervision/camera-coverage-sdk';
 
 export type EngineStatus = 'idle' | 'initializing' | 'ready' | 'computing' | 'error';
@@ -54,6 +56,11 @@ export interface InitResult {
  * would be marked `SOLID_GEOMETRY` (every in-room camera flagged
  * `CAMERA_INSIDE_GEOMETRY`, coverage zeroed). Visibility is unaffected: it always
  * comes from BVH ray casting, never occupancy.
+ *
+ * It is also what keeps occupancy off the worker's heap: SDK §6.2 materializes
+ * occupancy per chunk and retains nothing unless solid detection is on, whose
+ * global flood fill needs the whole workspace grid. At this app's resolutions
+ * that is the difference between ~0 and ~95 MiB held for the session.
  */
 export function initConfig(
   worldMin: Vec3,
@@ -178,6 +185,32 @@ export function useEngine() {
     }
   }, []);
 
+  /**
+   * Re-reduce the worker's retained masks under a new descriptor (spec §3.3) —
+   * the path a zone move, a section drag, or an overlay-mode switch takes. No
+   * ray cast: none of those edits can change a mask bit.
+   *
+   * Deliberately does **not** touch `status`. A recompute is a run the user is
+   * waiting on and the UI says so; a re-aggregation is a panel catching up within
+   * a frame, and flashing 'computing' for it would read as work that isn't
+   * happening. Failures are swallowed for the same reason a superseded compute's
+   * cancellation is (§11): the previous numbers stay on screen, and the next
+   * edit or run reconciles them.
+   */
+  const reaggregate = useCallback(
+    async (spec: AggregateSpec, onAggregate: (r: AggregateResult) => void): Promise<boolean> => {
+      const client = clientRef.current;
+      if (!client) return false;
+      try {
+        await client.aggregateRetained(spec, { onAggregate });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [],
+  );
+
   const compute = useCallback(
     async (opts: ComputeOptions): Promise<CoverageSummary | null> => {
       const client = clientRef.current;
@@ -203,8 +236,8 @@ export function useEngine() {
   );
 
   return useMemo(
-    () => ({ state, initAndLoad, setCameras, setSampling, compute }),
-    [state, initAndLoad, setCameras, setSampling, compute],
+    () => ({ state, initAndLoad, setCameras, setSampling, compute, reaggregate }),
+    [state, initAndLoad, setCameras, setSampling, compute, reaggregate],
   );
 }
 

@@ -6,6 +6,156 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Over-cap entities are dropped and warned about, never clamped and never fatal
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §3.3, §11.
+
+**Why.** The SDK caps a descriptor at 64 regions, 32 groups, 32 slabs and 256 probes
+(SDK spec §19.6). The app has to decide what a 33rd section means. There are three
+options and two of them are wrong:
+
+- **Clamp** it into the 32nd slot — the worst outcome available. A section that
+  silently aggregated *another* section's column is a plausible wrong number, which is
+  the exact failure mode the whole one-descriptor design (see the `aggregateSpec.ts`
+  entry) exists to prevent.
+- **Throw** — what the spec used to say. A 33rd section the user can delete would take
+  down the zone panel, the overlay, the probes and the run with it.
+- **Drop and say so** — what it does.
+
+**Decision.** `buildAggregateSpec` slices each kind to its cap, records a `CapWarning`
+naming the kind, the cap, the requested count and the dropped count, and returns them
+alongside the descriptor. The index omits dropped entities, every read of one is `null`
+(which the panels already render as "no data"), and `RunBar` shows one amber
+`.warning-banner` per warning. The descriptor stays valid, so `validateAggregateSpec`
+never throws on anything the app builds — asserted in `test/aggregateSpec.test.ts`.
+
+**Trade-off.** A user who adds a 33rd section sees a run that succeeds with a section
+missing rather than a failure that names the problem. The warning banner is what pays
+that back, and it is amber rather than red on purpose: red means the panel below it is
+empty, amber means it is populated but incomplete (`VISUAL_DESIGN.md`).
+
+**The caps themselves come from the SDK's exports**, not from local constants.
+`aggregateSpec.ts` briefly carried its own `MAX_SLABS = 32` / `MAX_PROBES = 256` beside
+an imported `MAX_AGGREGATE_GROUPS`. A local copy that drifted would either drop a
+section the SDK would have accepted or hand it one too many and throw — and neither
+reads as a cap problem at the call site.
+
+---
+
+## `transposed` is derived from the orientation, not carried beside it
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §3.3, §13.3.
+
+**Why.** A `vertical-x` section spans Z×Y, which is descending, while the SDK numbers a
+slab's plane axes ascending — so its cells arrive transposed and must be un-transposed
+on read. That fact was computed in `aggregateSpec.ts` (`axisA > axisB`), stored in
+`AggregateIndex.sectionTransposed`, threaded through `CoverageRun`, and passed as the
+7th positional argument to `cellGridFromColumns` — which already knew the section's
+orientation and could have derived it.
+
+**Decision.** One owner: `sectionHeatmap.slabTransposed(orientation)`.
+`cellGridFromColumns` calls it itself and takes a named `CellGridInput` object rather
+than seven positionals. The index no longer carries the flag.
+
+**Why it matters more than tidiness.** Two copies of this fact disagreeing does not
+throw — it renders the heatmap as a mirror image, which reads as a plausible picture.
+The same reasoning as the `aggregateSpec.ts` entry, applied one level down.
+
+---
+
+## The chunk footprint is derived from the workspace, not pinned at 10 m
+
+Behavior in [`../../../packages/camera-coverage-sdk/specs/spec.md`](../../../packages/camera-coverage-sdk/specs/spec.md) §3.
+
+**Why.** `App.tsx` passed a constant `CHUNK_SIZE_XZ = 10` to `init`. That is the SDK's
+default *for its default workspace* — 100 × 20 × 100 m at 0.1 m, giving ~100 chunks of 2M
+voxels. On an imported 440 × 201 × 1120 m site at 1.0 m voxels the same constant produced
+**4,928 chunks of 20,100 voxels**: 50× the chunk count, each 100× smaller.
+
+None of that is a per-voxel cost. It multiplies every *per-chunk fixed* cost — a GPU buffer
+set, a submission, a mapping, an aggregate message to the main thread, a §19.3 leaf merge —
+by 50, and the SDK's per-chunk GPU buffer churn is what failed first (`Array buffer
+allocation failed`, reported as a bare `INVALID_STATE`).
+
+**Decision:** `chunkSizeFor()` calls the SDK's `suggestChunkSizeXZ`, which targets ~2M
+voxels per chunk. It returns exactly 10 m for a default-sized room, so nothing changes for
+the scenes the app shipped with, and 99 m for the site above — 60 chunks of 1.97M.
+
+**Trade-off.** The chunk footprint now changes with `voxelSize`, so moving the resolution
+slider re-partitions as well as re-voxelizes. Both already force a re-`init` (SDK §6), so
+no additional invalidation is introduced. It also means a `chunkId` means something
+different across resolutions, which the §13.1 baseline drop already handles.
+
+---
+
+## The main thread never sees a voxel
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §3.1, §3.3, §9, §12.2, §13.4;
+`sampling_volumes.md` §7.2.
+
+**Why.** `CoverageSummary.elapsedMs` is measured inside the worker around the engine's
+chunk loop only, so everything the main thread then did with the streamed chunks was
+outside that number — which is why a run could report 40 ms and still visibly stall the
+viewport. Measured at 0.1 m voxels, 8 cameras, 3.1M valid voxels: 773 ms of zone
+aggregation, 24 ms of section cells, 30 ms of overlay decode, 48 ms of overlay rebuild.
+All of it a scalar scan over per-voxel masks that had just been shipped across a Worker
+boundary to be reduced to a few kilobytes.
+
+**Decision:** the app declares what it derives as one SDK aggregation descriptor (SDK
+spec §19) and receives the reductions. `installHost({ retainChunks: true })` keeps the
+masks in the worker; `onChunkDone` is not used at all. The four consumers map onto four
+primitives — volume→region, zone→group, section→`columns` slab, overlay→`leafCounts`,
+probe→`probes` — and every per-voxel scan the app used to run is gone, on **both**
+backends, because the SDK's CPU reduction runs in the worker too.
+
+**The non-obvious part** is that a descriptor edit must not recompute. Moving a zone,
+dragging a section, or toggling the marked filter changes *what is counted*, never *what
+is seen*, so `aggregateRetained` re-reduces the retained masks instead — no ray cast, and
+no per-voxel data crossing in either direction. Without that, the client-side re-filter
+that used to make those edits instant would have become a full run.
+
+**Trade-off.** The reads are now async, so `sectionCellGrids`/`zoneCoverage` hold their
+previous value for a frame. `CoverageRun.adopt` swaps index and results together for the
+same reason: an index paired with the previous descriptor's results reads a zone's
+numbers out of another zone's group.
+
+---
+
+## The overlay carries merged camera-count cubes, not masks — and uploads them in bulk
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §9, §3.3.
+
+**Why.** The overlay needs `popcount(mask)` per voxel and nothing else; it cannot answer
+"which cameras" and never has to (§12.2 does). Shipping mask words for it was 4× the
+bytes at one camera word and 16× at the 128-camera ceiling, and the popcount ran per leaf
+on the main thread. **Decision:** `leafCounts` returns a dense `Uint8Array` — the count
+fits a byte at the 128-camera cap — plus a validity bitmask, with the popcount done on
+the GPU inside the chunk pipeline and the marked-set filter already applied.
+
+**Packing centers would have been worse, not better.** The obvious "pack transferable
+`Float32Array`s of centers/sizes/intensities" is ~20 B/voxel — *larger* than the 4 B/voxel
+mask words it would replace. A dense byte plus the validity bits is the smaller form
+precisely because it stays implicit about position.
+
+**Bytes were the wrong thing to optimize, though — instances are.** The first cut returned
+that dense byte field and drew a cube per voxel, and it lost the *renderer's* GPU device
+on a large scene: `InstancedMesh` spends 64 bytes per instance on `instanceMatrix` alone,
+a WebGPU device's default `maxBufferSize` is 256 MiB, and 4.2M instances is the wall. The
+old overlay had never hit it because it walked `accessor(chunk).forEachLeaf()`, whose SVO
+nodes are **merged** — so replacing it with a dense field was an 11.5× regression in
+instance count (7.0M voxels vs 612k leaves; 642 MiB vs 56 MiB) hiding behind a smaller
+transfer. `leafCounts` now returns merged cubes (SDK §19.3) and the renderer carries a
+hard `MAX_INSTANCES` cap that reports what it dropped, so the next such surprise truncates
+the picture instead of taking the device down.
+
+**The rebuild was the other half.** `VoxelVolumetricRenderer.addVoxels` took a
+`Voxel[]`; at 3.1M voxels that is millions of objects each holding two nested tuples, and
+building it cost more than the upload it was preparing. `addVoxelGrid` writes straight
+into the instance buffers, keyed by two 256-entry tables (`draw`, `intensity`) compiled
+from the mode — so neither the mode branch nor an allocation is in the per-voxel loop.
+
+---
+
 ## Only the long, superseded runs are cancelled — camera edits ride it out
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §8.1, §11, §14.4.
@@ -32,6 +182,11 @@ Otherwise the app's own abort would raise an error banner and stop Auto-run from
 retrying (§11) — the user would see their resolution change break the app.
 
 ## The per-run aggregations are cached the way the engine caches chunks
+
+> **Superseded** by "The main thread never sees a voxel" (above). Both caches are gone:
+> the aggregations run in the worker, and per-chunk merging gives the incremental
+> behaviour these bought by hand. The reasoning is kept because the decomposition
+> argument still holds — it is now the SDK's `mergeRegions`/`mergeColumns`.
 
 Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §7.2 and
 [`../specs/spec.md`](../specs/spec.md) §13.4.
@@ -61,9 +216,16 @@ stale grid.
 **Still whole-scene.** The overlay's `rebuild()` is not covered by any of this — it is a
 renderer upload (~48 ms at that resolution), not an aggregation, and making it
 incremental needs per-chunk instance ranges inside `VoxelVolumetricRenderer`. It is now
-the largest remaining per-run main-thread cost in a scene with no zones.
+the largest remaining per-run main-thread cost in a scene with no zones. *(Partly
+addressed since: the `Voxel[]` allocation is gone, but the upload itself is still
+whole-scene — see "The overlay carries camera counts".)*
 
 ## The main-thread aggregations, not `elapsedMs`, are what a run actually costs
+
+> **Largely resolved** by "The main thread never sees a voxel" (above): the aggregations
+> named here no longer run on the main thread on either backend. The caveat about
+> `elapsedMs` still stands — it is engine-only, and now excludes the aggregation passes
+> too, so it remains a lower bound on a run's cost rather than a measure of it.
 
 Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §7.2.
 

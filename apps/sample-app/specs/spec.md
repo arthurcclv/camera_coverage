@@ -443,7 +443,7 @@ state can animate.
 
   ```ts
   import { installHost, messageTransport } from '@linkervision/camera-coverage-sdk';
-  installHost(messageTransport(self as any));
+  installHost(messageTransport(self as any), { retainChunks: true });
   ```
 
 - Main thread:
@@ -454,8 +454,10 @@ state can animate.
   );
   ```
 
-`compute({ onChunkDone })` streams each `ChunkResult` back to the main thread,
-where the overlay is (re)built.
+**The main thread never receives a `ChunkResult`.** `retainChunks` keeps every run's
+per-voxel masks in the worker (SDK spec §16.1) and the app asks for the *derived*
+quantities instead, through the aggregation descriptor of §3.3. `onChunkDone` is not
+used at all.
 
 ### 3.2 Backend selection
 
@@ -475,6 +477,61 @@ where the overlay is (re)built.
 > Note: the SDK README flags the WebGPU path as written-to-spec but not
 > runtime-validated; the CPU path is the tested reference. The fallback guarantees
 > the demo always runs.
+
+### 3.3 Aggregated derivation
+
+Everything this app shows is a small reduction of the coverage masks: per-zone counts,
+per-column section cells, a per-voxel camera count for the overlay, a mask lookup per
+probe. The app declares those four as one SDK **aggregation descriptor** (SDK spec §19.1)
+and receives the reductions; it never scans a voxel itself, on either backend.
+
+| App concept | SDK primitive | Result |
+|---|---|---|
+| Sampling volume (`sampling_volumes.md` §2.1) | `regions[]` — one OBB per volume, in a stable order | per-volume counts |
+| Zone (`sampling_volumes.md` §2.2) | a **group** its volumes declare | per-zone counts, each voxel once |
+| Marked set (`sampling_volumes.md` §7.3) | the group the **enabled** zones' volumes also declare, plus `maskRegions` on the slabs and on `leafCounts` | union counts + the client-side filter |
+| Section (§13) | one `columns` slab, `axis` from its orientation, `range` from its footprint | per-cell aggregation (§13.3) |
+| Coverage overlay (§9) | `leafCounts` | one byte per voxel: the camera count |
+| Probe (§12) | `probes[]` | the mask at that point |
+
+A zone owns many volumes and they may overlap, so a zone's total is **not** the sum of
+its volumes'; that is what an SDK group is for (SDK spec §19.2). Zone *i* declares group
+*i*, and every enabled zone's volumes additionally declare the union group — one
+descriptor, both answers, each voxel counted once in each.
+
+**Two entry points, one descriptor.**
+
+- A **run** passes `aggregate` to `compute()`; the reduction happens inside the chunk
+  pipeline while the masks are resident, so it costs no extra transfer (SDK spec §19.4).
+- A **descriptor edit** — moving a zone or volume, dragging a section, toggling a zone,
+  moving a probe — calls `aggregateRetained(spec)`, which re-reduces the masks
+  the worker still holds. **No recompute, no ray cast**: none of those edits can change
+  a mask bit, and paying a run for them would be paying for the one thing that cannot
+  have changed.
+
+Both are `async`, so the panels they feed hold their previous value for a frame rather
+than blocking the main thread on the way to a new one. **They are also mutually exclusive.**
+A run reuses the descriptor its retained results were produced under, not the newest one:
+an incremental run (§8) re-sends only a few chunks, and accumulators laid out by two
+different descriptors cannot be merged. So a run never starts while a re-aggregation is in
+flight, a re-aggregation never starts while a run is, and a descriptor edit that lands
+mid-run is reconciled as soon as that run ends — by re-reducing **every** retained chunk at
+once, never by mixing. That is the point: the work that
+used to run between a `ChunkResult` arriving and the UI updating is what made a run
+visibly stall the viewport even when the engine's own `elapsedMs` was small.
+
+**Descriptor caps.** The SDK allows 64 regions, 32 groups, 32 slabs, 256 probes (SDK
+spec §19.6). The app therefore supports 64 sampling volumes, 31 zones (group 31 is the
+marked-set union), 32 sections, and 256 probes.
+
+Over-cap entities are **dropped from the descriptor, never clamped into a neighbour's
+slot**, and every drop is surfaced as a warning (§11) naming the entity kind and the cap.
+Clamping is the one option ruled out: a section that silently aggregated *another*
+section's column is exactly the plausible wrong number this whole descriptor exists to
+avoid. Failing the build outright is ruled out too — a 33rd section the user can delete
+should not take down the zone panel, the overlay, and the probes with it. So the
+descriptor stays valid, the index omits what was dropped, and every read of a dropped
+entity is `null`, which the panels already render as "no data".
 
 ---
 
@@ -509,7 +566,10 @@ for **both**:
 
 - `worldMin` / `worldMax` — the room's AABB (with a small margin).
 - `voxelSize` — see §6.
-- `chunkSizeXZ` — `10` (default).
+- `chunkSizeXZ` — **derived per scene** via the SDK's `suggestChunkSizeXZ` (SDK spec §3),
+  not pinned. On this app's default room that reproduces the 10 m the worked examples
+  assume; on a large imported site it grows so a chunk stays near the 2M-voxel target
+  instead of partitioning the site into thousands of tiny ones.
 - `solidDetection` — **hard-coded `false`**. The SDK's flood-fill SOLID detection
   assumes closed objects float in open free space reachable from the workspace
   boundary; a watertight room inverts that (its free space is *enclosed*), so the
@@ -920,26 +980,26 @@ at the `setCameras()` boundary (§8). Rules:
 - An **Auto-run** checkbox next to the button, **on by default**, triggers
   `compute()` automatically whenever the result is stale (§8.1) instead of
   requiring a manual click.
-- `compute({ mode: 1, incremental: true, onRunStart, onChunkDone })`:
-  - streams `ChunkResult`s; the overlay is rebuilt from accumulated chunks.
+- `compute({ mode: 1, incremental: true, onRunStart, aggregate, onAggregate })`:
+  - streams one `AggregateResult` per chunk (§3.3); per-voxel masks stay in the worker.
   - a progress/spinner state animates while the worker runs.
 - On completion the returned `CoverageSummary` populates the stats panel. It always
   describes the whole scene, incremental or not (SDK spec §13.1).
 
 **Incremental runs.** The app always asks for `incremental: true` and lets the engine
 decide (SDK spec §13.1); there is no user-facing switch. `onRunStart` fires once before
-the first chunk and reports what kind of run this is, which is what the app's four
-chunk consumers — the coverage overlay (§9), probe visibility (§12.2), the section
-heatmap store (§13.4), and zone coverage (`sampling_volumes.md` §7.2) — key their
-lifecycle off:
+the first chunk and reports what kind of run this is. The app keeps one merged store of
+per-chunk `AggregateResult`s (§3.3), and that store keys its lifecycle off the same flag:
 
-- `incremental === false` — **reset** all four, then accumulate as before.
-- `incremental === true` — **do not reset**. Each store is keyed by `chunkId`, so an
-  arriving chunk replaces that chunk's retained entry and every chunk the run skipped
-  keeps the result it already had.
+- `incremental === false` — **reset** the store, then accumulate as before.
+- `incremental === true` — **do not reset**. Results are keyed by `chunkId`, so an
+  arriving one replaces that chunk's retained entry and every chunk the run skipped keeps
+  the result it already had.
 
-Resetting on an incremental run would blank most of the scene with no error, so the
-reset is driven by `onRunStart` rather than inferred from app state.
+Resetting on an incremental run would blank most of the scene with no error, so the reset
+is driven by `onRunStart` rather than inferred from app state. The **worker's** own
+retention (§3.1) follows the identical rule, one level down — the SDK host applies it so
+the app does not have to.
 
 ### 8.1 Stale result handling
 
@@ -987,7 +1047,9 @@ zone's deletion, or the `useZones` toggle changes. A run applies
 `setSampling(regionsFromVolumes())` when the flag is set (or after a re-init reset
 it), then `setCameras` + `compute`, then recomputes per-zone summaries — no re-init
 needed (only a `voxelSize` change requires that). **Enabling/disabling a zone** or
-**renaming a zone** never marks stale — they re-filter/relabel client-side
+**renaming a zone** never marks stale — a rename relabels, and a toggle changes only
+which regions the marked-set group and the slab/leaf filters name, so it re-reduces the
+retained masks through `aggregateRetained` (§3.3) rather than recomputing
 (`sampling_volumes.md` §7.2, §7.3, §8). **Reordering** a hierarchy row (§5.5.1) likewise
 never marks stale or sampling-dirty: it permutes an array whose order is display-only, and
 results are keyed by entity id, not array position.
@@ -1009,10 +1071,36 @@ The overlay's own **legend** — a hue-intensity ramp (coverage mode) or a solid
 coverage-overlay mode of the shared bottom-right legend widget (§13.6); it shows when
 no section legend is up and the overlay is visible.
 
-Voxels are extracted from streamed `ChunkResult`s using
-`accessor(result).forEachLeaf((min, size, mask, valid, maskWords) => …)` as chunks
-arrive. Each valid leaf becomes one voxel at world position `min` with edge `size`;
-`intensity` and `color` depend on the active mode.
+Voxels come from the run's `leafCounts` aggregation (§3.3): **merged uniform cubes** of
+equal camera count, per chunk. Each leaf becomes one drawn instance at its cube's center
+with that cube's edge length; `intensity` and `color` depend on the active mode. The
+overlay retains the leaves per `chunkId` and rebuilds from them.
+
+*Why counts and not masks.* The overlay needs `popcount(mask)` and nothing else — it
+cannot answer "which cameras" and never has to (§12.2 does that). The popcount runs on
+the GPU inside the chunk pipeline instead of per-leaf on the main thread.
+
+*Why merged and not per voxel.* A renderer's cost is **per drawn instance**. On a
+30 × 8 × 30 m room at 0.1 m with 8 cameras, 7.0M valid voxels collapse to 612k leaves —
+11.5×, and the difference between 56 MiB of instance buffers and 642 MiB. A WebGPU
+device's *default* `maxBufferSize` is 256 MiB and `InstancedMesh` spends 64 of the ~96
+bytes per instance on its matrix alone, so the unmerged form does not merely run slowly
+on a large site: it exceeds the buffer limit and the renderer's device is lost.
+
+**The overlay is capped.** Past `MAX_INSTANCES` (2M) the renderer stops appending and
+reports how many leaves it dropped, so a pathological scene yields a visibly incomplete
+overlay rather than a lost device. `CoverageOverlay.droppedLeaves` is non-zero exactly
+when what is on screen is not the whole answer.
+
+The renderer is fed through its **bulk** path (`volumetric_rendering.md`), one typed
+array per attribute, rather than an array of `{center, size, intensity, color}` objects.
+At 0.1 m voxels a room is millions of voxels, and materializing an object with two nested
+tuples for each of them cost more than the upload it was preparing.
+
+The **marked-set filter** (`sampling_volumes.md` §7.3) is applied by the aggregation, not
+by the overlay: `leafCounts.maskRegions` names the enabled zones' volumes, and a voxel
+outside them arrives with its validity bit already clear. Toggling a zone therefore
+re-requests `aggregateRetained` (§3.3) instead of re-walking retained leaves.
 
 Extracted leaves are retained **keyed by `chunkId`**, not appended to one flat list, so
 an arriving chunk **replaces** that chunk's leaves. This is what lets an incremental run
@@ -1124,6 +1212,7 @@ panel is exactly as above (the SDK summary).
 | `COMPUTE_CANCELED` (§8.1) | **not** surfaced: the app asked for the abort, so no banner, no error state, and Auto-run keeps going |
 | `CAMERA_INSIDE_GEOMETRY` | surface which camera; keep it flagged in the list (the SDK never flags a camera carrying `enabled: false`, §5.4) |
 | `TOO_MANY_CAMERAS` | not reachable (10 ≤ 128), but guarded |
+| Descriptor cap exceeded (§3.3) | **warning**, not an error: the over-cap zones / volumes / sections / probes are dropped from the descriptor and named in the status area; the run and every other panel proceed |
 | Worker/device errors | reported in a status area; engine re-init offered |
 
 ---
@@ -1156,22 +1245,24 @@ query; the grid masks already encode line-of-sight + frustum + range per voxel, 
 The probe's world position is mapped to the voxel that contains it and that voxel's
 mask is read:
 
-- world → global voxel `floor((p − worldMin) / voxelSize)` → `(chunkId, i, j, k)`
-  via a `WorkspaceGrid` built from the same workspace config used at `init` (§4.2);
-- `accessor(chunkResult).getMask/getMaskWord(i, j, k)` gives the camera bitmask, and
-  `isValid(i, j, k)` gives voxel validity.
+The lookup itself happens **in the worker**, as the `probes` primitive of the
+aggregation descriptor (§3.3): the app sends the probe positions and receives, per chunk,
+each probe's mask words and whether that chunk holds it (and whether the voxel was valid).
+Exactly one chunk claims a given probe, so merging is a matter of taking the one that did.
 
-To make this lookup possible the app **retains the streamed `ChunkResult`s** (keyed
-by `chunkId`) for the current run, reset at the start of each `compute()`. This is in
-parallel with the overlay (§9), which consumes the same stream but keeps only
-per-voxel *counts* and drops invalid voxels, so its data can't answer "which cameras,
-at this point." The retained SVO is the compact resident form; no extra spatial index
-is built, and lookup uses the SDK accessor's own `O(depth)` descent.
+This is why the app does not retain `ChunkResult`s on the main thread. Probes were the
+only consumer that genuinely needed a *mask* rather than a count (§9 keeps counts and
+cannot answer "which cameras, at this point"), and they need a handful of `O(1)` lookups
+— which is precisely the shape the SDK resolves on the CPU next to the masks rather than
+shipping megabytes so the main thread can index three points.
+
+Moving a probe re-requests `aggregateRetained` (§3.3) rather than recomputing, which is
+what makes §12.5's "never marks stale" true rather than merely tolerable.
 
 - **Bit order.** Bit *n* of a mask is the camera at index *n* in the
   **camera list passed to `setCameras()` for that run**. The app snapshots that ordered
-  id list alongside the retained chunks, so masks decode to the correct camera ids even
-  if the live camera set has since changed. All mask words are decoded (correct up to
+  id list alongside the retained aggregation, so masks decode to the correct camera ids
+  even if the live camera set has since changed. All mask words are decoded (correct up to
   `MAX_CAMERAS` = 128), not just word 0.
 - Since §5.4, that list includes **disabled** cameras (they hold their index, with a
   permanently-0 bit). The snapshot therefore records each camera's enabled state
@@ -1366,26 +1457,42 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
     (`mask == 0`).
 - **Bit order / enabled set.** Masks decode exactly as for probes (§12.2): bit *n* is
   the *n*-th camera in the **enabled-camera list `setCameras()` received for the
-  retained run**, snapshotted alongside the chunks; `involvedCameraCount` is that run's
-  enabled count. All mask words are read (up to `MAX_CAMERAS` = 128).
+  retained run**, snapshotted alongside the aggregation; `involvedCameraCount` is that
+  run's enabled count. All mask words are read (up to `MAX_CAMERAS` = 128).
+- **The fractions are derived from integer counts, not accumulated as floats.** Every
+  fraction above is `popcount / involvedCameraCount` over a denominator constant for the
+  run, so the aggregation sums the integer popcount per cell and the app divides once
+  (SDK spec §19.2). `mean` is `camCountSum / (validCount · involvedCameraCount)`, `max`
+  and `min` are `camCountMax`/`camCountMin` over the same denominator, and `blind` is
+  `blindCount / validCount`. This is not an approximation of a float reduction — it is
+  exact, and it is what lets the same numbers come back bit-identical from the GPU.
 
 ### 13.4 Data source & recompute coupling
 
-- Sections read the **retained `ChunkResult`s of the most recent completed run** — the
-  same per-voxel masks that back probes (§12.2), consumed as a third stream consumer
-  alongside the overlay (§9) and probe store. No fresh ray cast and no extra spatial
-  index; lookup uses the SDK accessor's own descent over the retained SVO.
-- Changing a section's orientation, range, aggregation, its enabled state, or the global
-  colormap **re-aggregates client-side instantly** and **never** triggers `compute()`.
+- Sections read the **`columns` aggregation of the most recent completed run** (§3.3):
+  one slab per section, its `axis` from the section's orientation and its `range` from the
+  footprint of §13.2, reduced next to the masks in the worker. No fresh ray cast, no
+  extra spatial index, and no per-voxel data on the main thread.
+- Each chunk contributes a partial accumulator for the cells its own voxels fall in, and
+  the app sums them (SDK spec §19.2). Counts add, `seenWords` OR, `max`/`min` take the
+  extremum — so a section spanning several chunks is the merge of their parts, and the
+  answer does not depend on how the workspace happens to be partitioned.
+- **No-data is derived, not reported.** A slab tells the app how many voxels it counted
+  (`validCount`), how many were obstacles (`obstacleCount`), and how many the marked
+  filter removed (`filteredCount`). A cell whose column is longer than those three
+  together contains voxels no chunk covered — the "no data" case of §13.3. The SDK does
+  not classify cells; §13.3's colored / transparent / black precedence stays the app's.
+- Changing a section's orientation, range, its enabled state, or the marked filter
+  **re-requests `aggregateRetained`** (§3.3) and **never** triggers `compute()`. Changing
+  only the displayed `aggregation` or the colormap re-reads the cells already held and
+  costs nothing at all.
   Adding, moving, resizing, or deleting a section never marks coverage stale (§8.1) —
   like probes (§12.5), sections are not part of the coverage input.
-- A section's cell grid is **cached against the chunks it reads**. Chunks are
-  partitioned on XZ only (`camera-coverage-sdk` §3), so a section whose footprint misses
-  a chunk's XZ box can never read into it — and after an incremental run (§8) a section
-  over one aisle keeps the grid it already had while one spanning the whole floor
-  re-aggregates. The cache is keyed on the section's own geometry and the marked filter
-  as well, so an edit to either recomputes; it is a recompute-avoidance optimization
-  only, never a change of result.
+- Per-chunk merging gives the incremental behaviour the client-side cache used to buy
+  by hand: an incremental run (§8) replaces only the chunks it recomputed, and a section
+  whose cells no replaced chunk reaches keeps every contribution it already had. Chunks
+  are partitioned on XZ only (`camera-coverage-sdk` §3), so this falls out of the
+  partition rather than needing a footprint test.
 - Because the heatmap reflects a past run, when the live scene diverges from it
   (results stale, §8.1) the heatmap is **dimmed** and the Section stats panel shows a
   **stale hint** (§13.7), mirroring the overlay's stale dimming and the probe panel's

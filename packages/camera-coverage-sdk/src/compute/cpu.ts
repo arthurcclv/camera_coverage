@@ -13,12 +13,10 @@ import type { Bvh } from '../geometry/bvh.ts';
 import type { PreparedCamera } from '../camera.ts';
 import { pointInFrustum } from '../camera.ts';
 import { occluded, T_EPS } from '../kernel.ts';
-import { voxelCenter } from '../grid.ts';
+import { voxelCenter, type ChunkPlacement } from '../grid.ts';
+import { aggregateChunkCPU, type AggregateResult, type PackedAggregate } from '../aggregate.ts';
 
-export interface ChunkComputeInput {
-  dims: Vec3;
-  origin: Vec3;
-  voxelSize: number;
+export interface ChunkComputeInput extends ChunkPlacement {
   validity: Uint32Array;
   /**
    * Valid voxels in this chunk, from the §6.4 cache. Bounds Pass 2's dispatch
@@ -39,6 +37,12 @@ export interface ChunkComputeInput {
   bvh: Bvh;
   mode: 1 | 2;
   threshold: number;
+  /**
+   * §19 aggregation, evaluated inside this chunk's pipeline while its masks are
+   * still resident. Pre-packed by the engine so both backends read the same
+   * bytes (§19.5).
+   */
+  aggregate?: PackedAggregate;
 }
 
 export interface ChunkComputeOutput {
@@ -46,6 +50,8 @@ export interface ChunkComputeOutput {
   visibility?: Uint32Array;
   coverage?: Uint32Array; // Mode 2: voxelCount * 4 * camWords
   stats: { validCount: number; coveredCount: number; visibleCount: number[] };
+  /** Present exactly when `input.aggregate` was (§19.4). */
+  aggregate?: AggregateResult;
 }
 
 // Mode 2 sample offsets: center + 0.35*voxelSize*(±1,±1,±1) (§14).
@@ -109,7 +115,25 @@ export function computeChunkCPU(input: ChunkComputeInput): ChunkComputeOutput {
     if (anyVisible) coveredCount++;
   }
 
-  return { visibility, coverage, stats: { validCount, coveredCount, visibleCount } };
+  return {
+    visibility,
+    coverage,
+    stats: { validCount, coveredCount, visibleCount },
+    aggregate: input.aggregate
+      ? aggregateChunkCPU({
+          chunkId: -1, // stamped by the engine, which owns the chunk identity
+          dims,
+          origin,
+          base: input.base,
+          voxelSize,
+          camWords,
+          numCameras,
+          validity,
+          visibility,
+          packed: input.aggregate,
+        })
+      : undefined,
+  };
 }
 
 /** Visibility of a single sample point to one camera (§8). */

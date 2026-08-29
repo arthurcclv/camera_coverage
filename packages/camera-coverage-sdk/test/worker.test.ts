@@ -9,10 +9,15 @@ import assert from 'node:assert/strict';
 
 import { WorkerClient } from '../src/worker/client.ts';
 import { installHost } from '../src/worker/host.ts';
-import { loopback } from '../src/worker/protocol.ts';
+import { aggregateTransferables, loopback, type Transport } from '../src/worker/protocol.ts';
+import { CoverageEngine } from '../src/engine.ts';
 import { accessor } from '../src/results.ts';
 import { EngineError, EngineErrorCode, type ChunkResult } from '../src/types.ts';
-import { camera, LOOK_NEG_Z, voxelIndexOf, wallZ } from './helpers.ts';
+import { box, camera, LOOK_NEG_Z, voxelIndexOf, wallZ } from './helpers.ts';
+import type { AggregateResult, AggregateSpec } from '../src/aggregate.ts';
+import type { WorkspaceConfig } from '../src/types.ts';
+
+const WS: WorkspaceConfig = { worldMin: [0, 0, 0], worldMax: [6, 3, 6], voxelSize: 0.3, chunkSizeXZ: 3 };
 
 function makeClient(): WorkerClient {
   const [clientSide, hostSide] = loopback();
@@ -123,4 +128,98 @@ test('worker: a compute with no signal is never made cancellable (§13.2)', asyn
   const summary = await client.compute({ onChunkDone: () => {} });
   assert.ok(summary.validVoxels > 0);
   client.dispose();
+});
+
+test('worker: aggregation crosses the boundary while chunks never do (§19.4, §16.1)', async () => {
+  const [clientT, hostT] = loopback();
+  let posted = 0;
+  const counting: Transport = {
+    post: (data, transfer) => {
+      if ((data as { kind?: string }).kind === 'chunk') posted++;
+      hostT.post(data, transfer);
+    },
+    onMessage: (h) => hostT.onMessage(h),
+  };
+  installHost(counting, { retainChunks: true });
+  const client = new WorkerClient(clientT);
+
+  await client.init({ ...WS, backend: 'cpu' });
+  await client.loadScene(box([1.5, 0.6, 2.4], [3.0, 2.1, 3.3]));
+  await client.setSampling({ regions: [{ type: 'full' }] });
+  client.setCameras([camera('a', [3.15, 1.65, 5.4], LOOK_NEG_Z)]);
+
+  const spec: AggregateSpec = {
+    regions: [{ center: [2, 1.5, 3], rotation: [0, 0, 0, 1], halfSize: [1.6, 1.4, 2], groups: [0] }],
+  };
+  const inline: AggregateResult[] = [];
+  await client.compute({ mode: 1, aggregate: spec, onAggregate: (r) => inline.push(r) });
+
+  assert.ok(inline.length > 0, 'aggregation results reached the client');
+  assert.equal(posted, 0, 'no chunk message was ever posted');
+  const total = inline.reduce((n, a) => n + a.regions![0].valid, 0);
+  assert.ok(total > 0);
+
+  // Re-reduce a *different* descriptor over the host's retained chunks: no
+  // compute, no chunk transfer, a different answer.
+  const wider: AggregateSpec = {
+    regions: [{ center: [2, 1.5, 3], rotation: [0, 0, 0, 1], halfSize: [3, 2, 3], groups: [0] }],
+  };
+  const again: AggregateResult[] = [];
+  await client.aggregateRetained(wider, { onAggregate: (r) => again.push(r) });
+  const widerTotal = again.reduce((n, a) => n + a.regions![0].valid, 0);
+
+  assert.equal(again.length, inline.length, 'every retained chunk was re-reduced');
+  assert.ok(widerTotal > total, 'the wider region counts more voxels');
+  assert.equal(posted, 0, 'still no chunk message');
+  client.dispose();
+});
+
+test('§16.1: every aggregate accumulator is on the transfer list, groups included', async () => {
+  // §16.1: "results are transferred, not cloned." A group is a region
+  // accumulator in every respect but which entries it sums (§19.2), so it
+  // carries a `seen` array of the same shape — and omitting it left the one
+  // part of the result structured-clone *copied* while the rest was
+  // transferred. The numbers are identical either way, so this is asserted on
+  // the transfer list itself. (`loopback` clones and ignores the list, so a
+  // round trip cannot show it.)
+  const engine = new CoverageEngine({ onWarning: () => {} });
+  await engine.init({ ...WS, backend: 'cpu' });
+  await engine.loadScene(box([1.5, 0.6, 2.4], [3.0, 2.1, 3.3]));
+  await engine.setSampling({ regions: [{ type: 'full' }] });
+  engine.setCameras([camera('a', [3.15, 1.65, 5.4], LOOK_NEG_Z)]);
+
+  // Two regions declaring one shared group, plus a slab, leaf counts and a
+  // probe: every array-bearing primitive of §19.2 in one result.
+  const spec: AggregateSpec = {
+    regions: [
+      { center: [2, 1.5, 2.4], rotation: [0, 0, 0, 1], halfSize: [1.2, 1.4, 1.2], groups: [0] },
+      { center: [2, 1.5, 3.6], rotation: [0, 0, 0, 1], halfSize: [1.2, 1.4, 1.2], groups: [0] },
+    ],
+    columns: [{ axis: 1, range: [[0, 19], [0, 9], [0, 19]], maskRegions: [] }],
+    leafCounts: { maskRegions: [] },
+    probes: [[3.15, 1.65, 4.5]],
+  };
+  const out: AggregateResult[] = [];
+  await engine.compute({ mode: 1, aggregate: spec, onAggregate: (r) => out.push(r) });
+  engine.dispose();
+
+  const withGroups = out.filter((r) => (r.groups?.length ?? 0) > 0);
+  assert.ok(withGroups.length > 0, 'no chunk carried group accumulators');
+
+  for (const r of out) {
+    const listed = new Set(aggregateTransferables(r));
+    const owned: [string, ArrayBufferLike][] = [];
+    (r.regions ?? []).forEach((x, i) => owned.push([`regions[${i}].seen`, x.seen.buffer]));
+    (r.groups ?? []).forEach((x, i) => owned.push([`groups[${i}].seen`, x.seen.buffer]));
+    (r.columns ?? []).forEach((c, i) => {
+      owned.push([`columns[${i}].camCountSum`, c.camCountSum.buffer]);
+      owned.push([`columns[${i}].seenWords`, c.seenWords.buffer]);
+    });
+    if (r.leafCounts) owned.push(['leafCounts.count', r.leafCounts.count.buffer]);
+    if (r.probeMasks) owned.push(['probeMasks', r.probeMasks.buffer]);
+
+    for (const [what, buf] of owned) {
+      assert.ok(listed.has(buf as ArrayBuffer), `chunk ${r.chunkId}: ${what} would be cloned, not transferred`);
+    }
+  }
 });

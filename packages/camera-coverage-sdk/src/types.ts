@@ -3,6 +3,8 @@
  * Mirrors the interfaces defined in specs/spec.md.
  */
 
+import type { AggregateResult, AggregateSpec } from './aggregate.ts';
+
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number]; // xyzw
 
@@ -35,6 +37,16 @@ export interface EngineOptions {
    * Default 'auto'.
    */
   backend?: 'auto' | 'webgpu' | 'cpu';
+  /**
+   * Host-memory ceiling on one chunk's readback (§11.1). Default 256 MiB.
+   *
+   * Distinct from the device's `maxBufferSize`: every segment is copied out of
+   * the mapped range into a JS `TypedArray`, so a device that accepts a 400 MiB
+   * staging buffer can still leave the heap unable to copy it — and that failure
+   * arrives as a bare `Array buffer allocation failed` naming nothing. Exceeding
+   * this throws `SCENE_TOO_LARGE` naming `chunkSizeXZ` and `voxelSize` instead.
+   */
+  maxChunkReadbackBytes?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +227,14 @@ export interface ComputeOptions {
    * change the output (acceptance test §18.5a) — exposed for that test.
    */
   precull?: boolean;
+  /**
+   * Aggregation descriptor (§19), evaluated inside the per-chunk pipeline while
+   * the masks are still resident. Costs a dispatch per populated primitive and
+   * no readback beyond its own accumulators.
+   */
+  aggregate?: AggregateSpec;
+  /** One {@link AggregateResult} per computed chunk (§19.4). Merging is the caller's. */
+  onAggregate?: (result: AggregateResult) => void;
 }
 
 export interface VisibilityEngine {
@@ -223,6 +243,16 @@ export interface VisibilityEngine {
   setSampling(config: SamplingConfig): Promise<SamplingStats>;
   setCameras(cameras: CameraConfig[]): void;
   compute(opts?: ComputeOptions): Promise<CoverageSummary>;
+  /**
+   * Re-evaluate a descriptor over chunks the caller retained (§19.4). Uploads one
+   * chunk at a time (§9.4) and raycasts nothing — this is the path a zone move or
+   * a section drag takes, since neither can change a mask bit.
+   */
+  aggregate(
+    chunks: Iterable<ChunkResult>,
+    spec: AggregateSpec,
+    opts?: { signal?: AbortSignal; onAggregate?: (result: AggregateResult) => void },
+  ): Promise<void>;
   dispose(): void;
 }
 
@@ -239,6 +269,10 @@ export const EngineErrorCode = {
   INVALID_STATE: 'INVALID_STATE',
   /** A `compute()` was aborted through its `signal` (§13.2). Not a failure. */
   COMPUTE_CANCELED: 'COMPUTE_CANCELED',
+  /** An aggregation descriptor exceeded a §19.6 cap. */
+  AGGREGATE_TOO_LARGE: 'AGGREGATE_TOO_LARGE',
+  /** An aggregation descriptor was malformed (§19.6). */
+  INVALID_AGGREGATE: 'INVALID_AGGREGATE',
 } as const;
 export type EngineErrorCode = (typeof EngineErrorCode)[keyof typeof EngineErrorCode];
 

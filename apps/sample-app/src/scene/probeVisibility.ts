@@ -1,19 +1,17 @@
 /**
- * Probe model + visibility query (spec §12.1, §12.2).
+ * Probe model + the shape of a visibility answer (spec §12.1, §12.2).
  *
  * A probe is a user-placed point; its visibility is read from the **most recent
  * completed `compute()` run's per-voxel camera masks** — not a fresh ray cast
- * (the SDK exposes no arbitrary-point query). The world position is mapped to the
- * voxel that contains it and that voxel's mask is decoded against the ordered
- * enabled-camera list that was passed to `setCameras()` for that run.
+ * (the SDK exposes no arbitrary-point query).
  *
- * To make the lookup possible we **retain the streamed `ChunkResult`s** (keyed by
- * chunkId) for the current run, reset at the start of each `compute()`. Lookup
- * uses the SDK accessor's own O(depth) descent — no extra spatial index.
+ * The lookup itself is **not** here: probes are the `probes` primitive of the
+ * run's aggregation descriptor (spec §3.3, §12.2), resolved in the worker beside
+ * the masks and returned as a few hundred bytes. `CoverageRun` decodes them
+ * against the run's snapshotted camera list; this module owns the entity and the
+ * result type both sides agree on.
  */
-import { accessor } from '@linkervision/camera-coverage-sdk';
-import { maskBitSet, runCameras, NO_RUN_CAMERAS, type RunCamera, type RunCameras } from './runCameras.ts';
-import type { ChunkResult, Vec3, WorkspaceGrid } from '@linkervision/camera-coverage-sdk';
+import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 
 /** A user-placed point in the scene (spec §12.1). */
 export interface Probe {
@@ -55,98 +53,3 @@ export interface ProbeVisibilityOk {
  * "no run yet" state is the caller's concern (there is simply no retained data).
  */
 export type ProbeVisibilityResult = { status: 'no-data' } | ProbeVisibilityOk;
-
-/**
- * Map global voxel indices to the retained voxel that contains them:
- * `(gi, gj, gk)` → `(chunkId, i, j, k)`. Returns null when a global index lies
- * outside the logical voxel grid. Shared by {@link locateVoxel} (a single world
- * point) and the section heatmap's column walker (`sectionHeatmap.ts`, spec
- * §13.3), which advances `gi`/`gk` across chunk boundaries one voxel at a time.
- * Pure so it can be unit-tested without a compute run.
- */
-export function chunkLocalForGlobalIndex(
-  grid: WorkspaceGrid,
-  gi: number,
-  gj: number,
-  gk: number,
-): { chunkId: number; i: number; j: number; k: number } | null {
-  const { gridDims, chunkVoxels, chunkCountX } = grid;
-  if (
-    gi < 0 || gj < 0 || gk < 0 ||
-    gi >= gridDims[0] || gj >= gridDims[1] || gk >= gridDims[2]
-  ) {
-    return null;
-  }
-  const [vpcX, , vpcZ] = chunkVoxels;
-  const cx = Math.floor(gi / vpcX);
-  const cz = Math.floor(gk / vpcZ);
-  return {
-    chunkId: cz * chunkCountX + cx,
-    i: gi - cx * vpcX,
-    j: gj, // chunks span the full Y extent, so the base J is always 0
-    k: gk - cz * vpcZ,
-  };
-}
-
-/**
- * Map a world point to the retained voxel that contains it (spec §12.2):
- * world → global voxel `floor((p − worldMin) / voxelSize)` → `(chunkId, i, j, k)`.
- * Returns null when the point lies outside the logical voxel grid. Pure so it can
- * be unit-tested without a compute run.
- */
-export function locateVoxel(
-  grid: WorkspaceGrid,
-  p: Vec3,
-): { chunkId: number; i: number; j: number; k: number } | null {
-  const { worldMin, voxelSize } = grid;
-  const gi = Math.floor((p[0] - worldMin[0]) / voxelSize);
-  const gj = Math.floor((p[1] - worldMin[1]) / voxelSize);
-  const gk = Math.floor((p[2] - worldMin[2]) / voxelSize);
-  return chunkLocalForGlobalIndex(grid, gi, gj, gk);
-}
-
-export class ProbeVisibility {
-  private grid: WorkspaceGrid | null = null;
-  private chunks = new Map<number, ChunkResult>();
-  /** The run's enabled cameras and their mask-bit indices (spec §12.2, §5.4). */
-  private cams: RunCameras = NO_RUN_CAMERAS;
-
-  /** Start retaining a new run's chunks; snapshot its ordered camera list. */
-  reset(grid: WorkspaceGrid, cameras: readonly RunCamera[]): void {
-    this.grid = grid;
-    this.cams = runCameras(cameras);
-    this.chunks.clear();
-  }
-
-  /** Retain a streamed chunk (in parallel with the overlay, spec §12.2). */
-  addChunk(result: ChunkResult): void {
-    this.chunks.set(result.chunkId, result);
-  }
-
-  /** Discard the retained run so `query()` reads "no-data" until the next run (spec §14.4). */
-  clear(): void {
-    this.grid = null;
-    this.chunks.clear();
-  }
-
-  /** Decode the retained mask at the probe's world position (spec §12.2). */
-  query(p: Vec3): ProbeVisibilityResult {
-    if (!this.grid) return { status: 'no-data' };
-    const loc = locateVoxel(this.grid, p);
-    if (!loc) return { status: 'no-data' };
-    const chunk = this.chunks.get(loc.chunkId);
-    if (!chunk) return { status: 'no-data' };
-
-    const acc = accessor(chunk);
-    if (!acc.isValid(loc.i, loc.j, loc.k)) return { status: 'no-data' };
-
-    // Decode every mask word (correct up to MAX_CAMERAS = 128, spec §12.2), not
-    // just word 0. The bit index comes from `cams.bits`, not the loop counter:
-    // a disabled camera still occupies a slot (spec §5.4), so the two diverge.
-    const visible = this.cams.bits.map((bit) =>
-      maskBitSet((w) => acc.getMaskWord(loc.i, loc.j, loc.k, w), chunk.camWords, bit),
-    );
-    const seenCount = visible.reduce((sum, v) => sum + (v ? 1 : 0), 0);
-    return { status: 'ok', cameraIds: this.cams.ids, visible, seenCount };
-  }
-}

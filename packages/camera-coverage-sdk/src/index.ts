@@ -43,8 +43,8 @@ export { CellType, EngineError, EngineErrorCode, MAX_CAMERAS } from './types.ts'
 export { accessor, denseAccessor } from './results.ts';
 export { buildSvo, svoAccessor, LEAF } from './svo.ts';
 export type { VoxelAccessor, DenseChunk } from './svo.ts';
-export { WorkspaceGrid, voxelCenter, localIndex } from './grid.ts';
-export type { ChunkGrid } from './grid.ts';
+export { WorkspaceGrid, voxelCenter, localIndex, placementOf, suggestChunkSizeXZ } from './grid.ts';
+export type { ChunkGrid, ChunkPlacement } from './grid.ts';
 export { prepareCamera, packCameras, camWords, pointInFrustum, frustumIntersectsAabb } from './camera.ts';
 export type { PreparedCamera } from './camera.ts';
 export { buildBvh } from './geometry/bvh.ts';
@@ -52,10 +52,51 @@ export type { Bvh } from './geometry/bvh.ts';
 export { cleanMesh } from './geometry/mesh.ts';
 export type { CleanMesh } from './geometry/mesh.ts';
 export { computeOccupancy } from './occupancy.ts';
-export type { Occupancy } from './occupancy.ts';
+export type { OccupancySource } from './occupancy.ts';
+export { ChunkOccupancy, DenseOccupancy, occupancyCounters } from './occupancy.ts';
 
 // WGSL shader sources (for advanced / custom pipelines)
-export { PASS1_FRUSTUM, PASS2_VISIBILITY, PASS3_STATS } from './shaders.ts';
+export {
+  PASS1_FRUSTUM,
+  PASS2_VISIBILITY,
+  PASS3_STATS,
+  PASS4_REGIONS,
+  PASS5_COLUMNS,
+  PASS6_LEAFCOUNTS,
+} from './shaders.ts';
+
+// Aggregation (§19)
+export type {
+  AggregateSpec,
+  AggregateRegion,
+  AggregateSlab,
+  AggregateLeafCounts,
+  AggregateResult,
+  RegionAccum,
+  ColumnAccum,
+  LeafCounts,
+  AggregateChunkInput,
+  PackedAggregate,
+} from './aggregate.ts';
+export {
+  COLUMN_MIN_EMPTY,
+  ProbeHit,
+  MAX_AGGREGATE_REGIONS,
+  MAX_AGGREGATE_SLABS,
+  MAX_AGGREGATE_PROBES,
+  MAX_AGGREGATE_GROUPS,
+  aggregateChunkCPU,
+  aggregateIsEmpty,
+  emptyColumns,
+  mergeLeafCounts,
+  emptyRegions,
+  mergeColumns,
+  mergeRegions,
+  packAggregate,
+  planeAxes,
+  regionMask,
+  validateAggregateSpec,
+} from './aggregate.ts';
 
 // Compute kernels: pure-TS (default) and the Rust WASM loader
 export { tsKernels } from './kernels.ts';

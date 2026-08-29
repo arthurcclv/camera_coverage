@@ -277,14 +277,26 @@ test('maxDepth majority key is taken over all words, not word 0', () => {
 // §18.6f (arithmetic half) --------------------------------------------------
 test('staging plan sizes the buffer by the sum of its segments (§11.1)', () => {
   // Stats-only: one segment, no per-voxel readback.
-  const statsOnly = planStaging(24, -1, -1);
+  const statsOnly = planStaging([
+    { key: 'stats', bytes: 24 },
+    { key: 'visibility', bytes: 0 },
+    { key: 'coverage', bytes: 0 },
+  ]);
   assert.equal(statsOnly.size, 24);
   assert.equal(statsOnly.segments.length, 1);
-  assert.deepEqual(statsOnly.offsets, [0, -1, -1]);
+  assert.equal(statsOnly.offsetOf('stats'), 0);
+  assert.equal(statsOnly.has('visibility'), false);
+  assert.equal(statsOnly.offsetOf('visibility'), -1);
 
   // Mode 1 emitting: stats + visibility, the stats segment padded to 8 bytes.
-  const mode1 = planStaging(20, 4096, -1);
-  assert.deepEqual(mode1.offsets, [0, 24, -1]);
+  const mode1 = planStaging([
+    { key: 'stats', bytes: 20 },
+    { key: 'visibility', bytes: 4096 },
+    { key: 'coverage', bytes: 0 },
+  ]);
+  assert.equal(mode1.offsetOf('stats'), 0);
+  assert.equal(mode1.offsetOf('visibility'), 24);
+  assert.equal(mode1.offsetOf('coverage'), -1);
   assert.equal(mode1.size, 4120);
 
   // Mode 2 emitting: all three are resident at once, so the peak is their sum
@@ -292,12 +304,41 @@ test('staging plan sizes the buffer by the sum of its segments (§11.1)', () => 
   // paid and what the maxBufferSize check would have under-counted.
   const visBytes = 32 * 1024 * 1024;
   const covBytes = 128 * 1024 * 1024;
-  const mode2 = planStaging(24, visBytes, covBytes);
+  const mode2 = planStaging([
+    { key: 'stats', bytes: 24 },
+    { key: 'visibility', bytes: visBytes },
+    { key: 'coverage', bytes: covBytes },
+  ]);
   assert.equal(mode2.size, 24 + visBytes + covBytes);
   assert.ok(mode2.size > Math.max(visBytes, covBytes));
-  assert.deepEqual(mode2.offsets, [0, 24, 24 + visBytes]);
-  assert.deepEqual(mode2.segments.map((s) => s.slot), [0, 1, 2]);
+  assert.equal(mode2.offsetOf('visibility'), 24);
+  assert.equal(mode2.offsetOf('coverage'), 24 + visBytes);
+  assert.deepEqual(
+    mode2.segments.map((s) => s.key),
+    ['stats', 'visibility', 'coverage'],
+  );
+
+  // An omitted earlier primitive shifts nothing it should not: the segments a
+  // descriptor *did* ask for are still found by name, which is the whole reason
+  // the plan is keyed rather than positional.
+  const aggOnly = planStaging([
+    { key: 'stats', bytes: 24 },
+    { key: 'visibility', bytes: 0 },
+    { key: 'coverage', bytes: 0 },
+    { key: 'leafCounts', bytes: 64 },
+    { key: 'leafValid', bytes: 16 },
+  ]);
+  assert.equal(aggOnly.offsetOf('leafCounts'), 24);
+  assert.equal(aggOnly.sizeOf('leafCounts'), 64);
+  assert.equal(aggOnly.offsetOf('leafValid'), 88);
+  assert.equal(aggOnly.has('regionAccum'), false);
+  assert.equal(aggOnly.sizeOf('regionAccum'), 0);
 
   // Every getMappedRange offset stays 8-byte aligned.
-  for (const seg of planStaging(20, 12, 36).segments) assert.equal(seg.offset % 8, 0);
+  const aligned = planStaging([
+    { key: 'stats', bytes: 20 },
+    { key: 'visibility', bytes: 12 },
+    { key: 'coverage', bytes: 36 },
+  ]);
+  for (const seg of aligned.segments) assert.equal(seg.offset % 8, 0);
 });

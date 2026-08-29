@@ -5,17 +5,14 @@
  * colormap and the legend-scale builders live in `heatmapLegend.ts`; this module
  * imports `turboColormap` for the heatmap texture and re-uses it there only.
  *
- * Like `probeVisibility.ts`, this reads the **retained `ChunkResult`s of the most
- * recent completed run** (a third stream consumer alongside the overlay and the
- * probe store, spec §13.4) rather than a fresh ray cast, decoding masks against
- * a snapshot of that run's ordered enabled-camera list.
+ * A section is one `columns` slab of the run's aggregation descriptor (spec §3.3,
+ * §13.4): the reduction runs in the worker, next to the masks, and this module
+ * turns the merged per-cell accumulator into the `SectionCellGrid` the renderer
+ * and the stats panel read.
  */
-import { accessor, type ChunkResult, type Vec3, type VoxelAccessor, type WorkspaceGrid } from '@linkervision/camera-coverage-sdk';
-import { chunkLocalForGlobalIndex } from './probeVisibility.ts';
-import { coverageFraction, popcount32 } from './coverageOverlay.ts';
+import { COLUMN_MIN_EMPTY, type ColumnAccum, type Vec3, type WorkspaceGrid } from '@linkervision/camera-coverage-sdk';
 import { turboColormap } from './heatmapLegend.ts';
-import type { MarkedFilter } from './samplingVolumes.ts';
-import { maskBitSet, runCameras, NO_RUN_CAMERAS, type RunCamera, type RunCameras } from './runCameras.ts';
+import { maskBitSet, type RunCameras } from './runCameras.ts';
 
 export type SectionOrientation = 'horizontal' | 'vertical-x' | 'vertical-z';
 export type SectionAggregation = 'mean' | 'max' | 'min' | 'blind';
@@ -72,6 +69,20 @@ interface AxisMapping {
 }
 
 /** Collapse axis + in-plane axes for each orientation (spec §13.1). */
+/**
+ * Whether a slab's in-plane axes arrive transposed relative to the section's own
+ * `axisA`/`axisB`. The SDK numbers a slab's plane axes in **ascending** order; a
+ * `vertical-x` section spans Z×Y, which is descending (spec §3.3).
+ *
+ * Derived from {@link axisMapping}, never carried alongside it: the two would
+ * be the same fact stored twice, and the failure mode of them disagreeing is a
+ * silently mirrored heatmap rather than anything that throws.
+ */
+export function slabTransposed(orientation: SectionOrientation): boolean {
+  const { axisA, axisB } = axisMapping(orientation);
+  return axisA > axisB;
+}
+
 export function axisMapping(orientation: SectionOrientation): AxisMapping {
   switch (orientation) {
     case 'horizontal':
@@ -93,13 +104,25 @@ export function collapseAxisExtent(
   return { min: worldMin[collapseAxis], max: worldMax[collapseAxis] };
 }
 
+/** Everything one section's cell grid is derived from (spec §13.3, §13.4). */
+export interface CellGridInput {
+  grid: Pick<WorkspaceGrid, 'worldMin' | 'voxelSize' | 'gridDims'>;
+  section: Pick<Section, 'orientation' | 'min' | 'max' | 'minA' | 'maxA' | 'minB' | 'maxB'>;
+  /** The merged slab for this section, across every chunk of the run. */
+  acc: ColumnAccum;
+  camWords: number;
+  cams: RunCameras;
+  /** Voxels the collapse axis spans — the denominator for "no chunk covered this". */
+  columnLength: number;
+}
+
 /**
  * Euler rotation (radians, XYZ order) for a section's heatmap plane group
  * (`sectionGizmos.ts`), chosen so the heatmap's in-plane axes map to
  * **increasing** world axisA/axisB — not mirrored. This matters because
  * `PlaneGeometry`'s UV increases with local X/Y, `DataTexture` defaults to
  * `flipY = false` (texture row/column 0 = data index 0 = the *smallest*
- * axisA/axisB index per `computeSectionCells`), and a single-axis rotation has
+ * axisA/axisB index per `cellGridFromColumns`), and a single-axis rotation has
  * only one degree of freedom — get the sign wrong and the whole heatmap
  * (and, for `horizontal`/`vertical-x`, specifically the in-plane Z axis)
  * renders as a mirror image. Verified in `test/sectionHeatmap.test.ts` against
@@ -341,144 +364,94 @@ export interface SectionCellGrid {
 }
 
 /**
- * Aggregate every in-plane column of the slab into a `SectionCellGrid` (spec
- * §13.3). `accessors` must have one `VoxelAccessor` per retained chunk id.
+ * Turn a section's merged column accumulator into its cell grid (spec §13.3,
+ * §13.4).
  *
- * Valid data wins: a column with ≥ 1 in-zone valid voxel is **colored** (aggregating
- * those voxels, ignoring any obstacle/no-data voxels sharing it). Otherwise a column
- * with any no-data voxel — or no in-zone voxel at all — is **transparent**, and a column
- * that is entirely obstacle (no valid, no no-data) is **black** (spec §13.3).
- * When a `marked` filter is supplied (`sampling_volumes.md` §7.3), voxels outside
- * the marked set (the enabled zones' union) are **skipped** — they neither classify
- * the cell nor count toward its aggregation; the cell aggregates only its in-zone
- * valid voxels, and a column with no in-zone voxel at all is **transparent** (spec §13.3).
+ * Two things happen here that the SDK deliberately does not do:
+ *
+ * **Fractions are derived, not accumulated.** Every value is
+ * `popcount / enabledCameras` over a denominator constant for the run, so the
+ * aggregation sums integer popcounts and the division happens once, here. That is
+ * exact rather than an approximation of a float reduction — and it is what makes
+ * the same numbers come back bit-identical from the GPU (SDK spec §19.2).
+ *
+ * **Cells are classified here.** The accumulator reports what it *counted*;
+ * "no data" is what it did **not** — a column longer than `valid + obstacle +
+ * filtered` contains voxels no chunk covered. §13.3's precedence (valid data wins
+ * → colored; else no-data/empty → transparent; else all-obstacle → black) is the
+ * app's, so it stays in the app.
+ *
+ * The in-plane axes are un-swapped for `vertical-x` per {@link slabTransposed},
+ * which is derived from the orientation here rather than passed in.
  */
-export function computeSectionCells(
-  grid: Pick<WorkspaceGrid, 'worldMin' | 'voxelSize' | 'gridDims'>,
-  accessors: ReadonlyMap<number, VoxelAccessor>,
-  cams: RunCameras,
-  camWords: number,
-  section: Pick<Section, 'orientation' | 'min' | 'max'> &
-    Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
-  marked: MarkedFilter | null = null,
-): SectionCellGrid {
-  const { collapseAxis, axisA, axisB } = axisMapping(section.orientation);
-  // The footprint (spec §13.2) selects a grid-aligned sub-rectangle of whole
-  // voxel columns: only columns inside [minA,maxA]×[minB,maxB] are aggregated,
-  // so the texture dims are the selected column counts, not the full grid (§13.3).
-  // A missing footprint bound falls back to the whole grid on that axis (the
-  // pre-footprint behavior), which the SectionHeatmapStore never relies on but
-  // keeps the aggregation callable with just the slab fields.
-  const rangeA =
-    section.minA !== undefined && section.maxA !== undefined
-      ? axisIndexRange(grid, axisA, section.minA, section.maxA)
-      : { start: 0, end: grid.gridDims[axisA] - 1 };
-  const rangeB =
-    section.minB !== undefined && section.maxB !== undefined
-      ? axisIndexRange(grid, axisB, section.minB, section.maxB)
-      : { start: 0, end: grid.gridDims[axisB] - 1 };
-  const dimsA = rangeA.end - rangeA.start + 1;
-  const dimsB = rangeB.end - rangeB.start + 1;
-  const { start, end } = axisIndexRange(grid, collapseAxis, section.min, section.max);
+export function cellGridFromColumns(input: CellGridInput): SectionCellGrid {
+  const { grid, section, acc, camWords, cams, columnLength } = input;
+  const transposed = slabTransposed(section.orientation);
+  const { axisA, axisB } = axisMapping(section.orientation);
+  const rangeA = axisIndexRange(grid, axisA, section.minA, section.maxA);
+  const rangeB = axisIndexRange(grid, axisB, section.minB, section.maxB);
+  const dimsA = transposed ? acc.dimsB : acc.dimsA;
+  const dimsB = transposed ? acc.dimsA : acc.dimsB;
+  const denom = Math.max(1, cams.ids.length);
 
   const cells: SectionCellStats[] = new Array(dimsA * dimsB);
-  const g: [number, number, number] = [0, 0, 0];
+  for (let b = 0; b < dimsB; b++) {
+    for (let a = 0; a < dimsA; a++) {
+      const src = transposed ? b + acc.dimsA * a : a + acc.dimsA * b;
+      const valid = acc.validCount[src];
+      const obstacle = acc.obstacleCount[src];
+      const filtered = acc.filteredCount[src];
+      const noData = columnLength - (valid + obstacle + filtered) > 0;
+      const idx = a + dimsA * b;
 
-  for (let lb = 0; lb < dimsB; lb++) {
-    const b = rangeB.start + lb;
-    g[axisB] = b;
-    for (let la = 0; la < dimsA; la++) {
-      const a = rangeA.start + la;
-      g[axisA] = a;
-
-      let sum = 0;
-      let max = -Infinity;
-      let min = Infinity;
-      let blindCount = 0;
-      let count = 0; // in-zone valid voxels aggregated
-      let sawObstacle = false; // in-zone voxel marked invalid by the SDK (wall/box/interior)
-      let sawNoData = false; // in-zone voxel with no retained chunk (out of sampled region)
-      const seenWords = new Uint32Array(camWords);
-
-      for (let c = start; c <= end; c++) {
-        g[collapseAxis] = c;
-        // The zone filter is applied **first**, before any validity check: when
-        // zones are active the SDK samples only the enabled volumes' neighborhood,
-        // so a voxel outside the marked set is unsampled and reads *invalid* —
-        // indistinguishable from an obstacle via `isValid` alone. Skipping it here
-        // (not classifying) is what keeps a section from blacking/vanishing wherever
-        // its column pokes outside a shorter volume (spec §13.3).
-        if (
-          marked &&
-          !marked(
-            grid.worldMin[0] + (g[0] + 0.5) * grid.voxelSize,
-            grid.worldMin[1] + (g[1] + 0.5) * grid.voxelSize,
-            grid.worldMin[2] + (g[2] + 0.5) * grid.voxelSize,
-          )
-        ) {
-          continue;
-        }
-        const loc = chunkLocalForGlobalIndex(grid as WorkspaceGrid, g[0], g[1], g[2]);
-        const acc = loc ? accessors.get(loc.chunkId) : undefined;
-        if (!loc || !acc) {
-          // No retained chunk at this position — no coverage data (spec §13.3).
-          // No-data makes a valueless column transparent, winning over obstacle.
-          sawNoData = true;
-          continue;
-        }
-        if (!acc.isValid(loc.i, loc.j, loc.k)) {
-          // An in-zone obstacle voxel (wall/box/interior). Ignored here — it only
-          // blacks the cell if the whole column turns out to be obstacle (spec §13.3).
-          sawObstacle = true;
-          continue;
-        }
-        let camCount = 0;
-        for (let w = 0; w < camWords; w++) {
-          const word = acc.getMaskWord(loc.i, loc.j, loc.k, w);
-          seenWords[w] |= word;
-          camCount += popcount32(word);
-        }
-        // Denominator is the *enabled* count: disabled cameras hold mask slots
-        // but can never contribute a bit, so counting them would cap the scale
-        // below 1 for every cell (spec §5.4).
-        const frac = coverageFraction(camCount, cams.ids.length);
-        sum += frac;
-        if (frac > max) max = frac;
-        if (frac < min) min = frac;
-        if (camCount === 0) blindCount++;
-        count++;
+      if (valid > 0) {
+        const min = acc.camCountMin[src];
+        cells[idx] = {
+          valid: true,
+          black: false,
+          meanFraction: clamp01(acc.camCountSum[src] / (valid * denom)),
+          maxFraction: clamp01(acc.camCountMax[src] / denom),
+          // The empty sentinel cannot appear alongside `valid > 0`, but reading
+          // it as a coverage of 255/denom if it ever did would be a silently
+          // saturated cell rather than a visible one.
+          minFraction: min === COLUMN_MIN_EMPTY ? 0 : clamp01(min / denom),
+          blindFraction: acc.blindCount[src] / valid,
+          seenWords: acc.seenWords.slice(src * camWords, (src + 1) * camWords),
+        };
+      } else {
+        cells[idx] = {
+          valid: false,
+          black: obstacle > 0 && !noData,
+          meanFraction: 0,
+          maxFraction: 0,
+          minFraction: 0,
+          blindFraction: 0,
+          seenWords: new Uint32Array(camWords),
+        };
       }
-
-      // Valid data wins → colored; else no-data/empty → transparent; else the
-      // column is entirely obstacle → black (spec §13.3, precedence order).
-      const idx = la + dimsA * lb;
-      cells[idx] = count > 0
-        ? {
-            valid: true,
-            black: false,
-            meanFraction: sum / count,
-            maxFraction: max,
-            minFraction: min,
-            blindFraction: blindCount / count,
-            seenWords,
-          }
-        : { valid: false, black: sawObstacle && !sawNoData, meanFraction: 0, maxFraction: 0, minFraction: 0, blindFraction: 0, seenWords: new Uint32Array(camWords) };
     }
   }
 
-  // Grid-aligned world extent of the selected columns (spec §13.3): the column
-  // start's low edge to the column end's high edge, so the rendered plane spans
-  // exactly the drawn cells.
-  const extentA = {
-    min: grid.worldMin[axisA] + rangeA.start * grid.voxelSize,
-    max: grid.worldMin[axisA] + (rangeA.end + 1) * grid.voxelSize,
+  return {
+    dimsA,
+    dimsB,
+    cells,
+    camWords,
+    cameraIds: cams.ids,
+    cameraBits: cams.bits,
+    extentA: {
+      min: grid.worldMin[axisA] + rangeA.start * grid.voxelSize,
+      max: grid.worldMin[axisA] + (rangeA.end + 1) * grid.voxelSize,
+    },
+    extentB: {
+      min: grid.worldMin[axisB] + rangeB.start * grid.voxelSize,
+      max: grid.worldMin[axisB] + (rangeB.end + 1) * grid.voxelSize,
+    },
   };
-  const extentB = {
-    min: grid.worldMin[axisB] + rangeB.start * grid.voxelSize,
-    max: grid.worldMin[axisB] + (rangeB.end + 1) * grid.voxelSize,
-  };
+}
 
-  return { dimsA, dimsB, cells, camWords, cameraIds: cams.ids, cameraBits: cams.bits, extentA, extentB };
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
 }
 
 /** The display value a cell contributes to the heatmap for a given aggregation (spec §13.3). */
@@ -616,190 +589,4 @@ export function computeSectionStats(grid: SectionCellGrid): SectionStats {
     maxCoverage: validCells > 0 ? max : 0,
     perCamera: cameraIds.map((id, n) => ({ id, seenFraction: validCells > 0 ? seenCounts[n] / validCells : 0 })),
   };
-}
-
-/**
- * A section's world-space footprint on **XZ** — the plane the SDK chunks along
- * (`spec.md` §3). Two of the three bounds come from the in-plane axes, the third
- * from the collapse axis; whichever pair lands on X and Z is what can overlap a
- * chunk. Used only to decide which chunks a section's cells can possibly read,
- * so a conservative box is fine.
- */
-function sectionFootprintXZ(
-  section: Pick<Section, 'orientation' | 'min' | 'max'> &
-    Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
-): { x0: number; x1: number; z0: number; z1: number } {
-  const a0 = section.minA ?? -Infinity;
-  const a1 = section.maxA ?? Infinity;
-  const b0 = section.minB ?? -Infinity;
-  const b1 = section.maxB ?? Infinity;
-  switch (section.orientation) {
-    case 'horizontal': // collapse Y; axisA = X, axisB = Z
-      return { x0: a0, x1: a1, z0: b0, z1: b1 };
-    case 'vertical-x': // collapse X; axisA = Z, axisB = Y
-      return { x0: section.min, x1: section.max, z0: a0, z1: a1 };
-    case 'vertical-z': // collapse Z; axisA = X, axisB = Y
-      return { x0: a0, x1: a1, z0: section.min, z1: section.max };
-  }
-}
-
-// --- Retained-run store (spec §13.4) -----------------------------------------
-
-/**
- * Retains the current run's chunks (like `ProbeVisibility`) and computes cell
- * grids for sections on demand. `VoxelAccessor`s are cached per chunk id since
- * many sections/cells reuse the same chunks within one recompute.
- */
-export class SectionHeatmapStore {
-  private grid: WorkspaceGrid | null = null;
-  private chunks = new Map<number, ChunkResult>();
-  private accessorCache = new Map<number, VoxelAccessor>();
-  private cams: RunCameras = NO_RUN_CAMERAS;
-  private camWords = 1;
-  /**
-   * Cached cell grids, and the chunk revisions each was built from (spec §13.4).
-   * An incremental run (`spec.md` §8) replaces only a few chunks, so a section
-   * whose footprint misses all of them keeps the grid it already had instead of
-   * re-walking every column on the main thread.
-   */
-  private cellCache = new Map<string, CachedCells>();
-  /** Bumped per chunk on every replacement; a cache entry records what it saw. */
-  private revision = new Map<number, number>();
-
-  /** Start retaining a new run's chunks; snapshot its ordered enabled-camera list. */
-  reset(grid: WorkspaceGrid, cameras: readonly RunCamera[]): void {
-    this.grid = grid;
-    this.cams = runCameras(cameras);
-    this.chunks.clear();
-    this.accessorCache.clear();
-    this.cellCache.clear();
-    this.revision.clear();
-    this.camWords = 1;
-  }
-
-  /** Retain a streamed chunk (in parallel with the overlay + probe store, spec §13.4). */
-  addChunk(result: ChunkResult): void {
-    this.chunks.set(result.chunkId, result);
-    this.accessorCache.delete(result.chunkId);
-    this.revision.set(result.chunkId, (this.revision.get(result.chunkId) ?? 0) + 1);
-    this.camWords = Math.max(this.camWords, result.camWords);
-  }
-
-  /** Whether any run has been retained yet. */
-  hasRun(): boolean {
-    return this.grid !== null;
-  }
-
-  /** Discard the retained run so `computeCells()` reads `null` until the next run (spec §14.4). */
-  clear(): void {
-    this.grid = null;
-    this.chunks.clear();
-    this.accessorCache.clear();
-    this.cellCache.clear();
-    this.revision.clear();
-  }
-
-  private accessorFor(chunkId: number): VoxelAccessor | undefined {
-    let acc = this.accessorCache.get(chunkId);
-    if (!acc) {
-      const chunk = this.chunks.get(chunkId);
-      if (!chunk) return undefined;
-      acc = accessor(chunk);
-      this.accessorCache.set(chunkId, acc);
-    }
-    return acc;
-  }
-
-  /**
-   * Compute a section's current cell grid, or null before any run is retained.
-   * An optional `marked` filter skips voxels outside the marked set
-   * (`sampling_volumes.md` §7.3) — applied client-side, so enabling/disabling a
-   * zone re-filters without a recompute.
-   */
-  computeCells(
-    section: Pick<Section, 'orientation' | 'min' | 'max'> &
-      Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
-    marked: MarkedFilter | null = null,
-  ): SectionCellGrid | null {
-    if (!this.grid) return null;
-
-    const deps = this.chunksUnder(section);
-    const key = sectionCacheKey(section);
-    const hit = this.cellCache.get(key);
-    if (hit && hit.marked === marked && sameDeps(hit.deps, deps)) return hit.grid;
-
-    const accessors = new Map<number, VoxelAccessor>();
-    for (const chunkId of this.chunks.keys()) {
-      const acc = this.accessorFor(chunkId);
-      if (acc) accessors.set(chunkId, acc);
-    }
-    const grid = computeSectionCells(
-      this.grid,
-      accessors,
-      this.cams,
-      this.camWords,
-      section,
-      marked,
-    );
-    this.cellCache.set(key, { marked, grid, deps });
-    return grid;
-  }
-
-  /**
-   * The chunks a section's cells can read, with their current revisions. Chunks
-   * are partitioned on XZ only, so a footprint that misses a chunk's XZ box can
-   * never reach into it — a vertical section over one aisle depends on a couple
-   * of chunks, not the workspace.
-   */
-  private chunksUnder(
-    section: Pick<Section, 'orientation' | 'min' | 'max'> &
-      Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
-  ): Map<number, number> {
-    const box = sectionFootprintXZ(section);
-    const deps = new Map<number, number>();
-    for (const [chunkId, chunk] of this.chunks) {
-      const vs = chunk.voxelSize;
-      const cx0 = chunk.origin[0];
-      const cx1 = cx0 + chunk.dims[0] * vs;
-      const cz0 = chunk.origin[2];
-      const cz1 = cz0 + chunk.dims[2] * vs;
-      if (box.x1 < cx0 || box.x0 > cx1 || box.z1 < cz0 || box.z0 > cz1) continue;
-      deps.set(chunkId, this.revision.get(chunkId) ?? 0);
-    }
-    return deps;
-  }
-}
-
-/**
- * Whether a cache entry's dependencies still match the current ones: the same
- * chunks, each at the same revision. A chunk appearing or disappearing under the
- * footprint counts as a change too, so a grid that grew a chunk is not reused.
- */
-function sameDeps(a: ReadonlyMap<number, number>, b: ReadonlyMap<number, number>): boolean {
-  if (a.size !== b.size) return false;
-  for (const [chunkId, rev] of a) if (b.get(chunkId) !== rev) return false;
-  return true;
-}
-
-/** A cached cell grid plus what it was built from (spec §13.4). */
-interface CachedCells {
-  marked: MarkedFilter | null;
-  grid: SectionCellGrid;
-  deps: Map<number, number>;
-}
-
-/** Cache identity for a section: every field `computeSectionCells` reads. */
-function sectionCacheKey(
-  section: Pick<Section, 'orientation' | 'min' | 'max'> &
-    Partial<Pick<Section, 'minA' | 'maxA' | 'minB' | 'maxB'>>,
-): string {
-  return [
-    section.orientation,
-    section.min,
-    section.max,
-    section.minA,
-    section.maxA,
-    section.minB,
-    section.maxB,
-  ].join('|');
 }

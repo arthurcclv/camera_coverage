@@ -36,8 +36,13 @@ changes behavior without a matching spec edit is incomplete. This is a hard rule
 
 Throw `EngineError(code, message, detail?)` with a code from `EngineErrorCode`
 (`WEBGPU_UNAVAILABLE`, `SCENE_TOO_LARGE`, `TOO_MANY_CAMERAS`,
-`CAMERA_INSIDE_GEOMETRY`, `DEVICE_LOST`, `INVALID_STATE`) for any condition a
-caller might branch on — never a bare `Error`. Codes are part of the public API.
+`CAMERA_INSIDE_GEOMETRY`, `DEVICE_LOST`, `INVALID_STATE`, `COMPUTE_CANCELED`,
+`AGGREGATE_TOO_LARGE`, `INVALID_AGGREGATE`) for any condition a caller might
+branch on — never a bare `Error`. Codes are part of the public API, so this list
+and `EngineErrorCode` in `types.ts` must be added to together.
+
+An untyped throw is not merely untidy here: it crosses the Worker boundary as
+`INVALID_STATE` (§16.1) and names nothing the caller can act on.
 
 ## Naming & files
 
@@ -83,7 +88,11 @@ other and update the parity test:
 - **Every change ships with a test** — unit, acceptance (§18), WASM-parity, or
   WebGPU as applicable. Manual verification alone is insufficient.
 - `test/acceptance.test.ts` encodes spec §18 scenarios and is the behavioral
-  contract; the CPU backend is the reference it runs against.
+  contract; the CPU backend is the reference it runs against. It is not the *only*
+  home for a §18 scenario — a scenario belongs with the subject it exercises, so
+  §19's live in `aggregate.test.ts`, §6.2's in `occupancy.test.ts`, and the
+  backend-parity ones in `webgpu.test.ts`. Cite the scenario id (`§18 6u`) in the
+  test name wherever it lands, since that is what makes it findable from the spec.
 - `test/wasm.test.ts` skips cleanly when the `.wasm` artifact hasn't been built.
 - `test/webgpu.test.ts` is the only file exercising real WGSL (native Dawn); it
   skips when no GPU adapter is present. A WGSL change is unverified until it runs

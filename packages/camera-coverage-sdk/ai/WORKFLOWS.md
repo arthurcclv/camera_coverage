@@ -42,7 +42,8 @@ an approved spec change.
 | Kind of change | Test file |
 |---|---|
 | A spec §18 scenario / end-to-end behavior | `test/acceptance.test.ts` |
-| A single module's logic (grid, camera, bvh, occupancy, svo, sampling) | `test/unit.test.ts` |
+| A single module's logic (grid, camera, bvh, svo, sampling) | `test/unit.test.ts` |
+| Occupancy materialization (per-chunk vs dense parity, seams, retention) | `test/occupancy.test.ts` |
 | Anything in the Rust crate or the TS↔WASM parity | `test/wasm.test.ts` |
 | Worker protocol / streaming / client proxy | `test/worker.test.ts` |
 | WGSL shaders / WebGPU compute path | `test/webgpu.test.ts` |

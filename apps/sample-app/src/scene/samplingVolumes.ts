@@ -6,26 +6,26 @@
  *  - the oriented-box point-membership test (§2.3) and world-AABB of an OBB (§7.1);
  *  - BVH-seeded generation of zones+volumes (§3), reusing the SDK's own
  *    `cleanMesh`/`buildBvh` client-side so nothing new crosses the worker boundary;
- *  - the **marked-set** filter the overlay/sections apply — the union of the
- *    **enabled** zones' volumes (§7.3);
- *  - client-side **per-zone aggregation** over the retained run's masks (§7.2),
- *    the same masks that back probes and sections.
+ *  - the shape of a per-zone summary, and the one derivation that turns an SDK
+ *    group accumulator into it (§7.2).
  *
- * The SDK is never touched — see `sampling_volumes.md` §1.1.
+ * The per-zone scan itself is **not** here any more: a zone is an aggregation
+ * group and a volume is an aggregation region, both evaluated in the worker next
+ * to the masks (`sampling_volumes.md` §7.2, `spec.md` §3.3). The marked-set
+ * filter went the same way — it is `maskRegions` on the descriptor, not a
+ * closure over voxel centers, because a closure cannot cross a Worker boundary.
  */
 import {
-  accessor,
   buildBvh,
   cleanMesh,
   type Bvh,
-  type ChunkResult,
   type Quat,
+  type RegionAccum,
   type SamplingRegion,
   type SceneMesh,
   type Vec3,
-  type WorkspaceGrid,
 } from '@linkervision/camera-coverage-sdk';
-import { runCameras, NO_RUN_CAMERAS, type RunCamera, type RunCameras } from './runCameras.ts';
+import type { RunCameras } from './runCameras.ts';
 
 // --- Entities (§2.1) ---------------------------------------------------------
 
@@ -152,25 +152,6 @@ export function regionsFromVolumes(active: boolean, volumes: SamplingVolume[]): 
     const { min, max } = obbWorldAabb(v);
     return { type: 'box', min, max };
   });
-}
-
-// --- Marked-set filter (§7.3) ------------------------------------------------
-
-/** Predicate over a voxel center: `true` ⇒ the voxel is in the marked set. */
-export type MarkedFilter = (cx: number, cy: number, cz: number) => boolean;
-
-/**
- * Build the marked-set filter for the overlay/sections (§7.3), or `null` for the
- * full-volume fallback (zones inactive) — callers treat `null` as "draw every
- * valid voxel", today's behavior. The marked set is the union of the volumes of
- * every **enabled** zone; disabling all zones marks nothing. Toggling a zone's
- * enabled state is a pure client-side re-filter (no recompute).
- */
-export function makeMarkedFilter(active: boolean, volumes: SamplingVolume[], zones: Zone[]): MarkedFilter | null {
-  if (!active) return null;
-  const enabledZoneIds = new Set(zones.filter((z) => z.enabled).map((z) => z.id));
-  const inScope = volumes.filter((v) => enabledZoneIds.has(v.zoneId));
-  return (cx, cy, cz) => inScope.some((v) => inVolume([cx, cy, cz], v));
 }
 
 // --- BVH seeding (§3) --------------------------------------------------------
@@ -314,287 +295,27 @@ export interface ZoneCoverage {
   enabledUnion: ZoneSummary;
 }
 
-/** Accumulator mirroring {@link ZoneSummary} before rates are derived. */
-interface Accum {
-  valid: number;
-  covered: number;
-  blind: number;
-  seen: number[]; // per camera
-}
-
-function newAccum(cameraCount: number): Accum {
-  return { valid: 0, covered: 0, blind: 0, seen: new Array(cameraCount).fill(0) };
-}
-
-function finalizeAccum(a: Accum, cameraIds: readonly string[]): ZoneSummary {
+/**
+ * Turn one group's accumulator into a {@link ZoneSummary} (§7.2).
+ *
+ * `null` means the zone declared no group — it holds no volumes, or it fell past
+ * the descriptor's zone cap (`spec.md` §3.3). Either way the honest answer is an
+ * all-zero summary, which the panel already renders as "no marked voxels",
+ * rather than a missing entry every caller would have to handle.
+ *
+ * `seen` is indexed by **mask-bit index**, not by position among the enabled
+ * cameras: a disabled camera keeps its slot (`spec.md` §5.4), so `cams.bits` is
+ * what bridges the two.
+ */
+export function summaryFromAccum(a: RegionAccum | null, cams: RunCameras): ZoneSummary {
+  const valid = a?.valid ?? 0;
   return {
-    validVoxels: a.valid,
-    overallRate: a.valid > 0 ? a.covered / a.valid : 0,
-    blindVoxels: a.blind,
-    perCamera: cameraIds.map((id, n) => ({ id, coverageRate: a.valid > 0 ? a.seen[n] / a.valid : 0 })),
+    validVoxels: valid,
+    overallRate: valid > 0 ? a!.covered / valid : 0,
+    blindVoxels: a?.blind ?? 0,
+    perCamera: cams.ids.map((id, n) => ({
+      id,
+      coverageRate: valid > 0 ? a!.seen[cams.bits[n]] / valid : 0,
+    })),
   };
-}
-
-/**
- * One chunk's contribution to every zone's accumulator, plus the enabled union.
- *
- * The aggregation in §7.2 is a sum over voxels, so it decomposes per chunk: a run
- * that replaces 3 of 9 chunks only has to rescan those 3 and re-add the rest's
- * cached totals. That is what `ZoneCoverageStore` caches — without it the whole
- * retained scene is rescanned on the main thread after every `compute()`, which at
- * a fine voxel size is the single largest cost of a camera edit.
- */
-export interface ChunkZoneAccums {
-  perZone: Map<string, Accum>;
-  union: Accum;
-}
-
-function zoneVolumeMap(zones: Zone[], volumes: SamplingVolume[]): Map<string, SamplingVolume[]> {
-  const m = new Map<string, SamplingVolume[]>();
-  for (const z of zones) m.set(z.id, []);
-  for (const v of volumes) m.get(v.zoneId)?.push(v);
-  return m;
-}
-
-function addInto(dst: Accum, src: Accum): void {
-  dst.valid += src.valid;
-  dst.covered += src.covered;
-  dst.blind += src.blind;
-  for (let n = 0; n < dst.seen.length; n++) dst.seen[n] += src.seen[n];
-}
-
-/**
- * Scan one chunk's valid voxels into per-zone + union accumulators (§7.2). Pure in
- * its inputs, so its result is cacheable against the chunk and the zone geometry.
- */
-export function accumulateChunkZones(
-  chunk: ChunkResult,
-  cams: RunCameras,
-  zones: Zone[],
-  zoneVolumes: Map<string, SamplingVolume[]>,
-  enabledIds: ReadonlySet<string>,
-): ChunkZoneAccums {
-  const cameraIds = cams.ids;
-  const perZone = new Map<string, Accum>();
-  for (const z of zones) perZone.set(z.id, newAccum(cameraIds.length));
-  const union = newAccum(cameraIds.length);
-
-  const acc = accessor(chunk);
-  const [nx, ny, nz] = chunk.dims;
-  const [ox, oy, oz] = chunk.origin;
-  const vs = chunk.voxelSize;
-  for (let k = 0; k < nz; k++) {
-    for (let j = 0; j < ny; j++) {
-      for (let i = 0; i < nx; i++) {
-        if (!acc.isValid(i, j, k)) continue;
-        const cx = ox + (i + 0.5) * vs;
-        const cy = oy + (j + 0.5) * vs;
-        const cz = oz + (k + 0.5) * vs;
-
-        // Decode the mask once per voxel; reuse across every zone test.
-        // Bit math is inlined rather than routed through `maskBitSet`: this is
-        // the innermost loop of a per-voxel × per-camera scan, and the closure
-        // that helper would need allocated here costs ~40% of the loop.
-        let camCount = 0;
-        const seenBits: boolean[] = [];
-        for (let n = 0; n < cameraIds.length; n++) {
-          const bit = cams.bits[n];
-          const word = bit >>> 5;
-          const set =
-            word < chunk.camWords && ((acc.getMaskWord(i, j, k, word) >>> (bit & 31)) & 1) === 1;
-          seenBits.push(set);
-          if (set) camCount += 1;
-        }
-        const covered = camCount > 0;
-
-        let inEnabled = false;
-        for (const z of zones) {
-          const vols = zoneVolumes.get(z.id)!;
-          if (vols.length === 0 || !inZone([cx, cy, cz], vols)) continue;
-          if (enabledIds.has(z.id)) inEnabled = true;
-          const a = perZone.get(z.id)!;
-          a.valid += 1;
-          if (covered) a.covered += 1;
-          else a.blind += 1;
-          for (let n = 0; n < cameraIds.length; n++) if (seenBits[n]) a.seen[n] += 1;
-        }
-        if (inEnabled) {
-          union.valid += 1;
-          if (covered) union.covered += 1;
-          else union.blind += 1;
-          for (let n = 0; n < cameraIds.length; n++) if (seenBits[n]) union.seen[n] += 1;
-        }
-      }
-    }
-  }
-  return { perZone, union };
-}
-
-/**
- * Per-zone + enabled-union coverage over the retained run's masks (§7.2): one pass
- * over every valid voxel center, decoding its camera mask (all words up to
- * `MAX_CAMERAS`) and testing zone membership. Per-zone summaries are produced for
- * **every** zone (enabled or not, so its badge/panel stay live); the **union**
- * counts a voxel once if it falls in any **enabled** zone's volumes. `chunks` are
- * the same retained `ChunkResult`s that back probes/sections.
- *
- * Uncached: rescans every chunk given. `ZoneCoverageStore.compute` is the caching
- * entry point the app uses; this stays for callers holding an ad-hoc chunk set.
- */
-export function computeZoneCoverage(
-  chunks: Iterable<ChunkResult>,
-  cams: RunCameras,
-  zones: Zone[],
-  volumes: SamplingVolume[],
-): ZoneCoverage {
-  const zoneVolumes = zoneVolumeMap(zones, volumes);
-  const enabledIds = new Set(zones.filter((z) => z.enabled).map((z) => z.id));
-  return mergeZoneAccums(
-    zoneHasAnyVolume(zones, zoneVolumes)
-      ? [...chunks].map((c) => accumulateChunkZones(c, cams, zones, zoneVolumes, enabledIds))
-      : [],
-    cams,
-    zones,
-  );
-}
-
-/**
- * Whether any zone holds a volume. When none does, every accumulator finalizes to
- * zero and the voxel scan cannot change the answer — so it is skipped entirely
- * (§7.2). This is the common case: most scenes define no zones at all, and the scan
- * is `O(valid voxels × cameras)` over the whole retained run, on the main thread,
- * after every `compute()`.
- */
-function zoneHasAnyVolume(zones: Zone[], zoneVolumes: Map<string, SamplingVolume[]>): boolean {
-  return zones.some((z) => (zoneVolumes.get(z.id)?.length ?? 0) > 0);
-}
-
-/** Sum per-chunk accumulators into the final per-zone + union summaries (§7.2). */
-function mergeZoneAccums(
-  parts: readonly ChunkZoneAccums[],
-  cams: RunCameras,
-  zones: Zone[],
-): ZoneCoverage {
-  const cameraIds = cams.ids;
-  const perZoneAccum = new Map<string, Accum>();
-  for (const z of zones) perZoneAccum.set(z.id, newAccum(cameraIds.length));
-  const unionAccum = newAccum(cameraIds.length);
-
-  for (const part of parts) {
-    for (const z of zones) {
-      const src = part.perZone.get(z.id);
-      if (src) addInto(perZoneAccum.get(z.id)!, src);
-    }
-    addInto(unionAccum, part.union);
-  }
-
-  const perZone = new Map<string, ZoneSummary>();
-  for (const z of zones) perZone.set(z.id, finalizeAccum(perZoneAccum.get(z.id)!, cameraIds));
-  return { perZone, enabledUnion: finalizeAccum(unionAccum, cameraIds) };
-}
-
-/**
- * Identity of everything a cached per-chunk accumulator depends on besides the
- * chunk itself: the zone set (ids + enabled, since enabled decides the union), the
- * volumes' geometry and membership, and the run's camera list (accumulators are
- * per-camera). Any change invalidates every chunk's cache — correct, and cheap to
- * detect, because these are a handful of small entities while the thing being
- * protected is a scan of millions of voxels.
- */
-function zoneAccumSignature(zones: Zone[], volumes: SamplingVolume[], cams: RunCameras): string {
-  const z = zones.map((zz) => `${zz.id}:${zz.enabled ? 1 : 0}`).join(',');
-  const v = volumes
-    .map((vv) => `${vv.id}:${vv.zoneId}:${vv.position.join('/')}:${vv.size.join('/')}:${vv.rotation.join('/')}`)
-    .join(',');
-  return `${z}|${v}|${cams.ids.join(',')}|${cams.bits.join(',')}`;
-}
-
-/**
- * Retains the current run's chunks (like `ProbeVisibility` / `SectionHeatmapStore`)
- * and computes per-zone coverage on demand (§7.2, §13.4). A fourth stream
- * consumer alongside the overlay, probe, and section stores.
- */
-export class ZoneCoverageStore {
-  private chunks = new Map<number, ChunkResult>();
-  private cams: RunCameras = NO_RUN_CAMERAS;
-  private hasRunFlag = false;
-  /**
-   * Per-chunk accumulators, valid while `accumSig` holds (§7.2). An incremental
-   * run (`spec.md` §8) replaces only a few chunks, so only those are rescanned;
-   * the rest are re-added from here. Without this the aggregation was whole-scene
-   * on every run regardless of how little changed.
-   */
-  private accums = new Map<number, ChunkZoneAccums>();
-  private accumSig: string | null = null;
-
-  /**
-   * Start retaining a new run's chunks; snapshot its ordered enabled-camera list.
-   * `_grid` is unused (zone coverage decodes chunks by their own origin/dims, not a
-   * grid) but is taken to satisfy the shared `RetainedRun` interface `CoverageRun`
-   * fans out over — see `coverageRun.ts`.
-   */
-  reset(_grid: WorkspaceGrid, cameras: readonly RunCamera[]): void {
-    this.cams = runCameras(cameras);
-    this.chunks.clear();
-    this.accums.clear();
-    this.accumSig = null;
-    this.hasRunFlag = true;
-  }
-
-  /** Retain a streamed chunk (in parallel with the other stores, §7.2). */
-  addChunk(result: ChunkResult): void {
-    this.chunks.set(result.chunkId, result);
-    // This chunk's masks changed, so its cached contribution is void — but every
-    // other chunk's still stands, which is the whole point of the cache.
-    this.accums.delete(result.chunkId);
-  }
-
-  /** Whether any run has been retained yet. */
-  hasRun(): boolean {
-    return this.hasRunFlag;
-  }
-
-  /** Discard the retained run (§14.4). */
-  clear(): void {
-    this.chunks.clear();
-    this.accums.clear();
-    this.accumSig = null;
-    this.hasRunFlag = false;
-  }
-
-  /** The snapshotted enabled-camera ids in mask-bit order. */
-  get enabledCameraIds(): string[] {
-    return this.cams.ids;
-  }
-
-  /**
-   * Compute per-zone + union coverage, or null before any run is retained.
-   *
-   * Rescans only the chunks whose cached contribution is missing — those replaced
-   * by the last run, or all of them when the zone geometry or camera list changed.
-   */
-  compute(zones: Zone[], volumes: SamplingVolume[]): ZoneCoverage | null {
-    if (!this.hasRunFlag) return null;
-
-    const sig = zoneAccumSignature(zones, volumes, this.cams);
-    if (sig !== this.accumSig) {
-      this.accums.clear();
-      this.accumSig = sig;
-    }
-
-    const zoneVolumes = zoneVolumeMap(zones, volumes);
-    if (!zoneHasAnyVolume(zones, zoneVolumes)) return mergeZoneAccums([], this.cams, zones);
-    const enabledIds = new Set(zones.filter((z) => z.enabled).map((z) => z.id));
-
-    const parts: ChunkZoneAccums[] = [];
-    for (const [chunkId, chunk] of this.chunks) {
-      let part = this.accums.get(chunkId);
-      if (!part) {
-        part = accumulateChunkZones(chunk, this.cams, zones, zoneVolumes, enabledIds);
-        this.accums.set(chunkId, part);
-      }
-      parts.push(part);
-    }
-    return mergeZoneAccums(parts, this.cams, zones);
-  }
 }

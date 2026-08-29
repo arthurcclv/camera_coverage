@@ -39,6 +39,13 @@ byte-identical / occlusion-equivalent by `test/wasm.test.ts`:
 - **Pure TypeScript** (`tsKernels`): the default (`src/kernels.ts`, `src/svo.ts`,
   `src/occupancy.ts`, `src/geometry/*`).
 
+One asymmetry: the crate exports only the whole-workspace `compute_occupancy`,
+which §6.2 now uses solely for `solidDetection: true`. With it off — the default
+in the sample app — **both** kernel sets take the TS per-chunk voxelizer, because
+there is no per-chunk Rust export yet. The classification is identical either
+way, which is what the parity test asserts; the gap is only that the WASM path
+buys nothing there.
+
 ## Off-thread execution
 
 | Tech | Role |

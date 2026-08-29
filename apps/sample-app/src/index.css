@@ -489,6 +489,17 @@ body {
   margin-top: 8px;
 }
 
+/* Non-fatal: results are still shown, something was left out of them (§11). */
+.warning-banner {
+  background: #4a3410;
+  border: 1px solid #7a5718;
+  color: #ffb84d;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
 .tree {
   list-style: none;
   margin: 0;

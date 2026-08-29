@@ -189,6 +189,12 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
 - **Spinner** (`.spinner`): 12 px ring, blue top border, 0.7 s spin.
 - **Error banner** (`.error-banner`): dark-red surface + border, for engine
   errors.
+- **Warning banner** (`.warning-banner`): amber surface + border, same geometry
+  as the error banner. For a condition that left something *out* of an otherwise
+  valid result — a §3.3 descriptor cap dropping over-cap zones, volumes,
+  sections, or probes. The colour is the load-bearing difference: red means the
+  panel below it is empty, amber means it is populated but incomplete, so the two
+  must never be styled alike.
 
 ## Accessibility
 

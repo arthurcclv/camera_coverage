@@ -11,8 +11,9 @@ Everything is oriented around a single data flow:
 
 ```
 scene (raw buffers)
-  → preprocessing: mesh clean → occupancy + flood-fill → BVH build   (WASM or TS)
-  → sampling setup: regions ∩ free space → validity mask
+  → preprocessing: mesh clean → BVH build → triangle→chunk index    (WASM or TS)
+  → sampling setup: per chunk — voxelize occupancy → regions ∩ free space
+                    → validity mask (occupancy dropped, mask cached)
   → camera setup: quaternion → viewProj matrices (CPU)
   → per-chunk compute (one chunk resident at a time):
         Pass 1 frustum cull + compaction
@@ -37,7 +38,7 @@ whole, over all cameras, so no chunk ever mixes camera generations.
 |---|---|---|
 | Coordinate system, workspace + chunk partition | §2–3 | `src/grid.ts` |
 | Mesh cleaning (degenerate/NaN culling) | §5.1 | `src/geometry/mesh.ts` |
-| Occupancy (triangle–AABB SAT + flood-fill SOLID) | §6.2 | `src/occupancy.ts`, `src/geometry/triangle-aabb.ts` |
+| Occupancy (`OccupancySource`: per-chunk by default, dense only for the flood fill) | §6.2 | `src/occupancy.ts`, `src/geometry/triangle-aabb.ts` |
 | Sampling policy → validity mask, and its per-chunk cache | §6.3/§6.4 | `src/sampling.ts` |
 | Camera model (viewProj, 96-byte GPU struct, CAM_WORDS, pre-cull) | §7 | `src/camera.ts` |
 | Ray occlusion (Möller–Trumbore, any-hit) | §8/§10.3 | `src/kernel.ts` (CPU), `src/shaders.ts` (WGSL) |
@@ -46,6 +47,9 @@ whole, over all cameras, so no chunk ever mixes camera generations.
 | Dense result buffers | §9.1–9.3 | `src/compute/cpu.ts`, `src/results.ts` |
 | SVO merged storage + `VoxelAccessor` | §9.5 | `src/svo.ts` |
 | Incremental recompute baseline + dirty-set diff | §13.1 | `src/incremental.ts` |
+| Aggregation: descriptor, packing, CPU reduction, merge helpers | §19 | `src/aggregate.ts` |
+| Per-chunk readback budget (host heap, not `maxBufferSize`) | §11.1 | `src/compute/webgpu.ts` (`maxChunkReadbackBytes`) |
+| Aggregation passes (region / column / leaf-count reduce) | §19.3 | `src/shaders.ts` (Pass 4–6), `src/compute/webgpu.ts` |
 | Cancellation (signal check + macrotask yield) | §13.2 | `src/engine.ts`, `src/worker/*` |
 | Engine API + orchestration | §16.1 | `src/engine.ts` |
 | Web Worker host + main-thread client | §4/§16 | `src/worker/*` |
@@ -62,6 +66,13 @@ other.
 
 ### 1. Two compute backends, one algorithm
 
+- `src/aggregate.ts` (`aggregateChunkCPU`, `regionMask`) and `src/shaders.ts`
+  (Pass 4–6, `AGG_COMMON`'s `regionMask`) are a **fifth** axis of the same
+  duplication: the §19 reduction exists twice, once in JavaScript and once in
+  WGSL, and §18 6l asserts they agree bit-for-bit. The sharp edge is `regionMask`
+  — the OBB test — where a divergence produces a plausible wrong count rather
+  than a crash. Both sides read the *same* packed `Float32Array` (`packAggregate`)
+  so they at least start from identical f32 values.
 - `src/compute/cpu.ts` (TypeScript) and `src/compute/webgpu.ts` + `src/shaders.ts`
   (WGSL) implement **bit-identical** logic: same camera/BVH struct layouts, same
   Möller–Trumbore ray-triangle test, same stackless traversal.
@@ -82,12 +93,23 @@ other.
   `visibility`, and `coverage` are resident in it together, its peak is their
   **sum** — at Mode 2 / 0.1 m / 128 cameras, 160 MB against a default
   `maxBufferSize` of 128 MiB. `planStaging()` (pure, unit-tested by §18.6f) lays the
-  segments out and reports that size; `computeChunk` compares it to
-  `device.limits.maxBufferSize` and throws `SCENE_TOO_LARGE` *before* creating the
+  segments out and reports that size; `computeChunk` compares it to *both*
+  `maxChunkReadbackBytes` (§11.1's host-heap budget) and
+  `device.limits.maxBufferSize`, and throws `SCENE_TOO_LARGE` *before* creating the
   buffer, since an over-large `createBuffer` otherwise fails as an uncaptured
-  `GPUValidationError` and only surfaces as a rejected `mapAsync`. The per-chunk
-  buffers are released in a `finally`, so a rejection here — or a device loss
-  mid-chunk — leaves nothing stranded.
+  `GPUValidationError` and only surfaces as a rejected `mapAsync`. `aggregateChunk`
+  (§19.4) plans and checks the same two — it copies the accumulators out of the
+  mapped range exactly as `computeChunk` does. The per-chunk buffers are released in
+  a `finally`, so a rejection here — or a device loss mid-chunk — leaves nothing
+  stranded.
+
+  **The plan is keyed, not positional.** A segment's index is a function of which
+  *other* segments were requested — a stats-only run plans one, a Mode 2 run with
+  every §19 primitive plans eight — so `planStaging` takes `{key, bytes}` requests
+  and answers `offsetOf(key)` / `sizeOf(key)` / `has(key)`. Reading a segment back
+  by position is a bug waiting for the first descriptor that omits an earlier
+  primitive. `ChunkBufferPool` slots are a union type for the same reason: a
+  mistyped slot name would not fail, it would quietly open a second residency.
 
 ### 2. Two preprocessing implementations, one algorithm
 
@@ -144,11 +166,28 @@ proxy over `postMessage`:
 
 ## Chunking
 
-Chunk count/size derive from workspace dimensions (`src/grid.ts`), not a constant
-— default 10 m × 10 m on XZ, full workspace height, giving 100 chunks of 2 M
-voxels each. Only one chunk's GPU buffers are ever resident at a time (§9.4), a
-memory-budget constraint driven by WebGPU's default 128 MiB
-`maxStorageBufferBindingSize`.
+Chunk count/size derive from workspace dimensions (`src/grid.ts`), not a constant.
+The **10 m × 10 m** figure quoted in §3 is the default *for the default workspace*
+(100 × 20 × 100 m at 0.1 m), where it gives ~100 chunks of 2M voxels. Treat that
+as an example, not a fact about every scene — a caller that pins it gets a
+partition scaled to its own site:
+
+| Workspace | `chunkSizeXZ` | Chunks | Voxels/chunk |
+|---|---|---|---|
+| 100 × 20 × 100 m @ 0.1 m | 10 m (pinned) | 100 | 2,000,000 |
+| 440 × 201 × 1120 m @ 1.0 m | 10 m (pinned) | **4,928** | **20,100** |
+| 440 × 201 × 1120 m @ 1.0 m | 99 m (`suggestChunkSizeXZ`) | 60 | 1,970,001 |
+
+Nothing in the middle row is a per-voxel cost: it multiplies every **per-chunk
+fixed** cost — a GPU buffer set, a submission, a mapping, a result message, a
+§19.3 leaf merge — by 50. `suggestChunkSizeXZ` (`src/grid.ts`) derives the
+footprint from a 2M-voxel target instead; because chunks partition XZ only, the
+height is a fixed multiplier and `vpc = floor(sqrt(target / gridY))`. It returns
+exactly 10 m on the §3 defaults.
+
+Only one chunk's GPU buffers are ever resident at a time (§9.4), a memory-budget
+constraint driven by WebGPU's default 128 MiB `maxStorageBufferBindingSize`. That
+residency is now held by a **pool** rather than by create-and-destroy — see below.
 
 ## Retained state across calls, and what drops it
 
@@ -184,6 +223,112 @@ rather than leaving in the code:
 Both are covered by §18.6g–6i, which pair an equivalence assertion with a
 dispatch-counter assertion: equivalence alone passes if the optimization silently stops
 working, and the counter alone passes if it works but is unsound.
+
+## Occupancy is preprocessing, and it is materialized per chunk
+
+Two things about `src/occupancy.ts` are easy to get wrong from the outside, and
+both were wrong in its own header comment until measured:
+
+**It is not part of either backend.** `loadScene` calls it unconditionally,
+before `backend.setScene(...)`, and `grep occupancy src/compute/*.ts` returns
+nothing. There is no GPU occupancy path — "use the GPU backend for large
+workspaces" was never an escape hatch, and `MAX_CPU_VOXELS` is not a CPU-backend
+cap. Backends see occupancy only through the 1-bit-per-voxel validity mask
+`sampling.ts` derives from it.
+
+**It is materialized per chunk, not per workspace** (§6.2). The classification's
+only per-voxel consumer is the validity build, which compresses it 8× and caches
+*that* — so a workspace-wide array is an intermediate that would outlive its own
+output by the whole session. Two sources implement `OccupancySource`:
+
+| Source | When | Retains |
+|---|---|---|
+| `ChunkOccupancy` | the default (`solidDetection: false`) | nothing per voxel — one reused chunk scratch, plus a CSR triangle→chunk index |
+| `DenseOccupancy` | `solidDetection: true` only | the workspace grid; the flood fill is a *global* reachability question no chunk can answer |
+
+Both drive **one** voxelizer, `voxelizeWindow`, parameterized by the window it
+writes and the triangle set it tests: the dense source passes the whole grid and
+every triangle, the per-chunk source passes one chunk's extent and that chunk's
+index slice. Two copies of this arithmetic would agree only by luck, and §18 6u
+asserts they agree exactly.
+
+The trap when touching it: **voxel centers and AABB ranges must be
+computed in global index space off `worldMin`, never off the chunk origin.**
+`worldMin + (i0 + i + 0.5) * vs` is not bit-identical to
+`(worldMin + i0 * vs) + (i + 0.5) * vs`, and at 0.1 m over 100 m that drift
+reclassified ~48k of 97M voxels at chunk seams — a plausible-looking coverage
+percentage, not a crash. Only the *storage* is chunk-local. `§18 6u`'s seam test
+(unaligned origin, 0.1 m voxels, 400 chunks, walls *on* the boundaries) is what
+catches it; the small-grid parity test does not.
+
+## Reused scratch buffers, and the rule they all share
+
+Three hot paths hand out a **reused** typed array rather than a fresh one, because
+each ran once per chunk on a path that repeats over every chunk of a scene:
+
+| Scratch | Where | Handed to |
+|---|---|---|
+| Zero masks for a pre-culled chunk (§19.4) | `engine.ts`, per `compute()` | `assembleChunkResult` / `buildSvo` |
+| Dense expansion of a retained SVO chunk (§19.4) | `results.ts` (`DenseScratch`), per `aggregate()` | `ComputeBackend.aggregateChunk` |
+| Leaf-merge levels + the growing leaf list (§19.3) | `aggregate.ts`, per `mergeLeafCounts` | nothing — internal |
+| One chunk's occupancy cells (§6.2) | `occupancy.ts`, per source | `sampling.ts`'s validity build |
+| The per-chunk **GPU** buffers (§11.1) | `compute/webgpu.ts` (`ChunkBufferPool`), per backend | the compute and §19 passes |
+
+The shared rule: **a reused buffer must not escape into a returned value.** The
+consumers above satisfy it — the CPU reduction reads and reduces, the WebGPU one
+copies into a device buffer before returning, `resolveProbes` copies the words it
+needs. The one place it is *violated by design* is `buildSvo` declining to
+compress: `results.ts`'s dense fallback keeps the array it was handed, so
+`compute()` surrenders that scratch and allocates the next one.
+
+Two subtleties that a reader will otherwise rediscover the hard way:
+
+- **A reused buffer must be fully written, not sparsely written.** `denseOf` writes
+  zeros at invalid voxels instead of skipping them; skipping would inherit the
+  previous chunk's masks. `DenseScratch` zero-fills `validity` on hand-out because
+  `denseOf` only ORs bits into it.
+- **Hand out an exact `subarray`, not the whole high-water buffer**, so a
+  consumer's `length` still describes the chunk. `queue.writeBuffer` honours a
+  view's `byteOffset`/`byteLength`, so this is also what keeps GPU uploads sized
+  to the chunk.
+
+The GPU pool is the same rule one level down, and the sharpest instance of it.
+`computeChunk` used to create ~18 `GPUBuffer`s per chunk and destroy them in a
+`finally`; at the 4,928-chunk partition above that is ~88,700 create/destroy
+cycles in one run, and a driver reclaims a destroyed buffer's mappable memory
+*asynchronously* — so the loop outran reclamation and died inside the readback.
+Reuse is not an optimization here, it is what makes residency bounded.
+
+**WebGPU zero-initializes a buffer at creation, not at reuse.** Every pooled
+buffer the passes accumulate into (`candidateCount`, `stats`, `visibility`, and
+§19's `regionAccum` / `cellAccum` / `cellSeen` / `leafCounts` / `leafValid`) is
+cleared per chunk, in the same encoder so §11.1's one-submit contract holds.
+`candidates` and `candMasks` are deliberately exempt: Pass 1 writes them at
+compacted slots and Pass 2 reads only slots below `candidateCount`. If you add a
+buffer to the pool, decide which of those two it is — getting it wrong produces a
+wrong number, not a crash, which is why §18 6x compares a multi-chunk run against
+one chunk per fresh engine.
+
+Allocation bounds are acceptance criteria, not comments: §18 6s/6t and the
+allocation-tracing tests in `test/aggregate.test.ts` (they patch the global
+`Uint32Array` / `Int16Array` constructor and count), plus §18 6y over
+`gpuCounters.buffersCreated`. If you add a per-chunk allocation, expect one of
+them to fail.
+
+## Failures must name themselves across the Worker boundary
+
+`installHost`'s `replyError` maps any non-`EngineError` throw to `INVALID_STATE`.
+It now also carries the worker's `stack` and the error's `detail` (§17), and
+`WorkerClient` appends the worker frames to the client's own. Before that, an
+allocation failure anywhere in the worker reached the app as a bare
+`INVALID_STATE: Array buffer allocation failed` naming nothing — no size, no
+chunk, no frame — and diagnosing one took four rounds of measuring the wrong
+things. When you add a throw on a per-chunk path, attach what a caller could act
+on: `readbackFailure` in `compute/webgpu.ts` is the shape to copy.
+
+One thing that misled the search and is worth stating: **the worker and the main
+thread share one renderer address space.** A failed `ArrayBuffer` allocation
+reported by the worker does not prove the worker is what exhausted memory.
 
 ## WebGPU is a separate risk surface
 

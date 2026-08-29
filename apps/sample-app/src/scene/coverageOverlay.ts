@@ -11,27 +11,30 @@
  * Both modes draw with the same user-selected overlay hue (spec §9.2); mode fixes
  * *which* voxels and the intensity mapping, not the color.
  *
- * Leaves are accumulated as ChunkResults stream in and rebuilt into the renderer.
+ * Input is the run's `leafCounts` aggregation (spec §3.3, §9): **merged uniform
+ * cubes** of equal camera count, per chunk. The popcount ran on the GPU inside the
+ * chunk pipeline, the octree collapse ran in the worker, and the marked-set filter
+ * (`sampling_volumes.md` §7.3) is already applied — a filtered-out voxel simply has
+ * no leaf. Chunks are retained by `chunkId` and rebuilt through the renderer's bulk
+ * path.
+ *
+ * The merge is what keeps this affordable. A renderer's cost is per drawn instance,
+ * and on a typical room one leaf stands in for ~11 voxels; a cube per voxel instead
+ * overruns a GPU device's default 256 MiB buffer limit on a large site and loses the
+ * device outright.
  */
-import { accessor } from '@linkervision/camera-coverage-sdk';
-import type { ChunkResult } from '@linkervision/camera-coverage-sdk';
-import {
-  VoxelVolumetricRenderer,
-  DEFAULT_INTENSITY_SCALE,
-  type Voxel,
-} from './volumetric.ts';
+import type { AggregateResult, LeafCounts, Vec3 } from '@linkervision/camera-coverage-sdk';
+import { VoxelVolumetricRenderer, DEFAULT_INTENSITY_SCALE } from './volumetric.ts';
 import { RenderOrder } from './renderOrder.ts';
-import type { MarkedFilter } from './samplingVolumes.ts';
 
 export type OverlayMode = 'coverage' | 'blindspots';
 
-interface Leaf {
-  /** Voxel center, world space. */
-  cx: number;
-  cy: number;
-  cz: number;
-  size: number; // world edge length
-  camCount: number; // popcount(mask): enabled cameras that see this voxel
+/** One chunk's contribution: its merged leaves plus where the chunk sits. */
+interface ChunkLeaves {
+  origin: Vec3;
+  dims: [number, number, number];
+  voxelSize: number;
+  leaves: LeafCounts;
 }
 
 export interface OverlayOptions {
@@ -77,25 +80,6 @@ export function coverageFraction(camCount: number, involvedCameraCount: number):
   return Math.max(0, Math.min(1, camCount / denom));
 }
 
-/** Bit population count of a 32-bit mask word. Shared with `sectionHeatmap.ts` (§13.3). */
-export function popcount32(x: number): number {
-  let v = x >>> 0;
-  v = v - ((v >> 1) & 0x55555555);
-  v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
-  return (((v + (v >> 4)) & 0x0f0f0f0f) * 0x01010101) >> 24;
-}
-
-/**
- * Cameras that see a voxel: popcount across **every** `CAM_WORDS` mask word (§9).
- * Counting word 0 alone would drop cameras at index ≥ 32, so voxels seen only by
- * those cameras would read as blind (SDK spec §7.1, §9.5).
- */
-export function popcountWords(words: Uint32Array): number {
-  let n = 0;
-  for (let w = 0; w < words.length; w++) n += popcount32(words[w]);
-  return n;
-}
-
 export class CoverageOverlay {
   private readonly renderer = new VoxelVolumetricRenderer();
   readonly object = this.renderer.object;
@@ -107,16 +91,13 @@ export class CoverageOverlay {
   }
 
   /**
-   * Retained leaves **keyed by chunkId** (spec §9), not one flat list: an
-   * incremental run (§8) re-sends only a few chunks, and each must replace its
+   * Retained per-chunk counts **keyed by chunkId** (spec §9), not one flat list:
+   * an incremental run (§8) re-sends only a few chunks, and each must replace its
    * predecessor rather than pile on top of it.
    */
-  private leaves = new Map<number, Leaf[]>();
+  private chunks = new Map<number, ChunkLeaves>();
   /** Whether a run is streaming — while it is, `rebuild()` is deferred to `flush()`. */
   private streaming = false;
-  // The marked-set filter (union of enabled zones' volumes, `sampling_volumes.md`
-  // §7.3); `null` ⇒ draw every valid voxel (full-volume fallback).
-  private markedFilter: MarkedFilter | null = null;
   private opts: OverlayOptions = {
     visible: true,
     mode: 'coverage',
@@ -131,7 +112,7 @@ export class CoverageOverlay {
    * blank the rest of the overlay with no error. Call {@link beginRun} instead.
    */
   reset(): void {
-    this.leaves.clear();
+    this.chunks.clear();
     // Rebuild straight away rather than waiting for a flush: `reset()` is also
     // how a scene replace empties the overlay (spec §14.4), and that clear has
     // to be visible even when no run follows it.
@@ -140,8 +121,8 @@ export class CoverageOverlay {
   }
 
   /**
-   * Enter streaming mode: `addChunk` retains without rebuilding until
-   * {@link flush}. `rebuild()` walks every retained leaf and re-uploads the whole
+   * Enter streaming mode: `addResult` retains without rebuilding until
+   * {@link flush}. `rebuild()` walks every retained chunk and re-uploads the whole
    * renderer, so doing it per arriving chunk is quadratic in chunk count — and on
    * an incremental run it would cost a full-scene rebuild per recomputed chunk,
    * cancelling the saving that run just bought (spec §9).
@@ -157,40 +138,16 @@ export class CoverageOverlay {
   }
 
   /**
-   * Restrict which voxels are drawn to the marked set — the union of enabled
-   * zones' volumes (`sampling_volumes.md` §7.3). `null` restores full-volume
-   * drawing. A pure client-side re-filter of the retained leaves — no recompute —
-   * so enabling/disabling a zone is instant.
+   * Retain one chunk's `leafCounts`, **replacing** any previously held for that
+   * chunk so a re-sent chunk does not double up (spec §3.3, §9).
+   *
+   * The arrays are adopted, not copied: they were transferred across the Worker
+   * boundary for this purpose and nothing else holds them.
    */
-  setMarkedFilter(filter: MarkedFilter | null): void {
-    this.markedFilter = filter;
-    this.rebuild();
-  }
-
-  /**
-   * Retain a streamed ChunkResult's valid leaves, **replacing** any previously
-   * held for that chunk so a re-sent chunk does not double up. Decodes the leaf's full
-   * `maskWords` (all `CAM_WORDS` words), so it stays correct above 32 cameras;
-   * `maskWords` is accessor-owned scratch, so it is reduced to `camCount` here
-   * rather than retained (§9).
-   */
-  addChunk(result: ChunkResult): void {
-    const acc = accessor(result);
-    const [ox, oy, oz] = result.origin;
-    const vs = result.voxelSize;
-    const leaves: Leaf[] = [];
-    acc.forEachLeaf((min, size, _mask, valid, maskWords) => {
-      if (!valid) return;
-      const world = size * vs;
-      leaves.push({
-        cx: ox + min[0] * vs + world / 2,
-        cy: oy + min[1] * vs + world / 2,
-        cz: oz + min[2] * vs + world / 2,
-        size: world,
-        camCount: popcountWords(maskWords),
-      });
-    });
-    this.leaves.set(result.chunkId, leaves);
+  addResult(result: AggregateResult, origin: Vec3, dims: [number, number, number], voxelSize: number): void {
+    const leaves = result.leafCounts;
+    if (!leaves) return;
+    this.chunks.set(result.chunkId, { origin, dims, voxelSize, leaves });
     if (!this.streaming) this.rebuild();
   }
 
@@ -205,33 +162,69 @@ export class CoverageOverlay {
     this.renderer.dispose();
   }
 
-  /** Map the accumulated leaves onto renderer voxels for the active mode (spec §9.1). */
+  /**
+   * Leaves the last rebuild could not draw because the renderer's instance cap
+   * was reached (spec §9). Non-zero means the overlay on screen is incomplete,
+   * which the caller should say rather than let the user read a truncated
+   * picture as the answer.
+   */
+  droppedLeaves = 0;
+
+  /**
+   * Map the retained counts onto renderer voxels for the active mode (spec §9.1).
+   *
+   * The mode is compiled into a pair of 256-entry tables keyed by camera count
+   * rather than branched per voxel: at 0.1 m a rebuild touches millions of
+   * voxels, and both modes are a pure function of that one byte.
+   */
   private rebuild(): void {
     // Both modes share the user-selected overlay hue (spec §9.2).
     const color = hueToRgb(this.opts.overlayHue);
-    const voxels: Voxel[] = [];
-    for (const chunkLeaves of this.leaves.values())
-    for (const leaf of chunkLeaves) {
-      // Marked-set filter (§7.3): outside the enabled zones' union, the voxel
-      // reads as unmarked and the overlay draws nothing there.
-      if (this.markedFilter && !this.markedFilter(leaf.cx, leaf.cy, leaf.cz)) continue;
-      const center: [number, number, number] = [leaf.cx, leaf.cy, leaf.cz];
-      if (this.opts.mode === 'blindspots') {
-        // Only blind spots (no enabled camera sees them); fixed full intensity
-        // since their coverage fraction is 0 and would otherwise be invisible.
-        if (leaf.camCount !== 0) continue;
-        voxels.push({ center, size: leaf.size, intensity: 1, color });
-      } else {
-        // Coverage: every valid voxel, intensity == coverage fraction.
-        voxels.push({
-          center,
-          size: leaf.size,
-          intensity: coverageFraction(leaf.camCount, this.opts.involvedCameraCount),
-          color,
-        });
-      }
-    }
+    const { draw, intensity } = countTables(this.opts);
     this.renderer.reset();
-    this.renderer.addVoxels(voxels);
+    this.droppedLeaves = 0;
+    for (const c of this.chunks.values()) {
+      const { dropped } = this.renderer.addVoxelLeaves({
+        origin: c.origin,
+        dims: c.dims,
+        voxelSize: c.voxelSize,
+        index: c.leaves.index,
+        edge: c.leaves.size,
+        keys: c.leaves.count,
+        draw,
+        intensity,
+        color,
+      });
+      this.droppedLeaves += dropped;
+    }
   }
+
+  /** Leaves retained across every chunk — the overlay's instance cost (spec §9). */
+  get leafCount(): number {
+    let n = 0;
+    for (const c of this.chunks.values()) n += c.leaves.index.length;
+    return n;
+  }
+}
+
+/**
+ * The per-mode lookup tables (spec §9.1), indexed by a voxel's camera count.
+ *
+ * - `coverage` — every valid voxel, intensity = coverage fraction.
+ * - `blindspots` — only count 0, at fixed full intensity: its coverage fraction
+ *   is 0, so drawing it at that value would make it invisible.
+ */
+function countTables(opts: OverlayOptions): { draw: Uint8Array; intensity: Float32Array } {
+  const draw = new Uint8Array(256);
+  const intensity = new Float32Array(256);
+  if (opts.mode === 'blindspots') {
+    draw[0] = 1;
+    intensity[0] = 1;
+    return { draw, intensity };
+  }
+  for (let n = 0; n < 256; n++) {
+    draw[n] = 1;
+    intensity[n] = coverageFraction(n, opts.involvedCameraCount);
+  }
+  return { draw, intensity };
 }

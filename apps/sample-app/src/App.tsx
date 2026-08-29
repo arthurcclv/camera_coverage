@@ -4,7 +4,14 @@
  * CameraConfig[] / Probe[] / overlay-option state and pushes it into the scene.
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { WorkspaceGrid, type CameraConfig, type CoverageSummary, type Vec3 } from '@linkervision/camera-coverage-sdk';
+import {
+  WorkspaceGrid,
+  suggestChunkSizeXZ,
+  type AggregateResult,
+  type CameraConfig,
+  type CoverageSummary,
+  type Vec3,
+} from '@linkervision/camera-coverage-sdk';
 
 import { type RenderBackend } from './scene/viewport.ts';
 import { cameraLabel, toCameraConfig, type SceneCamera } from './cameras/camera.ts';
@@ -18,12 +25,12 @@ import {
 import { chooseHeatmapLegend } from './scene/heatmapLegend.ts';
 import { DEFAULT_OVERLAY_HUE, type OverlayOptions } from './scene/coverageOverlay.ts';
 import { CoverageRun } from './scene/coverageRun.ts';
+import { buildAggregateSpec, capWarningMessage } from './scene/aggregateSpec.ts';
 import {
   buildSceneBvh,
   DEFAULT_BOX_LEVEL,
   DEFAULT_ZONE_LEVEL,
   extractZonesAndVolumes,
-  makeMarkedFilter,
   regionsFromVolumes,
   type SamplingVolume,
   type Zone,
@@ -97,7 +104,21 @@ import { ZonePanel } from './ui/ZonePanel.tsx';
 import { SamplingVolumeControls } from './ui/SamplingVolumeControls.tsx';
 import type { Bvh } from '@linkervision/camera-coverage-sdk';
 
-const CHUNK_SIZE_XZ = 10;
+/**
+ * Chunk footprint, derived per workspace rather than pinned (SDK spec §3).
+ *
+ * A fixed 10 m describes a room. On a 440 × 201 × 1120 m site at 1.0 m voxels it
+ * gives 4,928 chunks of 20,100 voxels — 50× the chunk count, each 100× smaller —
+ * and every per-chunk fixed cost (a GPU buffer set, a submission, a mapping, an
+ * aggregate message, a leaf merge) is multiplied by 50 for no per-voxel benefit.
+ */
+function chunkSizeFor(worldMin: Vec3, worldMax: Vec3, voxelSize: number, numCameras: number): number {
+  // `numCameras` is not decoration: the SDK's second clamp is §11.1's host-heap
+  // readback budget, which is per camera *word*. A site that fits at 32 cameras
+  // does not at 96, and without the count the suggestion would hand `compute()`
+  // a chunk the backend then has to reject.
+  return suggestChunkSizeXZ(worldMin, worldMax, voxelSize, { numCameras });
+}
 const DEFAULT_VOXEL_SIZE = 0.5;
 const DEBOUNCE_MS = 250;
 const AUTO_RUN_MAX_HZ = 10;
@@ -206,15 +227,21 @@ export function App() {
   const [geometryObjects, setGeometryObjects] = useState<GeometryObject[]>(initialScene.geometry);
   const [room, setRoom] = useState<GeometryBuild>(() => buildStaticGeometrySync(initialScene.geometry));
   const engine = useEngine();
-  // The retained-chunk consumers (probe visibility, section heatmap, zone
-  // coverage) + the run-generation guard, behind one coordinator (spec §9,
-  // §12–§13, §14.4). App drives its reset/addChunk/clear and reads through it; the
-  // overlay (the fourth consumer) stays inline below since SceneView owns it.
+  // The merged store of the run's per-chunk aggregation results + the run-
+  // generation guard, behind one coordinator (spec §3.3, §12–§13, §14.4). App
+  // drives its reset/addResult/clear and reads through it; the overlay (the
+  // fourth consumer) stays inline below since SceneView owns it.
   const coverageRun = useMemo(() => new CoverageRun(), []);
 
   // --- cancellation (SDK spec §13.2): the run currently in flight, so an edit
   // that invalidates it can stop it instead of waiting it out ------------------
   const inFlightRef = useRef<{ controller: AbortController; done: Promise<unknown> } | null>(null);
+  /**
+   * Whether a re-aggregation (spec §3.3) is in flight. A run started while one is
+   * would produce accumulators under a descriptor the store is about to replace,
+   * and the two sets would be merged; auto-run's 100 ms poll retries shortly.
+   */
+  const reaggregatingRef = useRef(false);
 
   /**
    * Abort the in-flight run and wait for it to unwind. Awaiting matters: the
@@ -256,13 +283,7 @@ export function App() {
   // Zones restrict coverage only when enabled and at least one volume exists
   // (`sampling_volumes.md` §2.2); otherwise the full-volume fallback applies.
   const samplingActive = useZones && volumes.length > 0;
-  // The marked-set filter for the overlay/sections (§7.3): union of enabled
-  // zones' volumes, or null ⇒ full volume. A pure client-side re-filter —
-  // recomputed on volume/zone (enable) change without any recompute.
-  const markedFilter = useMemo(
-    () => makeMarkedFilter(samplingActive, volumes, zones),
-    [samplingActive, volumes, zones],
-  );
+
   // Enabled zone ids — for dimming volumes of disabled zones in the viewport (§5).
   const enabledZoneIds = useMemo(() => new Set(zones.filter((z) => z.enabled).map((z) => z.id)), [zones]);
   // Master show/hide-all for the section heatmap layer (viewport toolbar, spec §2.4).
@@ -275,6 +296,43 @@ export function App() {
   const [voxelSize, setVoxelSize] = useState(DEFAULT_VOXEL_SIZE);
   const debouncedVoxelSize = useDebounced(voxelSize, DEBOUNCE_MS);
   const [initializedVoxelSize, setInitializedVoxelSize] = useState<number | null>(null);
+
+  // The workspace grid a run is computed on (spec §4.2). Also what maps a
+  // chunkId back to its origin/dims when feeding the overlay, since an
+  // `AggregateResult` carries accumulators and an id, not a place.
+  const runGrid = useMemo(
+    () =>
+      new WorkspaceGrid({
+        worldMin: room.worldMin,
+        worldMax: room.worldMax,
+        voxelSize: debouncedVoxelSize,
+        chunkSizeXZ: chunkSizeFor(room.worldMin, room.worldMax, debouncedVoxelSize, cameras.length),
+      }),
+    [room, debouncedVoxelSize, cameras.length],
+  );
+
+  // Everything the UI derives from a run, as one SDK aggregation descriptor
+  // (spec §3.3) plus the index that reads its results back. Zones, volumes,
+  // sections, probes, and the marked filter all live in here — which is what
+  // keeps a zone's group index and the group its numbers are read from in step.
+  const aggregate = useMemo(
+    () => buildAggregateSpec({ grid: runGrid, zones, volumes, sections, probes, samplingActive }),
+    [runGrid, zones, volumes, sections, probes, samplingActive],
+  );
+  // `handleRun` reads the descriptor through a ref so it is not re-created on
+  // every descriptor edit — it is deliberately non-reentrant, and a new identity
+  // per edit would re-arm the auto-run effect that calls it.
+  const aggregateRef = useRef(aggregate);
+  aggregateRef.current = aggregate;
+
+  // §3.3 over-cap drops. A warning, never an error (§11): the descriptor is
+  // still valid and every other panel still reads, so the run proceeds and the
+  // status area names what was left out.
+  const capWarnings = useMemo(
+    () => aggregate.warnings.map(capWarningMessage),
+    [aggregate.warnings],
+  );
+
   const [summary, setSummary] = useState<CoverageSummary | null>(null);
   const [autoRun, setAutoRun] = useState(true);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
@@ -402,11 +460,11 @@ export function App() {
   // hierarchy badges and the stats panel stay live regardless of the per-
   // section visibility checkbox. ---------------------------------------------
   const sectionCellGrids = useMemo(
-    // The marked filter blacks out columns outside the enabled zones' union
-    // (spec §7.3); a volume/zone-enable change re-filters here, no recompute.
-    () => coverageRun.sectionCells(sections, markedFilter),
+    () => coverageRun.sectionCells(sections),
+    // `masksVersion` covers the descriptor too: a section or marked-filter edit
+    // changes the descriptor, which re-aggregates, which bumps it (spec §3.3).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sections, masksVersion, coverageRun, markedFilter],
+    [sections, masksVersion, coverageRun],
   );
 
   // --- per-zone coverage aggregation (`sampling_volumes.md` §7.2): recomputed
@@ -414,7 +472,7 @@ export function App() {
   // the retained masks. Per-zone stats are broken out for every zone; the
   // enabled-union drives the overlay/main stats (§7.3, §7.4). --------------------
   const zoneCoverage = useMemo(
-    () => coverageRun.zoneCoverage(zones, volumes),
+    () => coverageRun.zoneCoverage(zones),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [zones, volumes, masksVersion, coverageRun],
   );
@@ -565,7 +623,6 @@ export function App() {
       flaggedCameras: engine.state.flaggedCameras,
       sectionCellGrids,
       enabledZoneIds,
-      markedFilter,
       overlayOptions,
       transformMode,
       transformSpace,
@@ -581,7 +638,7 @@ export function App() {
     }),
     [
       room, cameras, probes, sections, volumes, selection, engine.state.flaggedCameras,
-      sectionCellGrids, enabledZoneIds, markedFilter, overlayOptions, transformMode,
+      sectionCellGrids, enabledZoneIds, overlayOptions, transformMode,
       transformSpace, activeView, gizmosVisible, zonesVisible, sectionsVisible, stale,
       voxelSize, clipBand, sightlines, placing,
     ],
@@ -980,6 +1037,11 @@ export function App() {
   const handleSaveAs = useCallback(() => void handleSaveScene('saveAs'), [handleSaveScene]);
 
   const handleRun = useCallback(async () => {
+    // A re-aggregation is about to replace the whole store under a new descriptor
+    // (spec §3.3). Starting a run now would stream accumulators laid out by the
+    // old one into results the adopt is about to discard — and, for an
+    // incremental run, merge two layouts. Auto-run retries within 100 ms.
+    if (reaggregatingRef.current) return;
     const needsReinit =
       initializedVoxelSize === null || initializedVoxelSize !== debouncedVoxelSize || initializedRoomRef.current !== room;
 
@@ -988,7 +1050,8 @@ export function App() {
     // instead of applying them (spec §14.4; see `coverageRun`'s guard).
     const gen = coverageRun.generation;
     if (needsReinit) {
-      const initResult = await engine.initAndLoad(room.sceneMesh, room.worldMin, room.worldMax, debouncedVoxelSize, CHUNK_SIZE_XZ);
+      const initResult = await engine.initAndLoad(room.sceneMesh, room.worldMin, room.worldMax, debouncedVoxelSize,
+        chunkSizeFor(room.worldMin, room.worldMax, debouncedVoxelSize, cameras.length));
       if (!coverageRun.isCurrent(gen)) return;
       if (!initResult) {
         setInitializedVoxelSize(null);
@@ -1019,38 +1082,41 @@ export function App() {
     const ok = engine.setCameras(runCameras.map(toCameraConfig));
     if (!ok) return;
 
-    // Retain this run's chunks + ordered camera list for probe lookup
-    // (spec §12.2), in parallel with the overlay (which SceneView owns).
-    const grid = new WorkspaceGrid({
-      worldMin: room.worldMin,
-      worldMax: room.worldMax,
-      voxelSize: debouncedVoxelSize,
-      chunkSizeXZ: CHUNK_SIZE_XZ,
-    });
+    // The descriptor this run derives everything from (spec §3.3). When results
+    // are already retained the run reuses **their** descriptor, not the newest
+    // one: an incremental run re-sends only a few chunks, and accumulators laid
+    // out by two different descriptors cannot be merged. A newer descriptor is
+    // reconciled right after, by the effect below, which re-reduces every
+    // retained chunk at once.
+    const grid = runGrid;
+    const descriptor = coverageRun.descriptor ?? aggregateRef.current;
+    const { spec } = descriptor;
     const controller = new AbortController();
     const runPromise = engine.compute({
       mode: 1,
       // Let the engine decide; it reports back through `onRunStart` (spec §8).
       incremental: true,
       signal: controller.signal,
+      aggregate: spec,
       onRunStart: ({ incremental }) => {
         if (!coverageRun.isCurrent(gen)) return;
         // A full run re-sends every chunk, so the stores start empty. An
         // incremental run re-sends only a few — clearing here would blank the
         // rest of the scene, silently (spec §8).
         if (!incremental) {
-          coverageRun.reset(grid, runCameras);
+          coverageRun.reset(grid, runCameras, descriptor);
           viewRef.current?.resetCoverage();
         } else {
           viewRef.current?.beginCoverageRun();
         }
       },
-      onChunkDone: (_chunkId, chunkResult) => {
-        // A newer scene may have replaced (and cleared) the stores mid-stream;
-        // don't let a stale chunk repopulate them (spec §14.4).
+      onAggregate: (result) => {
+        // A newer scene may have replaced (and cleared) the store mid-stream;
+        // don't let a stale chunk's accumulators repopulate it (spec §14.4).
         if (!coverageRun.isCurrent(gen)) return;
-        viewRef.current?.addCoverageChunk(chunkResult);
-        coverageRun.addChunk(chunkResult);
+        const chunk = grid.chunk(result.chunkId);
+        viewRef.current?.addCoverageCounts(result, chunk.origin, chunk.dims, grid.voxelSize);
+        coverageRun.addResult(result);
       },
     });
     inFlightRef.current = { controller, done: runPromise };
@@ -1066,7 +1132,57 @@ export function App() {
       dispatch({ type: 'runCompleted' });
       setMasksVersion((v) => v + 1);
     }
-  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, coverageRun]);
+  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, coverageRun, runGrid]);
+
+  // --- re-aggregation on a descriptor edit (spec §3.3) -----------------------
+  // Moving a zone or volume, dragging a section, toggling a zone, or moving a
+  // probe changes *what is counted*, never *what is seen* — so none of them can
+  // change a mask bit, and none of them recomputes. The worker still holds the
+  // run's masks (spec §3.1) and re-reduces them under the new descriptor.
+  //
+  // Skipped before the first run (nothing retained) and while one is in flight:
+  // that run carries the current descriptor already, and racing it would apply
+  // an older set of results on top of a newer run's.
+  useEffect(() => {
+    // Nothing retained yet, or the retained results already describe this
+    // descriptor. Identity, not deep equality: `aggregate` is a `useMemo`, so a
+    // new object *is* the signal that something it depends on changed.
+    if (!coverageRun.hasRun() || coverageRun.descriptor === aggregate) return;
+    // A run owns the store while it streams. Re-checked after every run through
+    // `masksVersion`, so a descriptor edit that lands mid-run is reconciled as
+    // soon as the run ends rather than waiting for an unrelated edit.
+    if (inFlightRef.current || reaggregatingRef.current) return;
+    const gen = coverageRun.generation;
+    let superseded = false;
+    reaggregatingRef.current = true;
+    void (async () => {
+      try {
+      // Collected, then applied in one synchronous block below. Feeding them in
+      // as they arrive would leave every panel and the overlay blank for the
+      // duration of the round trip, and blank on an aborted one.
+      const collected: AggregateResult[] = [];
+      const ok = await engine.reaggregate(aggregate.spec, (r) => collected.push(r));
+      if (superseded || !ok || !coverageRun.isCurrent(gen)) return;
+      coverageRun.adopt(aggregate, collected);
+      const view = viewRef.current;
+      if (view) {
+        view.resetCoverage();
+        for (const r of collected) {
+          const chunk = runGrid.chunk(r.chunkId);
+          view.addCoverageCounts(r, chunk.origin, chunk.dims, runGrid.voxelSize);
+        }
+        view.flushCoverage();
+      }
+      setMasksVersion((v) => v + 1);
+      } finally {
+        reaggregatingRef.current = false;
+      }
+    })();
+    return () => {
+      superseded = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aggregate, masksVersion, coverageRun, runGrid]);
 
   // --- cancel a superseded run (SDK spec §13.2). A resolution, geometry, or
   // sampling change makes whatever is computing describe a workspace the user has
@@ -1380,6 +1496,7 @@ export function App() {
           stale={stale}
           backend={engine.state.backend}
           errorMessage={engine.state.errorMessage}
+          warnings={capWarnings}
           autoRun={autoRun}
           onAutoRunChange={setAutoRun}
           onRun={handleRun}

@@ -66,9 +66,9 @@ keep scene-document transitions pure in the reducer** — impure work (geometry
 build/dispose, the `CoverageRun` coordinator, engine, BVH) stays in App around the
 dispatch. Factor pure decision logic out of React/Three so it can be unit-tested
 (see below) — this is why `viewportSelection`, `transformSpace`, `leftPanelSplit`,
-`sceneTree`, the slab/chord math, probe `locateVoxel`, the `sceneReducer`, and
+`sceneTree`, the slab/chord math, `buildAggregateSpec`, the `sceneReducer`, and
 SceneView's own `pick` / `transformReadback` are standalone pure functions. A run's
-retained-chunk stores + generation guard are a single imperative sink,
+merged aggregation results + generation guard are a single imperative sink,
 `CoverageRun` (`scene/coverageRun.ts`), that App drives and reads through.
 
 ## Testing

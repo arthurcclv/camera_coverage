@@ -56,7 +56,15 @@ test('parity: occupancy cells are bit-identical (closed box)', { skip: !availabl
   const b = wasm.computeOccupancy(grid, clean, true);
   assert.equal(b.solidCount, a.solidCount);
   assert.equal(b.mixedCount, a.mixedCount);
-  assert.deepEqual(Array.from(b.cells), Array.from(a.cells));
+  // Compared through the §6.2 interface, chunk by chunk, so this test is about
+  // the classification rather than about which source materialized it.
+  for (const chunk of grid.chunks()) {
+    assert.deepEqual(
+      Array.from(b.cellsForChunk(chunk)),
+      Array.from(a.cellsForChunk(chunk)),
+      `chunk ${chunk.chunkId}`,
+    );
+  }
 });
 
 test('parity: SVO arrays identical (CAM_WORDS=2 palette)', { skip: !available && 'no wasm' }, () => {
