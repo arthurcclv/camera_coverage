@@ -6,6 +6,212 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The optimizer scores the *counted* set, never the *sampled* one
+
+Behavior in [`../specs/aim_optimization.md`](../specs/aim_optimization.md) §2.2, §3.1.
+
+**Why.** The app has two different notions of "which voxels matter" and they are not the
+same set:
+
+- `setSampling` bounds what is **computed**, and takes the axis-aligned **AABBs** of the
+  (possibly rotated) sampling volumes — deliberately conservative
+  (`sampling_volumes.md` §7.1). Disabled zones stay in it.
+- the aggregation descriptor's `regions` + `maskRegions` say what is **counted**, exactly,
+  from the volumes' real OBBs and only the enabled zones.
+
+The first version of the capture descriptor carried neither, so it scored every *valid*
+voxel: the AABB slop outside each rotated box, plus every voxel of every disabled zone. The
+optimizer then aimed cameras at voxels no panel counts — and nothing looked wrong, because
+every number it reported was internally consistent.
+
+**Decision.** `AggregateProjection` gained a `maskRegions` filter (SDK §19.1, the same one
+`AggregateSlab` and `AggregateLeafCounts` already had), and `captureSpec` takes the marked
+filter **from `buildAggregateSpec`'s output** rather than rebuilding it — the two
+descriptors cannot then disagree about what "counted" means.
+
+**The related trap.** A capture does not call `setSampling`; it inherits the engine's
+validity mask. So a session is blocked while a sampling edit awaits a run, or the capture
+would score the previous zone set while the panels describe the new one.
+
+**Generalization worth keeping.** Any second descriptor the app grows has the same hazard.
+Sampled ≠ counted, and the counted set has exactly one owner: `aggregateSpec.ts`.
+
+---
+
+## A UI gate is derived from the thing it gates, not from a parallel count
+
+Behavior in [`../specs/aim_optimization.md`](../specs/aim_optimization.md) §6.2.
+
+**Why.** "Apply all" writes the optimize session's accepted rotations. It was disabled by
+`result.proposals.filter(p => p.moved).length === 0` — a *different* quantity that happened
+to agree most of the time. It stopped agreeing exactly when the feature worked: the greedy
+loop converges by running a round in which nothing moves, that round overwrote every
+camera's entry with its own no-move proposal, and the summary then announced that nothing
+had improved while refusing to apply rotations it was holding and drawing in the viewport.
+
+The bug was invisible in tests because a test that drives the loop to convergence and then
+asserts on `proposals` is asserting the buggy behaviour — one of ours even documented the
+overwrite in a comment without connecting it to the button.
+
+**Decision.** Two changes, and the second is the durable one:
+
+1. `optimizeAims` reports the **net** proposal per camera — original aim, final aim, gain
+   over that span — so a move survives a later quiet round.
+2. The button is gated on `optimizer.hasProposals`, i.e. `overrides.size > 0`, which *is*
+   what Apply writes. A gate derived from its own subject cannot drift from it.
+
+**Generalization.** Prefer gating a control on the state it mutates. Where that is
+impossible, the derived predicate needs a test that drives the *success* path to its end,
+not just the interesting middle.
+
+---
+
+## The optimizer maximizes one number and reports per zone
+
+Behavior in [`../specs/aim_optimization.md`](../specs/aim_optimization.md) §6.2, §6.3.
+
+**Why.** ΔΦ over the marked set is the right thing to *maximize* — it is what makes the
+greedy loop converge — and the wrong thing to *report*. A zoned site is zoned precisely
+because its parts are not interchangeable, so "Φ went up 12%" cannot answer the question
+the user actually has: did the loading bay improve, or did it pay for the corridor? §1.3's
+failure mode is real, and it is per-zone.
+
+**Decision.** Two separate surfaces. Before Apply, the proposal shows ΔΦ and per-camera
+angle deltas — all the panorama can honestly support. After Apply, the reconciling run
+produces a **measured** per-zone before/after table, both columns from real runs, with
+regressions ordered first and a warning banner when any zone lost coverage.
+
+**Rejected: predicting the per-zone after.** A panorama is one weighted angular image per
+camera with no zone decomposition and a 1.4° quantization, so a predicted per-zone delta
+would be a number the app could not stand behind. The measurement is one run away and the
+app already computes a `ZoneSummary` per zone on every run.
+
+**Also rejected: reporting absolute Φ.** It needs the popcount *distribution* per zone,
+which `RegionAccum` does not carry, and it is not comparable across scenes. Coverage rate
+and blind count are exact per zone and are what a user acts on. The `harmonic` helper that
+existed only to compute it was deleted rather than kept "for documentation" — the identity
+it encoded is now asserted on the weight table the shader actually sums.
+
+---
+
+## Aim optimization searches exhaustively, because a candidate costs microseconds
+
+Behavior in [`../specs/aim_optimization.md`](../specs/aim_optimization.md) §2, §4.3.
+
+**Why.** The request was Bayesian optimization, and it is the right tool when each
+evaluation is an expensive, serial black-box call. Reading the kernels changed the
+premise: visibility is *voxel centre in the frustum* ∧ *radial distance ≤ far* ∧
+*unoccluded ray*, and only the first depends on where the camera points. So a mount
+point's reachable set can be captured **once** as a weighted angular image, after which
+evaluating an orientation is a summation over bins.
+
+At that price a 2-D search does not need a surrogate model. A GP would mean hand-rolling
+Cholesky, hyperparameter fitting, and a periodic kernel in a repo with no linear-algebra
+dependency — to model a function whose occlusion discontinuities break its smoothness
+assumption anyway.
+
+**Decision.** Exhaustive 1° over yaw × pitch (64,440 candidates), refined at 0.25°,
+made affordable by a per-face mip pyramid that reduces a candidate to the frustum's
+boundary. Deterministic, reproducible, and unit-testable.
+
+**Consequence.** `search.ts` is the seam. If a future objective makes a candidate
+expensive again — a distance term, a joint multi-camera formulation — that is where a
+surrogate optimizer goes, and the rest of the stack does not move.
+
+---
+
+## The objective's exponent is the whole ballgame, and α = 1 was the wrong default
+
+Behavior in [`../specs/aim_optimization.md`](../specs/aim_optimization.md) §1.1.
+
+**Why.** `f(n) = 1/(n+1)^α` decides how much the optimizer still cares about a voxel
+somebody else already sees. Shipping α = 1 came from a closed form, not a measurement: it
+makes `Φ = Σ_v H(n(v))` with `H` the harmonic numbers, which is pretty.
+
+Then a user reported that "optimize all" left coverage on the table, and it did. Running
+the loop to convergence and measuring, on two scenes:
+
+| α | scene A | scene B |
+|---|---|---|
+| 1 | 93.79% | 97.34% |
+| 2 | 95.44% | 97.43% |
+| 3 | 95.62% | 97.43% |
+| 4 | 95.08% | 97.43% |
+| pure marginal | 95.22% | 97.43% |
+
+α = 1 is the only value that loses meaningfully. The same run isolated what was *not* the
+cause: 8 rounds scored identically to 3, and disabling the §4.4 gate changed nothing.
+
+**Decision.** α = 2. It is uniformly at least as good as 1 and captures nearly all of the
+gain. Sharper is not monotonically better — α = 4 gives some back, and pure marginal
+coverage is *worse* than α = 2 on scene A, because a weight that collapses to zero has no
+tiebreaker left between two orientations covering equally many blind voxels.
+
+**Free of theoretical cost.** Convergence holds for any `f` of `n` alone: with
+`G(n) = Σ_{k<n} f(k)` and `Φ = Σ_v G(n(v))`, `f(n) = G(n+1) − G(n)` and a camera's score
+is still exactly its marginal contribution to Φ. α = 1 is just the case `G = H`.
+
+**What this says about testing.** Every unit test passed the whole time. A default that
+produces a *worse layout* is invisible to anything short of running the loop and measuring
+the result, which is now `test/optimizeObjective.test.ts`. It also forced a fixed-point fix:
+`SCORE_SCALE = 4096` rounded `1/(n+1)²` to zero above n = 90, so the scale had to rise to
+16384 before the exponent could move at all.
+
+---
+
+## The coverage gate exists because Φ is not the coverage rate
+
+Behavior in [`../specs/aim_optimization.md`](../specs/aim_optimization.md) §1.2–§1.3, §4.4.
+
+**Why.** Maximizing `score_c` maximizes Φ, and Φ is non-decreasing across the whole
+procedure — that is what makes sequential-greedy re-aiming **converge** rather than cycle.
+
+It also has a failure mode worth naming: **Φ is not the coverage rate**, and they can move
+in opposite directions. A camera that uniquely covers 100 voxels can find an orientation
+worth 105 that leaves 40 more voxels blind.
+
+**Decision.** An explicit gate — a candidate must see at least as many currently-blind
+voxels as the present orientation does. The present orientation always passes, so the
+eligible set is never empty, and the gate does not break Φ's monotonicity because it only
+ever admits scores ≥ the current one.
+
+**Measured caveat.** The gate turns out to cost nothing *and* buy little: disabling it on
+the α sweep above changed the final coverage not at all. It remains as a guardrail against
+the pathological trade, not as a driver of the result.
+
+**Rejected.** A distance/pixels-per-metre term. It would better match what a CCTV
+installer wants, but the weight would become camera-dependent, Φ would stop being a
+scene potential, and convergence would go with it. Per-camera `far` is the lever instead.
+
+---
+
+## A session's capture cameras live in the engine's list and nowhere else
+
+Behavior in [`../specs/aim_optimization.md`](../specs/aim_optimization.md) §3.1.
+
+**Why.** Six cube cameras have to be real entries in `setCameras()` for Pass 2 to compute
+them, and mask bits are positional — so they occupy indices that every downstream
+popcount would otherwise count as cameras. Three consequences had to be designed around
+rather than discovered:
+
+1. **Chunk sizing.** `suggestChunkSizeXZ` takes the camera count, so appending six could
+   change `chunkSizeXZ` and trigger the whole §6 re-init pipeline for a *preview*.
+   `chunkSizeFor` therefore always adds `CAPTURE_SLOTS`, session or not.
+2. **Display numbers.** `covered`, the column extrema and `leafCounts.count` are SDK-side
+   popcounts the app cannot filter afterwards — which is what `AggregateSpec.cameras`
+   (SDK §19.1) was added for. The mask stays applied until the next **full** run, because
+   a capture overwrites the worker's retained chunks and those masks carry the slots' bits
+   until every chunk is replaced.
+3. **Incremental recompute.** The scene cameras keep their ids, order and count for the
+   whole session, so only the six slots move and every capture after the first is
+   eligible (SDK §13.1).
+
+**Decision.** The slots are session-only: never scene entities, never in the hierarchy,
+never in `scene.json`. And the scene is not written until Apply, so Cancel is exact — it
+hands the engine back the list the scene already describes rather than undoing edits.
+
+---
+
 ## Over-cap entities are dropped and warned about, never clamped and never fatal
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §3.3, §11.

@@ -31,7 +31,11 @@ type Serialized<T extends { name: string }> = Omit<T, 'name'> & { name?: string 
  * On-disk camera shape (§14.3): `name` omitted when blank, and `enabled` omitted
  * when `true` (a camera is enabled by default, so only `enabled: false` is written).
  */
-type SerializedCamera = Omit<SceneCamera, 'name' | 'enabled'> & { name?: string; enabled?: boolean };
+type SerializedCamera = Omit<SceneCamera, 'name' | 'enabled' | 'aimLocked'> & {
+  name?: string;
+  enabled?: boolean;
+  aimLocked?: boolean;
+};
 
 export interface SceneFileJSON {
   formatVersion: number;
@@ -151,6 +155,7 @@ function parseCameras(raw: unknown): SceneCamera[] | string {
     if (seenIds.has(item.id)) return `duplicate camera id "${item.id}"`;
     seenIds.add(item.id);
     if (item.enabled !== undefined && typeof item.enabled !== 'boolean') return `cameras[${i}]: enabled must be a boolean`;
+    if (item.aimLocked !== undefined && typeof item.aimLocked !== 'boolean') return `cameras[${i}]: aimLocked must be a boolean`;
     // `name` (§5.6) is optional on read; blank/missing reads as the default `Camera N`.
     // `enabled` (§5.4) is optional on read, defaulting to true when absent.
     const camera: SceneCamera = { id: item.id, name: readName(item.name), enabled: item.enabled !== false, position: item.position, rotation: item.rotation, fov: item.fov };
@@ -166,6 +171,10 @@ function parseCameras(raw: unknown): SceneCamera[] | string {
       if (!isFiniteNumber(item.far)) return `cameras[${i}]: far must be a number`;
       camera.far = item.far;
     }
+    // `aimLocked` (aim_optimization.md §9) is optional on read, absent ⇒ false,
+    // and only written when true — so it is back-compatible and needs no version
+    // bump, exactly like `enabled` and `name`.
+    if (item.aimLocked === true) camera.aimLocked = true;
     cameras.push(camera);
   }
   return cameras;
@@ -359,16 +368,22 @@ function stripBlankName<T extends { name: string }>(entity: T): Serialized<T> {
 
 /**
  * Serializes a camera (§14.3): drops a blank `name` (like other entities) and
- * additionally omits `enabled` when `true`, so an enabled camera has no `enabled`
- * key and only `enabled: false` is written.
+ * additionally omits `enabled` when `true` and `aimLocked` when falsy, so a
+ * default camera carries neither key (§14.3, `aim_optimization.md` §9).
  */
 function serializeCamera(camera: SceneCamera): SerializedCamera {
   const stripped = stripBlankName(camera);
+  const withoutLock = camera.aimLocked
+    ? stripped
+    : (() => {
+        const { aimLocked: _aimLocked, ...rest } = stripped;
+        return rest;
+      })();
   if (camera.enabled) {
-    const { enabled: _enabled, ...rest } = stripped;
+    const { enabled: _enabled, ...rest } = withoutLock;
     return rest;
   }
-  return stripped;
+  return withoutLock;
 }
 
 /** Serializes a `Scene` to the `scene.json` shape (spec §14.5) — a plain data copy. */

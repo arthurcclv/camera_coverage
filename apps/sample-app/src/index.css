@@ -920,3 +920,83 @@ button.tree-caret:focus-visible {
   background: #8bd0c0;
   border-radius: 2px;
 }
+
+/* --- Aim optimization (aim_optimization.md §5, §6) -------------------------- */
+
+/* The score heatmap: yaw × pitch at 2° per pixel, upscaled. `pixelated` keeps
+   the sample grid legible instead of smearing it into a gradient that implies a
+   resolution the panorama does not have. */
+.aim-heatmap {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 2 / 1;
+  display: block;
+  margin: 8px 0 4px;
+  border-radius: 6px;
+  border: 1px solid #2a2e36;
+  image-rendering: pixelated;
+  cursor: crosshair;
+}
+
+.aim-stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.aim-stats dt {
+  color: #7c8592;
+}
+.aim-stats dd {
+  margin: 0;
+  color: #d5dae2;
+  font-variant-numeric: tabular-nums;
+}
+
+.aim-summary {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0;
+}
+.aim-summary td {
+  padding: 3px 0;
+  color: #d5dae2;
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid #23262d;
+}
+.aim-summary td:first-child {
+  color: #9aa3b0;
+}
+.aim-summary td:last-child {
+  text-align: right;
+  color: #ffb84d;
+}
+
+/* Measured before/after per zone (aim_optimization.md §6.2). A regression is the
+   finding the user must act on, so it gets the warning amber the app already uses
+   for "populated but incomplete", and an improvement gets the success green. */
+.aim-summary.aim-compare th {
+  padding: 0 0 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #7c8592;
+  text-align: left;
+  border-bottom: 1px solid #2a2e36;
+}
+.aim-summary.aim-compare th:last-child,
+.aim-summary.aim-compare td:last-child {
+  text-align: right;
+  color: #b7bec9;
+}
+.aim-summary.aim-compare tr.union td {
+  color: #e6e8eb;
+  font-weight: 600;
+}
+.aim-summary.aim-compare .improved {
+  color: #4de08a;
+}
+.aim-summary.aim-compare .regressed {
+  color: #ffb84d;
+}

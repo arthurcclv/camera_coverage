@@ -189,6 +189,7 @@ export function aggregateTransferables(result: AggregateResult): Transferable[] 
   push(result.leafCounts?.count);
   push(result.probeMasks);
   push(result.probeHits);
+  for (const p of result.projections ?? []) push(p.bins);
   return t;
 }
 

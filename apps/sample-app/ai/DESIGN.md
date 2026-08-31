@@ -28,6 +28,12 @@ result. It is a **readable reference for SDK consumers**, not a shipping product
 - See coverage as a **color-coded volumetric voxel overlay** in two modes:
   *Coverage* (intensity = fraction of cameras that see the voxel) and *Blind
   spots* (only voxels seen by no camera).
+- **Optimize a camera's aim, or the whole scene's** — for each camera, find the
+  orientation that contributes most of what no *other* camera already contributes
+  (`specs/aim_optimization.md`). Per camera it draws a yaw × pitch **score heatmap**
+  you can hover to swing the camera live; across the scene it runs a sequential-greedy
+  pass and offers the result as a set of proposals to Apply or Discard. Nothing is
+  written to the scene until Apply.
 - **Drop probes** — points whose exact per-camera visibility is read back from the
   most recent run and drawn as green sightlines to the cameras that see them.
 - Add **sections** — axis-aligned slabs aggregated into a 2D coverage heatmap.

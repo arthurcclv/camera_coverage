@@ -21,6 +21,15 @@ export interface SceneCamera extends CameraConfig {
    * always states it. Stored on the entity so it round-trips in the scene file (§14.3).
    */
   enabled: boolean;
+  /**
+   * Excluded from the aim optimizer (`aim_optimization.md` §4.5). Absent ⇒ false.
+   *
+   * The answer to "this camera's angle is fixed by contract": the optimizer has
+   * no angular constraints of its own beyond the pitch clamp, because a camera
+   * turned at a wall already scores near zero — a lock is for the orientations
+   * that are *good* and still must not change.
+   */
+  aimLocked?: boolean;
 }
 
 /** The default `Camera N` label derived from a `cam-N` id (§5.6). */
@@ -38,10 +47,10 @@ export function cameraLabel(camera: SceneCamera): string {
   return trimmed.length > 0 ? trimmed : defaultCameraName(camera.id);
 }
 
-/** Strip the app-only `name`/`enabled`, yielding the plain SDK `CameraConfig` (spec §8). */
+/** Strip the app-only `name`/`aimLocked`, yielding the plain SDK `CameraConfig` (spec §8). */
 export function toCameraConfig(camera: SceneCamera): CameraConfig {
   // `enabled` is *kept*: since spec §5.4 the engine needs it to hold the camera's
-  // mask-bit slot open. Only the display `name` is app-only.
-  const { name: _name, ...config } = camera;
+  // mask-bit slot open. `name` and `aimLocked` are app-only.
+  const { name: _name, aimLocked: _aimLocked, ...config } = camera;
   return config;
 }

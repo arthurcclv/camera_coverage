@@ -36,6 +36,7 @@ import {
   type LeafCounts,
 } from '../src/aggregate.ts';
 import { accessor } from '../src/results.ts';
+import { prepareCamera } from '../src/camera.ts';
 import { box, camera, LOOK_NEG_Z, LOOK_POS_Z } from './helpers.ts';
 
 const IDENTITY: Quat = [0, 0, 0, 1];
@@ -962,5 +963,296 @@ test('§19.4: a retained chunk nobody covers is re-aggregated without expanding 
     assertSameLeaves(a.leafCounts!, inline.leafCounts!, `chunk ${a.chunkId}`);
   }
   assert.equal(big, 0, 'an uncovered chunk was expanded anyway');
+  r.engine.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// §19.1 camera mask, §19.3 Pass 7 projections
+// ---------------------------------------------------------------------------
+
+/** The two-camera scene of `run()`, so a mask that drops camera 1 is observable. */
+const MASK_REGION = region([3, 1.5, 3], [3, 1.5, 3], [0]);
+
+test('§19.1: `cameras` narrows every reduction to the named bits', async () => {
+  const spec = (cameras?: Uint32Array): AggregateSpec => ({
+    regions: [MASK_REGION],
+    leafCounts: { maskRegions: [] },
+    probes: [[3.15, 1.65, 5.1]],
+    cameras,
+  });
+
+  const all = await run(WS, spec());
+  const only0 = await run(WS, spec(new Uint32Array([0b01])));
+  const none = await run(WS, spec(new Uint32Array([0b00])));
+
+  const total = (rs: Run, f: (a: (typeof rs.aggregates)[number]) => number) =>
+    rs.aggregates.reduce((s, a) => s + f(a), 0);
+
+  // `valid` is a geometry count and must not move; everything mask-derived must.
+  assert.equal(total(all, (a) => a.regions![0].valid), total(only0, (a) => a.regions![0].valid));
+  assert.equal(total(only0, (a) => a.regions![0].seen[1]), 0, 'a masked-out camera was still counted');
+  assert.equal(
+    total(only0, (a) => a.regions![0].seen[0]),
+    total(all, (a) => a.regions![0].seen[0]),
+    'masking one camera changed the other one’s count',
+  );
+  assert.ok(total(all, (a) => a.regions![0].covered) > total(only0, (a) => a.regions![0].covered));
+  assert.equal(total(none, (a) => a.regions![0].covered), 0, 'an empty mask still reported coverage');
+  assert.equal(
+    total(none, (a) => a.regions![0].blind),
+    total(none, (a) => a.regions![0].valid),
+    'an empty mask must make every valid voxel blind',
+  );
+
+  // leafCounts.count is a masked popcount, so nothing may exceed the mask width.
+  for (const a of only0.aggregates) {
+    for (const c of a.leafCounts!.count) assert.ok(c <= 1, `leaf count ${c} over a 1-camera mask`);
+  }
+  // …and probe masks are masked too.
+  for (const a of none.aggregates) {
+    for (const w of a.probeMasks!) assert.equal(w, 0, 'an empty mask left probe bits set');
+  }
+
+  for (const r of [all, only0, none]) r.engine.dispose();
+});
+
+/** Column-major `viewProj * (x,y,z,1)` → bin index, written the long way round. */
+function refBin(vp: Float32Array | number[], r: number, p: Vec3): number {
+  const m = (col: number, row: number) => vp[col * 4 + row];
+  const cx = m(0, 0) * p[0] + m(1, 0) * p[1] + m(2, 0) * p[2] + m(3, 0);
+  const cy = m(0, 1) * p[0] + m(1, 1) * p[1] + m(2, 1) * p[2] + m(3, 1);
+  const cw = m(0, 3) * p[0] + m(1, 3) * p[1] + m(2, 3) * p[2] + m(3, 3);
+  if (!(cw > 0)) return -1;
+  const clamp = (v: number) => Math.min(r - 1, Math.max(0, Math.floor(v)));
+  const bx = clamp((cx / cw) * 0.5 * r + 0.5 * r);
+  const by = clamp(0.5 * r - (cy / cw) * 0.5 * r);
+  return by * r + bx;
+}
+
+const PROJ_R = 8;
+
+function projSpec(cameraIndex: number, numCameras: number, viewProj: number[]): AggregateSpec {
+  // Plane 0 sums a fixed-point 1/(n+1); plane 1 counts the voxels no *other*
+  // camera sees. Both are the caller's tables — the SDK never learns what they
+  // mean (§19.2).
+  const score = new Uint32Array(numCameras + 1);
+  const blind = new Uint32Array(numCameras + 1);
+  for (let n = 0; n <= numCameras; n++) score[n] = Math.round(4096 / (n + 1));
+  blind[0] = 1;
+  // Everything except the camera being projected: that is what makes `n` count
+  // the *other* cameras (§19.1).
+  const cameras = new Uint32Array(1);
+  for (let c = 0; c < numCameras; c++) if (c !== cameraIndex) cameras[0] |= 1 << c;
+  return {
+    projections: [
+      { camera: cameraIndex, viewProj, resolution: PROJ_R, maskRegions: [], weights: [score, blind] },
+    ],
+    cameras,
+  };
+}
+
+test('§19.3 Pass 7: a projection bins exactly the voxels its camera sees', async () => {
+  const cams = [camera('a', [3.15, 1.65, 5.4], LOOK_NEG_Z), camera('b', [3.15, 1.65, 0.6], LOOK_POS_Z)];
+  const vp = Array.from(prepareCamera(cams[0]).viewProj);
+  const r = await run(WS, projSpec(0, cams.length, vp), cams);
+
+  const merged = new Float64Array(2 * PROJ_R * PROJ_R);
+  for (const a of r.aggregates) {
+    assert.equal(a.projections!.length, 1);
+    assert.equal(a.projections![0].resolution, PROJ_R);
+    assert.equal(a.projections![0].planeCount, 2);
+    for (let b = 0; b < merged.length; b++) merged[b] += a.projections![0].bins[b];
+  }
+
+  // Independent scan: walk the retained chunks, bin every voxel camera 0 sees.
+  const ref = new Float64Array(2 * PROJ_R * PROJ_R);
+  let seenByZero = 0;
+  for (const chunk of r.chunks) {
+    const acc = accessor(chunk);
+    const [nx, ny, nz] = chunk.dims;
+    for (let k = 0; k < nz; k++) {
+      for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+          if (!acc.isValid(i, j, k)) continue;
+          if ((acc.getMask(i, j, k) & 1) === 0) continue;
+          seenByZero++;
+          const p: Vec3 = [
+            chunk.origin[0] + (i + 0.5) * chunk.voxelSize,
+            chunk.origin[1] + (j + 0.5) * chunk.voxelSize,
+            chunk.origin[2] + (k + 0.5) * chunk.voxelSize,
+          ];
+          const bin = refBin(vp, PROJ_R, p);
+          assert.ok(bin >= 0, 'a voxel the camera sees projected behind it');
+          // `n` counts the *other* cameras, so here just camera 1.
+          const n = (acc.getMask(i, j, k) >> 1) & 1;
+          ref[bin] += Math.round(4096 / (n + 1));
+          if (n === 0) ref[PROJ_R * PROJ_R + bin] += 1;
+        }
+      }
+    }
+  }
+
+  assert.ok(seenByZero > 100, `too few voxels to be a real test: ${seenByZero}`);
+  assert.deepEqual(Array.from(merged), Array.from(ref));
+  // The blind plane is a plain count, so it totals the voxels only camera 0 sees.
+  const blindTotal = ref.slice(PROJ_R * PROJ_R).reduce((s, v) => s + v, 0);
+  assert.ok(blindTotal > 0 && blindTotal <= seenByZero);
+  r.engine.dispose();
+});
+
+test('§19.3 Pass 7: projections merge across chunks by addition', async () => {
+  const cams = [camera('a', [3.15, 1.65, 5.4], LOOK_NEG_Z), camera('b', [3.15, 1.65, 0.6], LOOK_POS_Z)];
+  const vp = Array.from(prepareCamera(cams[0]).viewProj);
+  const spec = projSpec(0, cams.length, vp);
+  const one = await run(WS, spec, cams);
+  const many = await run(WS_SPLIT, spec, cams);
+  assert.ok(many.aggregates.length > one.aggregates.length, 'the split workspace did not split');
+
+  const sum = (rs: Run) => {
+    const out = new Float64Array(2 * PROJ_R * PROJ_R);
+    for (const a of rs.aggregates) for (let b = 0; b < out.length; b++) out[b] += a.projections![0].bins[b];
+    return Array.from(out);
+  };
+  assert.deepEqual(sum(many), sum(one));
+  one.engine.dispose();
+  many.engine.dispose();
+});
+
+test('§19.6: projection and camera-mask descriptors are validated', async () => {
+  const cams = [camera('a', [3.15, 1.65, 5.4], LOOK_NEG_Z), camera('b', [3.15, 1.65, 0.6], LOOK_POS_Z)];
+  const vp = Array.from(prepareCamera(cams[0]).viewProj);
+  const ok = () => projSpec(0, cams.length, vp);
+
+  const rejects = async (spec: AggregateSpec, code: EngineErrorCode, why: string) => {
+    const engine = new CoverageEngine({ onWarning: () => {} });
+    await engine.init({ ...WS, backend: 'cpu' });
+    await engine.loadScene(box([1.5, 0.6, 2.4], [3.0, 2.1, 3.3]));
+    await engine.setSampling({ regions: [{ type: 'full' }] });
+    engine.setCameras(cams);
+    await assert.rejects(
+      () => engine.compute({ mode: 1, aggregate: spec }),
+      (e: unknown) => e instanceof EngineError && e.code === code,
+      why,
+    );
+    engine.dispose();
+  };
+
+  const mutate = (f: (s: AggregateSpec) => void): AggregateSpec => {
+    const s = ok();
+    f(s);
+    return s;
+  };
+
+  await rejects(
+    mutate((s) => { s.projections = Array.from({ length: 9 }, () => s.projections![0]); }),
+    EngineErrorCode.AGGREGATE_TOO_LARGE,
+    'nine projections',
+  );
+  await rejects(
+    mutate((s) => { s.projections![0] = { ...s.projections![0], resolution: 0 }; }),
+    EngineErrorCode.INVALID_AGGREGATE,
+    'resolution 0',
+  );
+  await rejects(
+    mutate((s) => { s.projections![0] = { ...s.projections![0], resolution: 129 }; }),
+    EngineErrorCode.INVALID_AGGREGATE,
+    'resolution over the cap',
+  );
+  await rejects(
+    mutate((s) => { s.projections![0] = { ...s.projections![0], camera: 2 }; }),
+    EngineErrorCode.INVALID_AGGREGATE,
+    'a camera index past the run',
+  );
+  await rejects(
+    mutate((s) => { s.projections![0] = { ...s.projections![0], viewProj: vp.slice(0, 15) }; }),
+    EngineErrorCode.INVALID_AGGREGATE,
+    'a 15-element matrix',
+  );
+  await rejects(
+    mutate((s) => { s.projections![0] = { ...s.projections![0], weights: [] }; }),
+    EngineErrorCode.INVALID_AGGREGATE,
+    'no weight table',
+  );
+  await rejects(
+    mutate((s) => {
+      const w = s.projections![0].weights;
+      s.projections![0] = { ...s.projections![0], weights: [w[0], new Uint32Array(2)] };
+    }),
+    EngineErrorCode.INVALID_AGGREGATE,
+    'weight tables of unequal length',
+  );
+  await rejects(
+    mutate((s) => {
+      s.projections![0] = { ...s.projections![0], weights: [new Uint32Array(2), new Uint32Array(2)] };
+    }),
+    EngineErrorCode.INVALID_AGGREGATE,
+    'weight tables that are not numCameras + 1 long',
+  );
+  await rejects(
+    mutate((s) => { s.cameras = new Uint32Array(2); }),
+    EngineErrorCode.INVALID_AGGREGATE,
+    'a camera mask wider than CAM_WORDS',
+  );
+});
+
+test('§19.1: a projection honours its `maskRegions` filter', async () => {
+  // The bug this guards: a caller whose *sampled* set is a conservative AABB
+  // (§6.3) and whose *counted* set is an exact OBB got the sampled one, so the
+  // projection answered a question about voxels the caller does not count.
+  const cams = [camera('a', [3.17, 1.63, 5.41], LOOK_NEG_Z), camera('b', [3.15, 1.65, 0.6], LOOK_POS_Z)];
+  const vp = Array.from(prepareCamera(cams[0]).viewProj);
+  const half: Vec3 = [3, 1.5, 1.5];
+  const spec = (maskRegions: number[]): AggregateSpec => {
+    const base = projSpec(0, cams.length, vp);
+    return {
+      ...base,
+      // A slab across the half of the workspace nearer the camera.
+      regions: [region([3, 1.5, 4.5], half, [])],
+      projections: [{ ...base.projections![0], maskRegions }],
+    };
+  };
+
+  const total = async (maskRegions: number[]) => {
+    const r = await run(WS, spec(maskRegions), cams);
+    let sum = 0;
+    for (const a of r.aggregates) {
+      for (let b = 0; b < PROJ_R * PROJ_R; b++) sum += a.projections![0].bins[b];
+    }
+    r.engine.dispose();
+    return sum;
+  };
+
+  const unfiltered = await total([]);
+  const filtered = await total([0]);
+  assert.ok(unfiltered > 0, 'the unfiltered projection binned nothing');
+  assert.ok(filtered > 0, 'the filter removed everything — the fixture proves nothing');
+  assert.ok(filtered < unfiltered, `the filter changed nothing: ${filtered} === ${unfiltered}`);
+
+  // And it is exactly the in-region subset, not merely smaller: the reference
+  // walks the retained masks and applies the OBB test itself.
+  const r = await run(WS, spec([0]), cams);
+  let ref = 0;
+  for (const chunk of r.chunks) {
+    const acc = accessor(chunk);
+    const [nx, ny, nz] = chunk.dims;
+    for (let k = 0; k < nz; k++) {
+      for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+          if (!acc.isValid(i, j, k)) continue;
+          const mask = acc.getMask(i, j, k);
+          if ((mask & 1) === 0) continue;
+          const p: Vec3 = [
+            chunk.origin[0] + (i + 0.5) * chunk.voxelSize,
+            chunk.origin[1] + (j + 0.5) * chunk.voxelSize,
+            chunk.origin[2] + (k + 0.5) * chunk.voxelSize,
+          ];
+          if (!inBox(p, region([3, 1.5, 4.5], half, []))) continue;
+          const n = (mask >> 1) & 1;
+          ref += Math.round(4096 / (n + 1));
+        }
+      }
+    }
+  }
+  assert.equal(filtered, ref);
   r.engine.dispose();
 });

@@ -23,7 +23,7 @@ unblocked.
 
 ```bash
 npm install
-npm test          # 31 tests: unit, acceptance §18, WASM parity, worker E2E
+npm test          # unit, acceptance §18, WASM parity, WebGPU parity, worker E2E
 npm run typecheck
 npm run build:wasm # compile the Rust kernels → src/wasm/*.wasm (needs rustup + wasm32 target)
 ```
@@ -98,8 +98,8 @@ engine.dispose();
 | §4/§6.2/§9.5/§10 Rust WASM kernels | `crates/camera_coverage_wasm/` + `src/wasm/loader.ts` |
 | §17 error handling | `src/types.ts` (`EngineError` / `EngineErrorCode`) |
 | §18 acceptance tests | `test/acceptance.test.ts`, `test/aggregate.test.ts` |
-| §19 aggregation (descriptor, packing, CPU reduction, merge) | `src/aggregate.ts` |
-| §19.3 aggregation passes (region / column / leaf-count reduce) | `src/shaders.ts`, `src/compute/webgpu.ts` |
+| §19 aggregation (descriptor, camera mask, packing, CPU reduction, merge) | `src/aggregate.ts` |
+| §19.3 aggregation passes (region / column / leaf-count / projection reduce) | `src/shaders.ts`, `src/compute/webgpu.ts` |
 
 ### Rust WASM kernels
 

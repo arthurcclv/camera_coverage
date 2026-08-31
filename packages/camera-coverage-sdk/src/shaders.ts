@@ -260,7 +260,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  * quaternion, same operand order, same `<=`. A divergence here would surface as
  * a plausible wrong count, never as a crash (§19.5).
  */
-const AGG_COMMON = /* wgsl */ `
+/**
+ * The half of §19's shared declarations that touches only `agg` and
+ * `visibility`. Split out from the region half because a pipeline built with
+ * `layout: 'auto'` prunes bindings its entry point never reaches: Pass 7 reads
+ * no region, so including `regionMask` there would leave binding 3 declared in
+ * WGSL, absent from the generated layout, and the bind group rejected at
+ * submit. Every pass therefore includes exactly the declarations it uses.
+ */
+const AGG_INFO = /* wgsl */ `
 struct AggInfo {
   regionCount : u32,
   groupCount  : u32,
@@ -271,8 +279,32 @@ struct AggInfo {
   baseI       : u32,
   baseJ       : u32,
   baseK       : u32,
+  projCount   : u32,
+  // Whether any projection declared a maskRegions (§19.1). Gates Pass 7's
+  // per-voxel region test, which is otherwise pure cost.
+  projFilter  : u32,
+  pad1        : u32,
+  // §19.1's camera filter, padded to four words and defaulted to all-ones by
+  // packAggregate, so every read below applies it with no branch.
+  camMask     : vec4<u32>,
 };
 
+// This voxel's mask word w, with the descriptor's camera filter applied (§19.1).
+fn seenWord(li: u32, w: u32) -> u32 {
+  return visibility[li * CAM_WORDS + w] & agg.camMask[w];
+}
+
+fn popcountVoxel(li: u32) -> u32 {
+  var n = 0u;
+  for (var w = 0u; w < CAM_WORDS; w = w + 1u) {
+    n = n + countOneBits(seenWord(li, w));
+  }
+  return n;
+}
+`;
+
+/** The region half: everything that reads the `regions` binding (§19.3). */
+const AGG_REGIONS = /* wgsl */ `
 // 3 × vec4<f32> per region: [center.xyz, unionFlag], [half.xyz, _], [conj rotation]
 fn regionMask(p: vec3<f32>, count: u32) -> vec2<u32> {
   var lo = 0u;
@@ -301,15 +333,10 @@ fn maskAllows(fLo: u32, fHi: u32, m: vec2<u32>) -> bool {
   if (fLo == 0u && fHi == 0u) { return true; }
   return ((fLo & m.x) | (fHi & m.y)) != 0u;
 }
-
-fn popcountVoxel(li: u32) -> u32 {
-  var n = 0u;
-  for (var w = 0u; w < CAM_WORDS; w = w + 1u) {
-    n = n + countOneBits(visibility[li * CAM_WORDS + w]);
-  }
-  return n;
-}
 `;
+
+/** Passes 4–6 read regions; Pass 7 includes {@link AGG_INFO} alone. */
+const AGG_COMMON = AGG_INFO + AGG_REGIONS;
 
 /** §19.3 Pass 4: per-region reduce. One thread per voxel; atomics into a tiny buffer. */
 export const PASS4_REGIONS = /* wgsl */ `${COMMON}
@@ -328,7 +355,7 @@ fn addRegion(entry: u32, li: u32, camCount: u32) {
   atomicAdd(&accum[o], 1u);
   if (camCount > 0u) { atomicAdd(&accum[o + 1u], 1u); } else { atomicAdd(&accum[o + 2u], 1u); }
   for (var w = 0u; w < CAM_WORDS; w = w + 1u) {
-    var word = visibility[li * CAM_WORDS + w];
+    var word = seenWord(li, w);
     while (word != 0u) {
       let bit = firstTrailingBit(word);
       word = word & (word - 1u);
@@ -448,7 +475,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicMax(&cells[co + F_MININV], MIN_EMPTY - capped);
     atomicMax(&cells[co + F_MAX], capped);
     for (var w = 0u; w < CAM_WORDS; w = w + 1u) {
-      atomicOr(&cellSeen[ci * CAM_WORDS + w], visibility[li * CAM_WORDS + w]);
+      atomicOr(&cellSeen[ci * CAM_WORDS + w], seenWord(li, w));
     }
   }
 }
@@ -460,6 +487,76 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  * visibility buffer's 4 × CAM_WORDS. Lanes within a word are disjoint, so the
  * `atomicOr` is a write, not contention.
  */
+/**
+ * §19.3 Pass 7 — project each voxel a named camera sees into that camera's own
+ * image plane, adding a caller-supplied weight indexed by the masked popcount.
+ *
+ * The camera's mask bit is the whole membership test: Pass 2 wrote it under §8's
+ * exact rule (frustum, radial range, occlusion), so this pass cannot disagree
+ * with the engine's own visibility — and a set bit guarantees `c.w > 0`, which
+ * is what makes the perspective divide here unconditional.
+ *
+ * Must agree with `projectionBin` in `aggregate.ts`: same column-major multiply,
+ * same `floor`, same clamp, same top-down `y`.
+ */
+export const PASS7_PROJECTIONS = /* wgsl */ `${COMMON}
+@group(0) @binding(0) var<uniform> chunk : ChunkInfo;
+@group(0) @binding(1) var<storage, read> validity : array<u32>;
+@group(0) @binding(2) var<storage, read> visibility : array<u32>;
+@group(0) @binding(3) var<storage, read> regions : array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> projections : array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> projWeights : array<u32>;
+@group(0) @binding(6) var<storage, read_write> projBins : array<atomic<u32>>;
+@group(0) @binding(7) var<uniform> agg : AggInfo;
+${AGG_INFO}${AGG_REGIONS}
+
+/** vec4 slots per packed projection: 4 for the matrix, 1 for the integer meta, 1 pad. */
+const PROJ_VEC4 : u32 = 6u;
+
+@compute @workgroup_size(WG_SIZE)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let li = gid.x;
+  if (li >= chunk.dims.w) { return; }
+  if (((validity[li >> 5u] >> (li & 31u)) & 1u) == 0u) { return; }
+
+  let n = popcountVoxel(li);
+  let p = voxelCenter(chunk, li);
+
+  // Computed once per voxel and only when some projection filters (§19.3).
+  var m = vec2<u32>(0u, 0u);
+  if (agg.projFilter != 0u) { m = regionMask(p, agg.regionCount); }
+
+  for (var q = 0u; q < agg.projCount; q = q + 1u) {
+    let o = q * PROJ_VEC4;
+    let info = bitcast<vec4<u32>>(projections[o + 4u]);
+    let info2 = bitcast<vec4<u32>>(projections[o + 5u]);
+    if (!maskAllows(info2.z, info2.w, m)) { continue; }
+    let cam = info.x;
+    let w = cam >> 5u;
+    if (w >= CAM_WORDS) { continue; }
+    if (((visibility[li * CAM_WORDS + w] >> (cam & 31u)) & 1u) == 0u) { continue; }
+
+    let vp = mat4x4<f32>(projections[o + 0u], projections[o + 1u], projections[o + 2u], projections[o + 3u]);
+    let c = vp * vec4<f32>(p, 1.0);
+    if (!(c.w > 0.0)) { continue; }
+    let res = info.y;
+    let rf = f32(res);
+    let bx = u32(clamp(floor((c.x / c.w) * 0.5 * rf + 0.5 * rf), 0.0, rf - 1.0));
+    let by = u32(clamp(floor(0.5 * rf - (c.y / c.w) * 0.5 * rf), 0.0, rf - 1.0));
+    let bin = by * res + bx;
+
+    let planes = info.z;
+    let binOffset = info.w;
+    let weightOffset = info2.x;
+    let stride = info2.y;
+    let idx = min(n, stride - 1u);
+    for (var pl = 0u; pl < planes; pl = pl + 1u) {
+      atomicAdd(&projBins[binOffset + pl * res * res + bin], projWeights[weightOffset + pl * stride + idx]);
+    }
+  }
+}
+`;
+
 export const PASS6_LEAFCOUNTS = /* wgsl */ `${COMMON}
 @group(0) @binding(0) var<uniform> chunk : ChunkInfo;
 @group(0) @binding(1) var<storage, read> validity : array<u32>;

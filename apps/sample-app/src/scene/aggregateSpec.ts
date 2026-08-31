@@ -84,6 +84,26 @@ export interface AggregateIndex {
   probeIndex: Map<string, number>;
   /** Whether any zone declared the marked group — i.e. the filter is live. */
   marked: boolean;
+  /**
+   * The region indices the marked filter names, and the regions they index into
+   * (`aim_optimization.md` §2.2).
+   *
+   * Exposed because a **second** descriptor needs the same filter: the aim
+   * optimizer's capture must score over the counted set, not the sampled one.
+   * `setSampling` bounds what is *computed* with conservative AABBs
+   * (`sampling_volumes.md` §7.1); only these exact OBBs say what is *counted*, so
+   * a capture that omitted them would optimize over the AABB slop and over
+   * disabled zones. Handed out rather than rebuilt so the two descriptors cannot
+   * disagree.
+   */
+  markedFilter: MarkedFilter;
+}
+
+/** The exact counted set, reusable by any descriptor (`aim_optimization.md` §2.2). */
+export interface MarkedFilter {
+  regions: AggregateRegion[];
+  /** Indices into `regions`; empty ⇒ no filter, which the SDK reads as "all". */
+  maskRegions: number[];
 }
 
 /** A descriptor and the index that reads its results back — never separated. */
@@ -191,6 +211,7 @@ export function buildAggregateSpec(input: AggregateInputs): AggregateDescriptor 
       sectionSlab,
       probeIndex,
       marked: maskRegions.length > 0,
+      markedFilter: { regions, maskRegions },
     },
     warnings,
   };

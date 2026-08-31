@@ -102,7 +102,18 @@ import { SceneFileControls } from './ui/SceneFileControls.tsx';
 import { VolumePanel } from './ui/VolumePanel.tsx';
 import { ZonePanel } from './ui/ZonePanel.tsx';
 import { SamplingVolumeControls } from './ui/SamplingVolumeControls.tsx';
-import type { Bvh } from '@linkervision/camera-coverage-sdk';
+import type { Bvh, Quat } from '@linkervision/camera-coverage-sdk';
+import { CAPTURE_SLOTS } from './optimize/cubeRig.ts';
+import { displayCameraMask } from './optimize/session.ts';
+import type { MarkedFilter } from './scene/aggregateSpec.ts';
+import {
+  compareCoverage,
+  snapshotCoverage,
+  type CoverageSnapshot,
+  type OptimizeComparison,
+} from './optimize/comparison.ts';
+import { useAimOptimizer } from './optimize/useAimOptimizer.ts';
+import { OptimizePanel } from './ui/OptimizePanel.tsx';
 
 /**
  * Chunk footprint, derived per workspace rather than pinned (SDK spec §3).
@@ -117,13 +128,28 @@ function chunkSizeFor(worldMin: Vec3, worldMax: Vec3, voxelSize: number, numCame
   // readback budget, which is per camera *word*. A site that fits at 32 cameras
   // does not at 96, and without the count the suggestion would hand `compute()`
   // a chunk the backend then has to reject.
-  return suggestChunkSizeXZ(worldMin, worldMax, voxelSize, { numCameras });
+  //
+  // The six aim-optimizer capture slots are always counted, open session or not
+  // (`aim_optimization.md` §3.1). Sizing chunks for the wider list unconditionally
+  // is what keeps opening a session from changing `chunkSizeXZ` — which would
+  // trigger the whole §6 re-init pipeline for a preview.
+  return suggestChunkSizeXZ(worldMin, worldMax, voxelSize, { numCameras: numCameras + CAPTURE_SLOTS });
 }
 const DEFAULT_VOXEL_SIZE = 0.5;
 const DEBOUNCE_MS = 250;
 const AUTO_RUN_MAX_HZ = 10;
 
 /** Human-readable message for a scene-file import/export failure (spec §14.8). */
+/**
+ * What the union row of a §6.3 comparison is called.
+ *
+ * With zones off there is no union — the counted set is the whole valid volume,
+ * and calling it "All enabled zones" would name something the user did not create.
+ */
+function unionLabel(state: { useZones: boolean; volumes: unknown[] }): string {
+  return state.useZones && state.volumes.length > 0 ? 'All enabled zones' : 'Whole workspace';
+}
+
 function describeSceneError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
@@ -311,6 +337,51 @@ export function App() {
     [room, debouncedVoxelSize, cameras.length],
   );
 
+  /** §10: an optimizer failure reads as a status-area message, never a crash. */
+  const [optimizeError, setOptimizeError] = useState<string | null>(null);
+
+  // --- aim optimization (`aim_optimization.md` §3.1, §5, §6) ------------------
+  // The optimizer drives its own `compute()` calls against a camera list that
+  // carries six extra capture slots, so it and the display run must never be in
+  // flight together: `optimizer.busy` gates auto-run and the Run button, and the
+  // session's own close marks the result stale so the next run reconciles it.
+  const camerasRef = useRef(cameras);
+  camerasRef.current = cameras;
+  // Assigned below, once `aggregate` exists — the hook only ever reads it inside
+  // a capture, long after the first render.
+  const markedFilterRef = useRef<MarkedFilter>({ regions: [], maskRegions: [] });
+  const samplingPendingRef = useRef(false);
+  samplingPendingRef.current = sceneState.samplingDirty;
+  /** The measured figures an apply is about to change (§6.3). */
+  const pendingBeforeRef = useRef<CoverageSnapshot | null>(null);
+  const [comparison, setComparison] = useState<OptimizeComparison | null>(null);
+  const optimizer = useAimOptimizer({
+    engine,
+    cameras: useCallback(() => camerasRef.current, []),
+    // The counted set, read live: a capture must score over the same exact OBBs
+    // the panels count, not the conservative AABBs `setSampling` computes over
+    // (`aim_optimization.md` §2.2).
+    marked: useCallback(() => markedFilterRef.current, []),
+    samplingPending: useCallback(() => samplingPendingRef.current, []),
+    onApply: useCallback((rotations: Map<string, Quat>) => {
+      // Freeze the *measured* per-zone figures before the write, so the run this
+      // dispatch triggers can be diffed against them (`aim_optimization.md` §6.3).
+      // Taken here rather than at session open because a capture never feeds
+      // `coverageRun` — its results carry the capture descriptor, not the display
+      // one — so the store still holds the pre-session numbers either way, and
+      // apply time is the moment that cannot be reached without an apply.
+      pendingBeforeRef.current = snapshotCoverage(coverageRun.zoneCoverage(stateRef.current.zones));
+      dispatch({ type: 'applyAims', rotations });
+    }, [coverageRun]),
+    onError: useCallback((message: string) => setOptimizeError(message), []),
+    onNeedsRecompute: useCallback(() => dispatch({ type: 'markStale' }), []),
+  });
+  const optimizerBusyRef = useRef(optimizer.busy);
+  optimizerBusyRef.current = optimizer.busy;
+  const noteFullRunRef = useRef(optimizer.noteFullRun);
+  noteFullRunRef.current = optimizer.noteFullRun;
+  const [hoveredAim, setHoveredAim] = useState<Quat | null>(null);
+
   // Everything the UI derives from a run, as one SDK aggregation descriptor
   // (spec §3.3) plus the index that reads its results back. Zones, volumes,
   // sections, probes, and the marked filter all live in here — which is what
@@ -319,11 +390,22 @@ export function App() {
     () => buildAggregateSpec({ grid: runGrid, zones, volumes, sections, probes, samplingActive }),
     [runGrid, zones, volumes, sections, probes, samplingActive],
   );
+  // Session-only capture slots hold real mask bits, and `covered`, the column
+  // extrema and `leafCounts.count` are SDK-side popcounts the app cannot filter
+  // afterwards. So the descriptor names which bits count (`aim_optimization.md`
+  // §3.1). Applied to a *copy*: `aggregate` is memoized on the scene, and the
+  // mask changes with the session, not with the scene.
+  const maskedAggregate = useMemo(() => {
+    const cameraMask = displayCameraMask(cameras, optimizer.maskSlots);
+    if (!cameraMask) return aggregate;
+    return { ...aggregate, spec: { ...aggregate.spec, cameras: cameraMask } };
+  }, [aggregate, cameras, optimizer.maskSlots]);
   // `handleRun` reads the descriptor through a ref so it is not re-created on
   // every descriptor edit — it is deliberately non-reentrant, and a new identity
   // per edit would re-arm the auto-run effect that calls it.
-  const aggregateRef = useRef(aggregate);
-  aggregateRef.current = aggregate;
+  const aggregateRef = useRef(maskedAggregate);
+  aggregateRef.current = maskedAggregate;
+  markedFilterRef.current = aggregate.index.markedFilter;
 
   // §3.3 over-cap drops. A warning, never an error (§11): the descriptor is
   // still valid and every other panel still reads, so the run proceeds and the
@@ -612,10 +694,29 @@ export function App() {
   // bundle of everything the scene reflects. Every field is stable React state or
   // useMemo output, so SceneView's per-field diff runs each imperative op on
   // exactly the input it used to key its own effect on. -----------------------
+  /**
+   * The cameras the viewport draws: the scene's, with the optimizer's proposals
+   * and any hovered orientation layered over them (`aim_optimization.md` §5,
+   * §6.1).
+   *
+   * Preview is *this*, rather than a second set of ghost gizmos: a camera drawn
+   * at its proposed aim is the thing being decided, and drawing both frusta at
+   * one position reads as two cameras. The scene state stays untouched either
+   * way, which is what makes Discard exact.
+   */
+  const previewCameras = useMemo(() => {
+    if (optimizer.overrides.size === 0 && !hoveredAim) return cameras;
+    return cameras.map((c) => {
+      if (hoveredAim && c.id === optimizer.mountId) return { ...c, rotation: hoveredAim };
+      const rotation = optimizer.overrides.get(c.id);
+      return rotation ? { ...c, rotation } : c;
+    });
+  }, [cameras, optimizer.overrides, optimizer.mountId, hoveredAim]);
+
   const sceneViewState = useMemo<SceneViewState>(
     () => ({
       room,
-      cameras,
+      cameras: previewCameras,
       probes,
       sections,
       volumes,
@@ -637,7 +738,7 @@ export function App() {
       placing,
     }),
     [
-      room, cameras, probes, sections, volumes, selection, engine.state.flaggedCameras,
+      room, previewCameras, probes, sections, volumes, selection, engine.state.flaggedCameras,
       sectionCellGrids, enabledZoneIds, overlayOptions, transformMode,
       transformSpace, activeView, gizmosVisible, zonesVisible, sectionsVisible, stale,
       voxelSize, clipBand, sightlines, placing,
@@ -686,6 +787,12 @@ export function App() {
 
   const handleCameraChange = useCallback((id: string, patch: Partial<CameraConfig>) => {
     dispatch({ type: 'changeCamera', id, patch });
+  }, []);
+
+  // The aim lock changes nothing the engine computes, so it never marks the
+  // result stale (`aim_optimization.md` §4.5).
+  const handleToggleAimLock = useCallback((id: string) => {
+    dispatch({ type: 'toggleAimLock', id });
   }, []);
 
   const handleProbeChange = useCallback((id: string, position: Vec3) => {
@@ -1103,7 +1210,13 @@ export function App() {
         // A full run re-sends every chunk, so the stores start empty. An
         // incremental run re-sends only a few — clearing here would blank the
         // rest of the scene, silently (spec §8).
-        if (!incremental) coverageRun.reset(grid, runCameras, descriptor);
+        // A full run replaces every retained chunk, so the capture slots' bits
+        // are gone from the masks and the display filter can be dropped
+        // (`aim_optimization.md` §3.1).
+        if (!incremental) {
+          coverageRun.reset(grid, runCameras, descriptor);
+          noteFullRunRef.current();
+        }
         viewRef.current?.beginCoverageRun(grid.voxelSize, { incremental });
       },
       onAggregate: (result) => {
@@ -1127,6 +1240,16 @@ export function App() {
       setSummary(result);
       dispatch({ type: 'runCompleted' });
       setMasksVersion((v) => v + 1);
+      // The run that reconciles an apply is the "after" column (§6.3). Read from
+      // the store directly: the `zoneCoverage` memo has not re-derived yet, and
+      // the store was filled by this run's own `onAggregate` above.
+      const before = pendingBeforeRef.current;
+      if (before) {
+        pendingBeforeRef.current = null;
+        const zones = stateRef.current.zones;
+        const after = snapshotCoverage(coverageRun.zoneCoverage(zones));
+        setComparison(compareCoverage(before, after, zones, unionLabel(stateRef.current)));
+      }
     }
   }, [engine, room, initializedVoxelSize, debouncedVoxelSize, coverageRun, runGrid]);
 
@@ -1216,7 +1339,15 @@ export function App() {
   useEffect(() => {
     if (!autoRun) return;
     const id = setInterval(() => {
-      if (staleRef.current && !busyRef.current && engineStatusRef.current !== 'error') {
+      // Auto-run is suspended while a session is open (spec §8.1): the optimizer
+      // owns the engine's camera list for the duration, and interleaving would
+      // run two computes over two different lists.
+      if (
+        staleRef.current &&
+        !busyRef.current &&
+        !optimizerBusyRef.current &&
+        engineStatusRef.current !== 'error'
+      ) {
         handleRunRef.current();
       }
     }, 1000 / AUTO_RUN_MAX_HZ);
@@ -1371,6 +1502,7 @@ export function App() {
               flagged={selectedCameraId ? engine.state.flaggedCameras.has(selectedCameraId) : false}
               onChange={handleCameraChange}
               onRename={handleRenameCamera}
+              onToggleAimLock={handleToggleAimLock}
             />
           )}
         </div>
@@ -1494,7 +1626,10 @@ export function App() {
           stale={stale}
           backend={engine.state.backend}
           errorMessage={engine.state.errorMessage}
-          warnings={capWarnings}
+          warnings={optimizeError ? [...capWarnings, optimizeError] : capWarnings}
+          // An open session owns the engine's camera list, so a display run
+          // started here would fight it (`aim_optimization.md` §3.1).
+          runDisabled={optimizer.busy}
           autoRun={autoRun}
           onAutoRunChange={setAutoRun}
           onRun={handleRun}
@@ -1515,6 +1650,13 @@ export function App() {
           onBoxLevelChange={handleBoxLevelChange}
           onGenerate={handleGenerate}
           marked={markedReadout}
+        />
+        <OptimizePanel
+          optimizer={optimizer}
+          camera={selectedCamera}
+          cameras={cameras}
+          onHover={setHoveredAim}
+          comparison={comparison}
         />
         <StatsPanel
           summary={displaySummary}

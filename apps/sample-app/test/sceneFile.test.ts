@@ -392,3 +392,36 @@ test('isSafeAssetPath rejects absolute paths, URLs, and traversal', () => {
   assert.equal(isSafeAssetPath('C:\\shelf.glb'), false);
   assert.equal(isSafeAssetPath(''), false);
 });
+
+test('camera.aimLocked is absent-means-false, round-trips, and is omitted when false (aim_optimization.md §9)', () => {
+  const doc = validDoc();
+  doc.cameras = [
+    { id: 'cam-1', position: [0, 1, 0], rotation: [0, 0, 0, 1], fov: 60 }, // no aimLocked key
+    { id: 'cam-2', position: [1, 1, 0], rotation: [0, 0, 0, 1], fov: 60, aimLocked: true } as never,
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(parsed.scene.cameras[0].aimLocked, undefined);
+  assert.equal(parsed.scene.cameras[1].aimLocked, true);
+
+  // Only the locked one carries the key on write, so a default scene file is
+  // unchanged by the feature existing — which is why §9 needs no version bump.
+  const out = serializeScene(parsed.scene);
+  assert.equal('aimLocked' in out.cameras[0], false);
+  assert.equal(out.cameras[1].aimLocked, true);
+
+  const reread = parseSceneFile(out);
+  assert.equal(reread.ok, true);
+  if (!reread.ok) return;
+  assert.equal(reread.scene.cameras[1].aimLocked, true);
+});
+
+test('camera.aimLocked must be a boolean (aim_optimization.md §9)', () => {
+  const doc = validDoc();
+  doc.cameras = [
+    { id: 'cam-1', position: [0, 1, 0], rotation: [0, 0, 0, 1], fov: 60, aimLocked: 'yes' } as never,
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, false);
+});

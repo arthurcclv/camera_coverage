@@ -6,6 +6,72 @@ decisions at the top when you add to this file.
 
 ---
 
+## A projection reuses the camera's own mask bit rather than re-testing the frustum
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19.1, §19.3 (Pass 7).
+
+**Why.** §19's fifth primitive bins the voxels a named camera sees into that camera's
+image plane, weighted by a caller-supplied table. The obvious implementation tests the
+frustum in the pass — and would then be a *second* implementation of §8's visibility
+rule, free to drift from Pass 2's over any future change to `near`, `far`, or the
+radial cut.
+
+**Decision.** Membership is `visibility[li] & (1 << camera)` and nothing else. Three
+things fall out: the pass agrees with the engine by construction; a set bit guarantees
+`0 ≤ z_clip ≤ w_clip` and therefore `w_clip > 0`, so the perspective divide is
+unconditional; and the primitive stays domain-free — it never learns what a caller
+means by the popcount it indexes the weight table with.
+
+**Consequence.** A caller wanting the *reachable set* of a mount point (every direction,
+not one frustum) supplies six 90° cameras of its own. That is the sample app's aim
+optimizer (`apps/sample-app/specs/aim_optimization.md` §2), and it is exactly the kind
+of domain knowledge §19 keeps out of the SDK.
+
+**A projection also carries `maskRegions`**, added after the sample app shipped without it
+and scored over the wrong voxel set. The general shape of that bug: a caller's *sampled*
+set (§6.3) bounds what is **computed** and is allowed to be conservative, while an
+aggregation's set must be **exact** — so every primitive that counts voxels needs the
+filter, and a new one that omits it is answering a question about voxels the caller does
+not count.
+
+---
+
+## Aggregation weights are a caller-supplied `u32` table, not a float in the shader
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19.1, §19.2.
+
+**Why.** The natural weight for a redundancy-aware objective is a fraction —
+`1/(n+1)` and the like — and WGSL has no float atomic. The alternatives were to pick a
+fixed-point scale on the caller's behalf (a magic constant the caller cannot audit and
+cannot change) or to give up bit-identical parity (§19.5, the property that makes the
+CPU path a genuine fallback rather than a second implementation of the caller's domain
+logic).
+
+**Decision.** The descriptor carries the weights as a `u32` lookup table indexed by the
+masked popcount. The SDK only ever `atomicAdd`s integers it was handed. Changing the
+objective is then a change to the caller's table and touches no shader.
+
+---
+
+## `AggregateSpec.cameras` splits *counted* from *computed*
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §19.1.
+
+**Why.** Mask bits are positional (§7.1) and the index list is what makes incremental
+recompute eligible (§13.1) — so a caller that wants a number over a *subset* of cameras
+cannot get it by running a shorter list, which renumbers every bit and disqualifies the
+next run. Nor can it filter afterwards: `covered`, the column extrema, and
+`leafCounts.count` are all SDK-side popcounts.
+
+**Decision.** A `CAM_WORDS`-wide bit mask on the descriptor. Every reduction reads
+`mask & cameras`. `packAggregate` defaults it to all-ones, so both backends apply it
+with no per-voxel branch on whether a filter exists.
+
+**Consequence.** A caller can hold scratch cameras in the list — the aim optimizer's six
+capture slots — without them appearing in any number it displays.
+
+---
+
 ## An `AggregateResult` is not gated on having read the masks back
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §19.4, §19.5.

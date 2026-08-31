@@ -6,8 +6,8 @@ Coding standards and organization for the demo app. Match the existing code. See
 
 ## The spec is the source of truth
 
-The app is built from `specs/spec.md` (+ `specs/volumetric_rendering.md` and
-`specs/sampling_volumes.md`). Every
+The app is built from `specs/spec.md` (+ `specs/volumetric_rendering.md`,
+`specs/sampling_volumes.md`, and `specs/aim_optimization.md`). Every
 source file opens with a doc comment citing the spec section it implements.
 Behavior changes update the spec first — see WORKFLOWS.md.
 

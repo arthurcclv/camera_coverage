@@ -82,6 +82,10 @@ const INITIAL_STATE: EngineState = {
   fullValidVoxels: null,
 };
 
+/** The engine surface this app drives — `useEngine`'s return, named so other
+ * modules can take it as a parameter without importing the hook itself. */
+export type EngineApi = ReturnType<typeof useEngine>;
+
 export function useEngine() {
   const [state, setState] = useState<EngineState>(INITIAL_STATE);
   const clientRef = useRef<WorkerClient | null>(null);

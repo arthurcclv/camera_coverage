@@ -82,6 +82,14 @@ apps/sample-app/
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
+    optimize/
+      weights.ts           u32 weight tables + harmonic numbers (aim_optimization.md §2.2, §1.2)
+      cubeRig.ts           the six 90° capture cameras for a mount point (aim_optimization.md §2.1)
+      panorama.ts          ProjectionAccums → weighted angular image + mip pyramid (aim_optimization.md §3.2)
+      search.ts            frustum half-spaces, pyramid walk, exhaustive yaw×pitch scan (aim_optimization.md §4.3)
+      greedy.ts            the sequential-greedy round loop, engine-free (aim_optimization.md §4.1)
+      session.ts           capture slots, camera masks, capture descriptor (aim_optimization.md §3.1)
+      useAimOptimizer.ts   session state + the only engine calls (aim_optimization.md §5, §6)
     ui/
       CameraPanel.tsx      selected-camera editors
       ProbePanel.tsx       selected-probe position + per-camera visibility readout (§12.3)
@@ -97,6 +105,7 @@ apps/sample-app/
       StatsPanel.tsx       coverage summary readout
       SectionStatsPanel.tsx  selected-section coverage stats (§13.7)
       RunBar.tsx           Run button + auto-run toggle + stale/backend indicators
+      OptimizePanel.tsx    aim optimizer: entry points, score heatmap, proposal, summary (aim_optimization.md §5, §6)
 ```
 
 The app is a **three-column** flex layout (desktop only, §1):
@@ -123,9 +132,12 @@ The app is a **three-column** flex layout (desktop only, §1):
   the coverage overlay is visible; hidden when neither applies (§13.6, §13.9, §9).
 - **Right sidebar** — the run/results controls: `RunBar`, `OverlayControls`,
   `SamplingVolumeControls` (the zone tool, above the stats since it governs the
-  coverage denominator), `StatsPanel`, and (when a section is selected)
-  `SectionStatsPanel` (§13.7). The heatmap legend is **not** here — it floats
-  over the viewport (see Center, §13.6).
+  coverage denominator), `OptimizePanel` (the aim optimizer,
+  [`aim_optimization.md`](./aim_optimization.md) §5 — a tool rather than a selection
+  editor, so it sits here and not in the left column, below the zone tool because it
+  optimizes over whatever sampled set that tool defines), `StatsPanel`, and (when a
+  section is selected) `SectionStatsPanel` (§13.7). The heatmap legend is **not** here —
+  it floats over the viewport (see Center, §13.6).
 
 Both side columns share the same fixed width and are not collapsible; only the
 left column's internal hierarchy/detail split is adjustable (via the divider above).
@@ -586,12 +598,14 @@ for **both**:
   wall tops, angled inward and downward. Defined in `cameras/defaults.ts`.
 - Per-camera config maps to `CameraConfig`:
   `{ id, position, rotation (quat xyzw), fov (vertical°), aspect (16/9), near (0.1), far (~30) }`.
-- A camera also carries an **editable display name** (§5.6). The app models a camera
-  as its own entity — a `Camera` = `CameraConfig` **plus** a `name` — and **converts
-  to the SDK's plain `CameraConfig`** (dropping `name`) only at the `setCameras()`
-  boundary (§8), the one place the engine type is required. So the name rides **on
-  the camera object**, exactly like a probe's or section's; the scene-file `cameras`
-  need not match the SDK type (§14.3).
+- A camera also carries an **editable display name** (§5.6) and an **`aimLocked`
+  flag** (`aim_optimization.md` §4.5, default false, excluding it from the aim
+  optimizer). The app models a camera as its own entity — a `Camera` =
+  `CameraConfig` **plus** those app-only fields — and **converts to the SDK's plain
+  `CameraConfig`** (dropping them) only at the `setCameras()` boundary (§8), the one
+  place the engine type is required. So they ride **on the camera object**, exactly
+  like a probe's or section's; the scene-file `cameras` need not match the SDK type
+  (§14.3).
 
 ### 5.1 Rotation representation
 
@@ -1023,6 +1037,12 @@ moment of that edit, so the engine goes idle at the next chunk boundary and the 
 "not busy" gate starts the replacement run. Without this the user waits out a full run
 whose result is discarded, and only then waits for the one they asked for. A scene
 import cancels the same way (§14.4 step 4).
+
+**Auto-run is suspended while an optimize session is open** (`aim_optimization.md`
+§3.1). That feature drives its own `compute()` calls against a camera list carrying six
+extra capture slots, and letting the staleness poller fire in parallel would interleave
+two runs over two different camera lists. The session's own final run re-establishes the
+displayed numbers when it closes.
 
 A **camera** edit is deliberately not cancelled: its run is short, and its result is
 still applied — one edit stale, reconciled by the next auto-run — so cancelling would
@@ -1749,8 +1769,9 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   - `gltf` — a `src` reference (§14.2) to a GLB/GLTF asset.
 - **`cameras`** / **`probes`** / **`sections`** — the serialized cameras, `Probe[]`,
   and `Section[]` (§5, §12.1, §13.1). A **camera** object is the app `Camera` shape —
-  the `CameraConfig` fields **plus** an optional `name` **and an optional `enabled`** —
-  **not** the bare SDK type; the reader builds the app `Camera`, and the app converts
+  the `CameraConfig` fields **plus** an optional `name`, an optional `enabled`, **and an
+  optional `aimLocked`** (`aim_optimization.md` §9, absent ⇒ `false`, omitted on write
+  when false) — **not** the bare SDK type; the reader builds the app `Camera`, and the app converts
   to `CameraConfig` only at `setCameras()` (§14.1). A camera's **`enabled`** flag
   (§5.4) is **optional on read**, defaulting to `true` when absent, and — since
   cameras are enabled by default — **omitted on write when `true`** (only
@@ -1958,6 +1979,10 @@ Sketch:
 
 ## 15. Out of scope / future
 
+- **Camera aim optimization shipped** — redundancy-weighted re-aiming of the existing
+  cameras, [`aim_optimization.md`](./aim_optimization.md); its §13 lists that feature's
+  own out-of-scope items (optimizing position or FOV, image-quality terms, joint rather
+  than sequential-greedy optimization).
 - Mode 2 (coverage-count thresholding), per-camera coverage isolation view.
 - Height-band sampling regions as a live control. (Box/oriented-box sampling
   regions grouped into zones **shipped** as sampling zones —
@@ -2015,6 +2040,18 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
   0`); counted in Section stats (§13.7).
 - **Section coverage** — the mean coverage fraction over a section's colored cells; the
   section analog of overall coverage (§13.7).
+- **Reachable set** — the voxels a camera at a fixed mount point could see at *some*
+  orientation: within `far`, unoccluded, ignoring the frustum. Independent of where the
+  camera is aimed, which is what makes aim optimization cheap (`aim_optimization.md` §2).
+- **Panorama** — the reachable set captured as a weighted angular image around one mount
+  point, `6 × R × R` bins over six cube faces (`aim_optimization.md` §3.2).
+- **Capture slot** — one of six session-only cameras that produce a panorama. They occupy
+  mask bits but are never scene entities (`aim_optimization.md` §3.1).
+- **Φ (scene potential)** — `Σ_v G(n(v))` over the marked set, where `G` is the running
+  sum of the optimizer's redundancy weight. A camera's optimization score is exactly its
+  marginal contribution to Φ, which is why sequential-greedy re-aiming converges — for any
+  weight depending only on `n`, so the weight can be tuned on measured coverage without
+  touching the argument (`aim_optimization.md` §1.1, §1.2).
 - **Sampling volume** — a user-placed, editable **oriented box**. Unlike a
   probe/section observer, it is **coverage input**: it changes which voxels are
   counted. Belongs to exactly one zone (`sampling_volumes.md` §2, §10).

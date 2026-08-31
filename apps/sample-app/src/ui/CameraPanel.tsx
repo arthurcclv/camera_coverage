@@ -16,9 +16,11 @@ export interface CameraPanelProps {
   onChange(id: string, patch: Partial<CameraConfig>): void;
   /** Live display-name write (spec §5.6); never marks the result stale. */
   onRename(id: string, name: string): void;
+  /** Toggle the aim lock (`aim_optimization.md` §4.5); never marks stale. */
+  onToggleAimLock(id: string): void;
 }
 
-export function CameraPanel({ camera, flagged, onChange, onRename }: CameraPanelProps) {
+export function CameraPanel({ camera, flagged, onChange, onRename, onToggleAimLock }: CameraPanelProps) {
   if (!camera) {
     return (
       <div className="panel">
@@ -85,6 +87,17 @@ export function CameraPanel({ camera, flagged, onChange, onRename }: CameraPanel
 
         <Slider label="FOV (vert.)" value={camera.fov} min={10} max={150} step={1} digits={2} onChange={(v) => set({ fov: v })} />
         <Slider label="Range (far)" value={camera.far ?? 50} min={0.5} max={100} step={0.1} onChange={(v) => set({ far: v })} />
+
+        {/* The aim lock is app-only and changes nothing the engine computes, so
+            it never marks the result stale (`aim_optimization.md` §4.5). */}
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={camera.aimLocked === true}
+            onChange={() => onToggleAimLock(camera.id)}
+          />
+          Lock aim (exclude from optimization)
+        </label>
       </div>
     </div>
   );

@@ -79,7 +79,18 @@ other and update the parity test:
 
 - CPU backend (`compute/cpu.ts`, `kernel.ts`) ↔ WGSL (`shaders.ts`) — same struct
   layouts, ray test, traversal.
+- §19 reduction: `aggregate.ts` (`aggregateChunkCPU`, `regionMask`, `projectionBin`)
+  ↔ `shaders.ts` (Passes 4–7). Two places let a **float** decide which accumulator a
+  voxel lands in — a region face and a projection's bin edge — and there the shader's
+  f32 and the reference's f64 can split an exact tie (§19.5). Keep the operand order
+  identical, and give any new parity test geometry that sits **off** the voxel lattice.
 - Rust WASM kernels (`crates/`) ↔ pure-TS kernels (`kernels.ts`, `svo.ts`, …).
+
+**A new aggregation pass needs its own binding list.** Pipelines use `layout: 'auto'`,
+which prunes bindings the entry point never reaches; a pass that includes shared WGSL it
+does not call ends up with a bind group the device rejects. `AGG_INFO` (struct + camera
+filter + popcount) and `AGG_REGIONS` (everything touching the `regions` binding) are
+split for exactly that reason — include only what the pass uses.
 
 ## Testing
 

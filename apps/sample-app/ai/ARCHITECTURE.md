@@ -344,6 +344,39 @@ default" — see DECISIONS.md).
   camera *pose* math composing `math.ts`, not view-framing geometry; the gesture
   plumbing that calls it is in `scene/sceneView/`.
 
+**Aim optimization (`optimize/`, `aim_optimization.md`)**
+
+A layered stack whose lower half is pure, so the decisions can be tested without a
+GPU. Read it bottom-up:
+
+- `weights.ts` — the `u32` weight tables the SDK's projection primitive sums:
+  `1/(n+1)^α` in 16384ths, and a blind-voxel indicator. **Changing the objective is a
+  change to this file and nothing else** — which is what made fixing a 1.7-point coverage
+  shortfall a one-constant edit (`REDUNDANCY_EXPONENT`, see DECISIONS.md).
+- `comparison.ts` — the measured per-zone before/after. Pure: two `ZoneCoverage`
+  snapshots in, a sorted diff out. Separate from the optimizer because it reports what
+  *happened*, not what was proposed — both its columns come from real runs.
+- `cubeRig.ts` — the six 90° capture cameras that tile the sphere around one mount
+  point. Ordinary `CameraConfig`s, computed by the ordinary Pass 2, which is why the
+  panorama agrees with the engine rather than reimplementing it.
+- `panorama.ts` — merges a capture's six `ProjectionAccum`s into a weighted angular
+  image, and builds the mip pyramid whose nodes carry their cells' corner directions.
+- `search.ts` — a frustum as five half-spaces through the origin, the pyramid walk,
+  and the exhaustive 1° scan under the blind gate. No engine, no React.
+- `greedy.ts` — the round loop, parameterized on `capture`/`apply`. Ordering, rounds,
+  the gate, the gain threshold, ΔΦ: all pure.
+- `session.ts` — the SDK-shaped half: slot management, the two camera masks, and the
+  capture descriptor. The capture carries the **marked filter handed over from
+  `scene/aggregateSpec.ts`**, not one of its own: `setSampling` bounds what is *computed*
+  with conservative AABBs, and only the descriptor's exact OBBs say what is *counted*.
+- `useAimOptimizer.ts` — **the only module here that calls the engine.** Owns session
+  state, cancel/apply, and the rule that the scene is not written until Apply.
+
+The invariant that spans layers: a session appends six cameras to the list the engine
+holds but **never** to the scene, so `chunkSizeFor` reserves their slots
+unconditionally (opening a session must not re-init), the display descriptor carries a
+`cameras` mask that hides them, and auto-run is suspended for the duration.
+
 **UI (`ui/`, presentational React)**
 - `SceneFileControls.tsx` — the "Scene" panel (Load / Save / Save As… plus the
   save-target status line, spec §14.7) atop the left panel, above the hierarchy;
@@ -355,7 +388,13 @@ default" — see DECISIONS.md).
   the rAF edge-auto-scroll loop, and swallowing the click that would otherwise select
   after a drop. Every geometric decision is delegated to `scene/reorder.ts`.
 - `CameraPanel.tsx` — selected-camera editor: Position + Rotation as grouped
-  numeric text fields (`Vec3Field`, §5.2.1); FOV / range (far) stay sliders.
+  numeric text fields (`Vec3Field`, §5.2.1); FOV / range (far) stay sliders; the
+  aim-lock checkbox (`aim_optimization.md` §4.5), which never marks stale.
+- `OptimizePanel.tsx` — the aim optimizer's two entry points, the yaw × pitch score
+  heatmap, the per-camera proposal, and the whole-scene summary. Rendered in the **right
+  sidebar** below `SamplingVolumeControls`, not in the left inspector: it is a tool (one
+  entry point has no selection at all, the other only *reads* one), and a 2:1 heatmap
+  above the camera editor's numeric fields would push them out of view.
 - `ProbePanel.tsx` — probe position (grouped text field) + visibility readout + stale hint.
 - `SectionPanel.tsx` — orientation / thickness / aggregation editor for the
   selected section (thickness keeps the section's center fixed; position only

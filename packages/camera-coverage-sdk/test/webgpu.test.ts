@@ -19,6 +19,7 @@ import { EngineError, EngineErrorCode } from '../src/types.ts';
 import type { CameraConfig, ChunkResult, SceneMesh, WorkspaceConfig } from '../src/types.ts';
 import type { AggregateResult, AggregateSpec } from '../src/aggregate.ts';
 import { box, camera, LOOK_NEG_Z, wallZ } from './helpers.ts';
+import { prepareCamera } from '../src/camera.ts';
 
 // Dawn needs its GPU* constants (GPUBufferUsage, GPUShaderStage, ...) on
 // globalThis, not just `navigator.gpu` — the WGSL/pipeline code references
@@ -243,6 +244,20 @@ test(
 
 const AGG_WS: WorkspaceConfig = { worldMin: [0, 0, 0], worldMax: [6, 3, 6], voxelSize: 0.3, chunkSizeXZ: 3 };
 
+// Camera 'a' sits deliberately **off** the voxel lattice. At [3.15, 1.65, 5.4]
+// it lands on a voxel centre, which makes `x_view` and `z_view` exact multiples
+// of the 0.3 m pitch — so a projection's `x/w` hits a bin edge exactly, and the
+// shader's f32 divide and the reference's f64 one then round the tie apart.
+// That is the boundary caveat `regionMask` already carries (§19.5), not a
+// defect in Pass 7; the offset keeps this parity test from sitting on it.
+const AGG_CAMS: CameraConfig[] = [
+  camera('a', [3.17, 1.63, 5.41], LOOK_NEG_Z),
+  camera('b', [3.15, 1.65, 0.6], [0, 1, 0, 0]),
+];
+/** Caller-side fixed point (§19.2): 4096/(n+1), and a plain count of `n == 0`. */
+const AGG_SCORE = Uint32Array.from({ length: 3 }, (_, n) => Math.round(4096 / (n + 1)));
+const AGG_BLIND = Uint32Array.from({ length: 3 }, (_, n) => (n === 0 ? 1 : 0));
+
 const AGG_SPEC: AggregateSpec = {
   regions: [
     { center: [2.0, 1.5, 3.0], rotation: [0, 0, 0, 1], halfSize: [1.6, 1.4, 2.0], groups: [0] },
@@ -254,6 +269,22 @@ const AGG_SPEC: AggregateSpec = {
   columns: [{ axis: 1, range: [[0, 19], [1, 8], [0, 19]], maskRegions: [0] }],
   leafCounts: { maskRegions: [] },
   probes: [[3.15, 1.65, 4.5], [2.25, 1.35, 2.85]],
+  // §19.3 Pass 7 and §19.1's camera filter ride the same parity check as the
+  // rest: a projection is another integer accumulator, so bit-identity is the
+  // bar for it too. `cameras` drops camera 1, which makes the filter observable
+  // in every other primitive at the same time.
+  projections: [
+    {
+      camera: 0,
+      viewProj: Array.from(prepareCamera(AGG_CAMS[0]).viewProj),
+      resolution: 8,
+      // Filtered, so §18 6l covers the region test Pass 7 does only when asked
+      // — region 0 is the large box, so this bins a strict subset.
+      maskRegions: [0],
+      weights: [AGG_SCORE, AGG_BLIND],
+    },
+  ],
+  cameras: new Uint32Array([0b01]),
 };
 
 async function aggregateRun(backend: 'cpu' | 'webgpu') {
@@ -261,10 +292,7 @@ async function aggregateRun(backend: 'cpu' | 'webgpu') {
   await engine.init({ ...AGG_WS, backend, solidDetection: true });
   await engine.loadScene(box([1.5, 0.6, 2.4], [3.0, 2.1, 3.3]));
   await engine.setSampling({ regions: [{ type: 'full' }] });
-  engine.setCameras([
-    camera('a', [3.15, 1.65, 5.4], LOOK_NEG_Z),
-    camera('b', [3.15, 1.65, 0.6], [0, 1, 0, 0]),
-  ]);
+  engine.setCameras(AGG_CAMS);
   const out: AggregateResult[] = [];
   const chunks: ChunkResult[] = [];
   await engine.compute({
@@ -311,6 +339,13 @@ function assertSameAggregate(a: AggregateResult, b: AggregateResult, label: stri
   }
   assert.deepEqual(Array.from(a.probeMasks ?? []), Array.from(b.probeMasks ?? []), `${label} probeMasks`);
   assert.deepEqual(Array.from(a.probeHits ?? []), Array.from(b.probeHits ?? []), `${label} probeHits`);
+  assert.equal(a.projections?.length, b.projections?.length, `${label} projection count`);
+  a.projections?.forEach((p, i) => {
+    const o = b.projections![i];
+    assert.equal(p.resolution, o.resolution, `${label} projection ${i} resolution`);
+    assert.equal(p.planeCount, o.planeCount, `${label} projection ${i} planeCount`);
+    assert.deepEqual(Array.from(p.bins), Array.from(o.bins), `${label} projection ${i} bins`);
+  });
 }
 
 test(
@@ -514,10 +549,7 @@ async function statsOnlyAggregateRun(backend: 'cpu' | 'webgpu') {
   await engine.init({ ...AGG_WS, backend, solidDetection: true });
   await engine.loadScene(box([1.5, 0.6, 2.4], [3.0, 2.1, 3.3]));
   await engine.setSampling({ regions: [{ type: 'full' }] });
-  engine.setCameras([
-    camera('a', [3.15, 1.65, 5.4], LOOK_NEG_Z),
-    camera('b', [3.15, 1.65, 0.6], [0, 1, 0, 0]),
-  ]);
+  engine.setCameras(AGG_CAMS);
   const out: AggregateResult[] = [];
   await engine.compute({
     mode: 1,

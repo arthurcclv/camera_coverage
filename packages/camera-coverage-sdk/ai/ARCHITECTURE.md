@@ -49,7 +49,7 @@ whole, over all cameras, so no chunk ever mixes camera generations.
 | Incremental recompute baseline + dirty-set diff | §13.1 | `src/incremental.ts` |
 | Aggregation: descriptor, packing, CPU reduction, merge helpers | §19 | `src/aggregate.ts` |
 | Per-chunk readback budget (host heap, not `maxBufferSize`) | §11.1 | `src/compute/webgpu.ts` (`maxChunkReadbackBytes`) |
-| Aggregation passes (region / column / leaf-count reduce) | §19.3 | `src/shaders.ts` (Pass 4–6), `src/compute/webgpu.ts` |
+| Aggregation passes (region / column / leaf-count / projection reduce) | §19.3 | `src/shaders.ts` (Pass 4–7), `src/compute/webgpu.ts` |
 | Cancellation (signal check + macrotask yield) | §13.2 | `src/engine.ts`, `src/worker/*` |
 | Engine API + orchestration | §16.1 | `src/engine.ts` |
 | Web Worker host + main-thread client | §4/§16 | `src/worker/*` |
@@ -66,13 +66,24 @@ other.
 
 ### 1. Two compute backends, one algorithm
 
-- `src/aggregate.ts` (`aggregateChunkCPU`, `regionMask`) and `src/shaders.ts`
-  (Pass 4–6, `AGG_COMMON`'s `regionMask`) are a **fifth** axis of the same
+- `src/aggregate.ts` (`aggregateChunkCPU`, `regionMask`, `projectionBin`) and `src/shaders.ts`
+  (Pass 4–7, `AGG_REGIONS`' `regionMask`) are a **fifth** axis of the same
   duplication: the §19 reduction exists twice, once in JavaScript and once in
-  WGSL, and §18 6l asserts they agree bit-for-bit. The sharp edge is `regionMask`
-  — the OBB test — where a divergence produces a plausible wrong count rather
-  than a crash. Both sides read the *same* packed `Float32Array` (`packAggregate`)
-  so they at least start from identical f32 values.
+  WGSL, and §18 6l asserts they agree bit-for-bit. The sharp edges are the two
+  places a **float decides which accumulator a voxel lands in** — `regionMask`
+  (the OBB face) and `projectionBin` (the bin edge) — where a divergence produces
+  a plausible wrong count rather than a crash. Both sides read the *same* packed
+  `Float32Array` (`packAggregate`) so they at least start from identical f32
+  values, and §19.5 documents the residual: a voxel exactly on such a boundary
+  can go either way, so a parity test must place its geometry **off the voxel
+  lattice** or it sits on ties by construction.
+
+  A second trap lives in the same place: pipelines are created with
+  `layout: 'auto'`, which **prunes bindings the entry point never reaches**. Pass 7
+  reads no region, so it includes `AGG_INFO` alone and its bind group must not
+  carry a `regions` buffer — passing one is a validation error, and the symptom is
+  every *other* pass's bind group failing too, several frames downstream. Split the
+  shared WGSL along what each pass actually uses, never by what is convenient.
 - `src/compute/cpu.ts` (TypeScript) and `src/compute/webgpu.ts` + `src/shaders.ts`
   (WGSL) implement **bit-identical** logic: same camera/BVH struct layouts, same
   Möller–Trumbore ray-triangle test, same stackless traversal.

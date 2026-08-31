@@ -1131,16 +1131,18 @@ All large TypedArrays between the Worker and the main thread are passed as **tra
 ## 19. Aggregation
 
 Every consumer of a run reduces per-voxel masks to a few kilobytes of derived data:
-counts inside a box, a per-column summary, a popcount per voxel, the mask at a point.
+counts inside a box, a per-column summary, a popcount per voxel, the mask at a point, a
+weighted image of what one camera sees.
 Doing that downstream pays three times — the readback, the transfer to wherever the
 consumer lives, and a scalar scan over millions of voxels. The engine already holds the
 masks at the moment they are produced, on the GPU, one chunk resident (§9.4). **Aggregation
 is a caller-supplied descriptor the engine evaluates there**, returning the reduced result
 instead of (or alongside) the per-voxel buffers.
 
-The SDK stays domain-free. It knows oriented boxes, voxel columns, popcounts, and points;
-it does not know zones, sections, overlays, or probes. Those are the caller's names for
-these four primitives, and the mapping is the caller's to keep.
+The SDK stays domain-free. It knows oriented boxes, voxel columns, popcounts, points, and
+weighted projections onto a camera's image plane; it does not know zones, sections,
+overlays, probes, or aim optimization. Those are the caller's names for these five
+primitives, and the mapping is the caller's to keep.
 
 ### 19.1 The descriptor
 
@@ -1150,6 +1152,13 @@ interface AggregateSpec {
   columns?: AggregateSlab[];        // ≤ 32, batched into one pass
   leafCounts?: AggregateLeafCounts;
   probes?: Vec3[];                  // ≤ 256, world space
+  projections?: AggregateProjection[];  // ≤ 8
+  /**
+   * Camera bits every reduction counts, `CAM_WORDS` words. Omitted ⇒ all
+   * cameras. A bit that is 0 here is read as 0 in every mask this descriptor
+   * reduces, exactly as a disabled camera's is (§5.2).
+   */
+  cameras?: Uint32Array;
 }
 
 interface AggregateRegion {
@@ -1173,12 +1182,51 @@ interface AggregateLeafCounts {
   /** Report voxels outside the union of these region indices as invalid; empty ⇒ no filter. */
   maskRegions: number[];
 }
+
+interface AggregateProjection {
+  /** Camera index whose visibility bit selects the voxels this projection bins. */
+  camera: number;
+  /** Column-major view-projection matrix for that camera — 16 finite numbers. */
+  viewProj: number[];
+  /** Image grid edge in bins; the image is `resolution × resolution`. 1..128. */
+  resolution: number;
+  /** Bin only voxels inside the union of these region indices; empty ⇒ no filter. */
+  maskRegions: number[];
+  /**
+   * One accumulation plane per table, 1..4 tables of identical length
+   * `numCameras + 1`. A binned voxel adds `weights[k][n]` to plane `k`, where
+   * `n` is its popcount over `AggregateSpec.cameras`. Fixed point is the
+   * caller's convention — these are `u32` and the SDK only ever adds them.
+   */
+  weights: Uint32Array[];
+}
 ```
 
 A region is an **OBB**, not the AABB of §7.1's `SamplingRegion`. Sampling regions bound
 *what is computed* and may be conservative; aggregation regions decide *what is counted*
 and must be exact, so they carry their rotation and the shader transforms each voxel
 center into the region's local frame.
+
+`maskRegions` is the same filter `AggregateSlab` and `AggregateLeafCounts` carry, and for
+the same reason: a caller's *sampled* set (§6.3, which bounds what is **computed** and may
+be conservative) is not its *counted* set (§19.1, which must be exact). A projection
+without the filter answers a question about voxels the caller does not count.
+
+**A projection carries its own matrix rather than reading the run's camera list**, for the
+same reason a region carries its own rotation: the descriptor is plain data that must mean
+the same thing on both sides of a Worker boundary and on retained chunks the current camera
+list no longer describes (§19.4). `camera` is still an index — it names a *mask bit*, and a
+mask bit is positional by construction (§7.1) — but nothing about where that camera is
+pointing is read from engine state.
+
+**`cameras` splits "which cameras a reduction counts" from "which cameras a run computes".**
+Without it the two are the same set, and a caller that wants a coverage number over a
+subset — the outdoor cameras only, or every camera except a scratch one it added for a
+query — has no recourse but a second run with a second camera list, which renumbers every
+mask bit and disqualifies incremental recompute (§5.2, §13.1). With it the subset is a
+descriptor field: `n` in a projection's weight lookup, `covered` / `blind` / `seen` in a
+region, every `ColumnAccum` field, `leafCounts.count`, and `probeMasks` all read
+`mask & cameras` instead of `mask`.
 
 ### 19.2 Outputs
 
@@ -1204,6 +1252,15 @@ interface AggregateResult {
   probeMasks?: Uint32Array;
   /** Per probe: 0 = not in this chunk, 1 = in this chunk and valid, 2 = in this chunk and invalid. */
   probeHits?: Uint8Array;
+  /** One per descriptor projection, in descriptor order. */
+  projections?: ProjectionAccum[];
+}
+
+interface ProjectionAccum {
+  resolution: number;            // R, echoed from the descriptor
+  planeCount: number;            // weights.length
+  /** `planeCount × R × R`, plane-major then row-major: `k*R*R + y*R + x`. */
+  bins: Uint32Array;
 }
 
 interface RegionAccum {
@@ -1247,10 +1304,20 @@ exclusion pass over region intersections, which is exponential and needs geometr
 caller no longer has.
 
 **Merging across chunks is the caller's, and every accumulator is built to survive it.**
-Counts add; `seen` and `seenWords` OR; `camCountMax` takes the maximum and `camCountMin`
-the minimum, with the `0xFF` sentinel so a chunk that counted nothing cannot drag a
-minimum to 0. A chunk that a region or slab does not reach contributes zeros and is
+Counts add; `seen`, `seenWords`, and `bins` OR or add; `camCountMax` takes the maximum and
+`camCountMin` the minimum, with the `0xFF` sentinel so a chunk that counted nothing cannot
+drag a minimum to 0. A chunk that a region or slab does not reach contributes zeros and is
 omitted from the result entirely rather than reported empty.
+
+**A projection is an integer accumulator for the same reason everything else here is.**
+The natural weight for a redundancy-aware objective is a fraction — `1/(n+1)` and the like
+— and WGSL has no float atomic. Rather than pick a fixed-point scale on the caller's
+behalf, the descriptor carries the weights as a **`u32` lookup table the caller filled**,
+so the SDK only ever `atomicAdd`s integers it was handed. That keeps CPU/WebGPU parity
+bit-identical (§19.5), keeps the shader out of the business of knowing what `n` means, and
+lets a caller change its weighting without touching a shader. Multiple planes exist so one
+pass can answer more than one question about the same voxels — a weighted score and a
+plain count of the `n == 0` voxels, say — at the cost of one extra `atomicAdd`.
 
 **The engine does not classify.** `columns` reports what it counted — `validCount`,
 `obstacleCount`, `filteredCount` — and nothing about what a cell *means*. A caller that
@@ -1317,6 +1384,32 @@ the dense form would have to do this merge itself, on the main thread, over ever
 The collapse is `O(voxels)` (the level sizes form a geometric series) and runs in the
 Worker beside the masks.
 
+**Pass 7: Projection reduce.** One thread per voxel. Invalid → return. Compute the masked
+popcount `n` once, then for each projection whose camera bit is set in this voxel's mask:
+transform the voxel center by that projection's `viewProj`, divide by `w`, map NDC to a bin
+(`x` left-to-right, `y` top-to-bottom, both clamped to `0..R-1`), and `atomicAdd`
+`weights[k][n]` into plane `k`. A projection with a non-empty `maskRegions` first requires
+the voxel to be inside that union, read from the same per-voxel `regionMask` Passes 4–6
+use — computed once, and only when some projection asks for it.
+
+**The camera's own mask bit is the whole membership test — there is no second frustum
+test, and no distance test.** The bit was written by Pass 2 under §8's exact rule (voxel
+centre inside the frustum, radial distance within `far`, unoccluded), so reusing it makes a
+projection agree with the engine's visibility by construction rather than by a
+reimplementation that could drift. It also makes the division safe: a set bit implies
+`0 ≤ z_clip ≤ w_clip` and therefore `w_clip > 0`, so the perspective divide cannot be by
+zero and the NDC cannot land outside `[-1, 1]` except by float rounding at the very edge,
+which the clamp absorbs.
+
+*Rationale.* What this buys a caller is that **a camera's reachable set does not depend on
+where it is aimed**. Occlusion is a ray from the camera position to a voxel centre (§8) and
+the range cut is radial, so rotating a camera changes only which of an unchanged set falls
+inside the frustum. A caller that wants to evaluate many orientations of one camera can
+therefore capture the weighted angular distribution of that set **once** — a handful of
+fixed cameras tiling the sphere from the mount point — and then score any orientation by
+summing bins, with no further dispatch. The alternative is one full raycast per candidate
+orientation, which is the cost this primitive exists to remove.
+
 **Probes are resolved on the CPU**, from the chunk's masks after readback. A handful of
 `O(1)` point lookups do not repay a dispatch and a readback segment; they are an
 aggregation *output* rather than a pass because the value of carrying them here is that
@@ -1326,7 +1419,8 @@ logic on the far side of the per-voxel buffers.
 All aggregation outputs join the §11.1 staging plan as additional segments and are
 validated against `maxBufferSize` by the same check. Their combined size is bounded and
 small — regions and groups at the 64-region / 32-group, 128-camera ceiling are 50 KB, columns at the 32-slab
-ceiling are `Σ dimsA·dimsB · (28 + 4·CAM_WORDS)` bytes — with the single exception of
+ceiling are `Σ dimsA·dimsB · (28 + 4·CAM_WORDS)` bytes, projections at the 8-projection /
+4-plane / 128-bin ceiling are 2 MB — with the single exception of
 `leafCounts`, whose *intermediate* dense form is chunk-proportional and therefore counted
 by the §11.1 readback budget. What is returned is the merged leaf list, which is bounded
 by the coverage field's complexity rather than by the voxel count.
@@ -1348,10 +1442,10 @@ aggregate(
 ```
 
 **Inline**, on `compute()`: aggregation rides the run it belongs to. The masks are already
-GPU-resident, so Passes 4–6 cost a dispatch each and no readback beyond their own
+GPU-resident, so Passes 4–7 cost a dispatch each and no readback beyond their own
 accumulators. This is the path every run takes.
 
-**Standalone**, on retained chunks: re-runs Passes 4–6 alone, uploading **one chunk at a
+**Standalone**, on retained chunks: re-runs Passes 4–7 alone, uploading **one chunk at a
 time** and releasing it before the next, so §9.4's one-chunk-resident rule holds exactly
 as it does during `compute()`. Nothing is raycast and no BVH is touched.
 
@@ -1405,6 +1499,15 @@ use this form.
 work under `backend: 'cpu'`. Because every accumulator is integral (§19.2), the CPU and
 WebGPU outputs are **bit-identical**, not merely close.
 
+**The one caveat is where a float decides which accumulator a voxel lands in**, not what is
+added to it: a region face (`regionMask`) and a projection's bin edge (`projectionBin`) are
+both float comparisons, computed in f32 by the shader and f64 by the reference. A voxel
+exactly on such a boundary can therefore be classified either way. Both implementations use
+the same operand order so this is confined to exact ties, and the consequence is a voxel
+counted in the neighbouring bin or the adjacent region — never a voxel lost, and never a
+different sum. Tests that assert bit-identity must place their geometry off the voxel
+lattice, or they will sit on ties by construction.
+
 This is what makes the CPU path a genuine fallback rather than a second implementation of
 the caller's domain logic. Without it, a caller on a WebGL2-only browser would either
 lose the feature or maintain a parallel scalar path that drifts from the shader — and the
@@ -1414,8 +1517,12 @@ drift would surface as a plausible wrong number, not a crash.
 
 | Constraint | Behavior |
 |---|---|
-| `regions.length > 64`, `columns.length > 32`, `probes.length > 256` | throws `AGGREGATE_TOO_LARGE` naming the limit and the requested count |
+| `regions.length > 64`, `columns.length > 32`, `probes.length > 256`, `projections.length > 8` | throws `AGGREGATE_TOO_LARGE` naming the limit and the requested count |
 | a `groups` index outside `0..31`, or a slab `axis` outside `0..2` | throws `INVALID_AGGREGATE` |
+| a projection `resolution` outside `1..128`, or `weights.length` outside `1..4` | throws `INVALID_AGGREGATE` |
+| a projection's weight tables of unequal length, or of length ≠ `numCameras + 1` | throws `INVALID_AGGREGATE` |
+| a projection `camera` outside `0..numCameras-1`, or a `viewProj` that is not 16 finite numbers | throws `INVALID_AGGREGATE` |
+| `cameras` present with a length other than `CAM_WORDS` | throws `INVALID_AGGREGATE` |
 | a region `halfSize` component ≤ 0, or a non-finite field | throws `INVALID_AGGREGATE` |
 | a `maskRegions` index outside `regions` | throws `INVALID_AGGREGATE` |
 | a `maskRegions` on a descriptor that declares no regions | throws `INVALID_AGGREGATE` |

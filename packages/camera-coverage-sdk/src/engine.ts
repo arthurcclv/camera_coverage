@@ -257,11 +257,11 @@ export class CoverageEngine implements VisibilityEngine {
     // §19: validated up front so a malformed descriptor fails before any chunk
     // dispatches, rather than part-way through a run.
     let packedAgg: PackedAggregate | undefined;
+    const numCameras = this.cameras.length;
     if (opts?.aggregate && !aggregateIsEmpty(opts.aggregate)) {
-      validateAggregateSpec(opts.aggregate);
+      validateAggregateSpec(opts.aggregate, numCameras);
       packedAgg = packAggregate(opts.aggregate);
     }
-    const numCameras = this.cameras.length;
     const cw = computeCamWords(Math.max(1, numCameras));
     const runOptions: RunOptions = { mode, threshold, emitVoxels };
 
@@ -477,7 +477,7 @@ export class CoverageEngine implements VisibilityEngine {
   ): Promise<void> {
     this.assertReady();
     if (aggregateIsEmpty(spec)) return;
-    validateAggregateSpec(spec);
+    validateAggregateSpec(spec, this.cameras.length);
     const packed = packAggregate(spec);
     const signal = opts?.signal;
 

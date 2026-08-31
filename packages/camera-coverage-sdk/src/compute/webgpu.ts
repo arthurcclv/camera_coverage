@@ -28,11 +28,13 @@ import {
   PASS4_REGIONS,
   PASS5_COLUMNS,
   PASS6_LEAFCOUNTS,
+  PASS7_PROJECTIONS,
 } from '../shaders.ts';
 import {
   assembleColumns,
   mergeLeafCounts,
   resolveProbes,
+  assembleProjections,
   unpackRegions,
   COLUMN_BASE_FIELDS,
   REGION_BASE_FIELDS,
@@ -134,7 +136,10 @@ type PoolSlot =
   | 'cellAccum'
   | 'cellSeen'
   | 'leafCounts'
-  | 'leafValid';
+  | 'leafValid'
+  | 'projections'
+  | 'projWeights'
+  | 'projAccum';
 
 class ChunkBufferPool {
   private device: GPUDevice;
@@ -225,6 +230,7 @@ export class WebGpuBackend {
     p4: GPUComputePipeline;
     p5: GPUComputePipeline;
     p6: GPUComputePipeline;
+    p7: GPUComputePipeline;
   }>();
 
   private constructor(device: GPUDevice, caps: GpuCapabilities) {
@@ -296,6 +302,7 @@ export class WebGpuBackend {
       p4: mk(PASS4_REGIONS),
       p5: mk(PASS5_COLUMNS),
       p6: mk(PASS6_LEAFCOUNTS),
+      p7: mk(PASS7_PROJECTIONS),
     };
     this.pipelineCache.set(camWords, cached);
     return cached;
@@ -673,6 +680,18 @@ export class WebGpuBackend {
     const cellSeen = pool.get('cellSeen', Math.max(4, seenBytes), STORAGE_USAGE());
     const leafCounts = pool.get('leafCounts', Math.max(4, countsBytes), STORAGE_USAGE());
     const leafValid = pool.get('leafValid', Math.max(4, validBytes), STORAGE_USAGE());
+    const projBuf = pool.write(
+      'projections',
+      packed.projectionCount > 0 ? packed.projectionData : new Float32Array(4),
+      GPUBufferUsage.STORAGE,
+    );
+    const projWeights = pool.write(
+      'projWeights',
+      packed.projectionCount > 0 ? packed.projectionWeights : new Uint32Array(4),
+      GPUBufferUsage.STORAGE,
+    );
+    const projBytes = packed.projectionBins * 4;
+    const projAccum = pool.get('projAccum', Math.max(4, projBytes), STORAGE_USAGE());
 
     const wantColumns = packed.totalCells > 0;
     const segments: AggregateBuffers['segments'] = [];
@@ -687,6 +706,9 @@ export class WebGpuBackend {
       segments.push({ key: 'leafCounts', bytes: countsBytes, src: leafCounts });
       segments.push({ key: 'leafValid', bytes: validBytes, src: leafValid });
     }
+    if (packed.projectionCount > 0) {
+      segments.push({ key: 'projAccum', bytes: projBytes, src: projAccum });
+    }
 
     return {
       segments,
@@ -700,6 +722,10 @@ export class WebGpuBackend {
       cellSeen,
       leafCounts,
       leafValid,
+      projBuf,
+      projWeights,
+      projAccum,
+      projBins: packed.projectionBins,
       regionEntries,
       voxelCount,
       camWords,
@@ -718,12 +744,13 @@ export class WebGpuBackend {
     voxelGroups: number,
   ): void {
     const d = this.device;
-    const { p4, p5, p6 } = this.getPipelines(camWords);
+    const { p4, p5, p6, p7 } = this.getPipelines(camWords);
     enc.clearBuffer(b.regionAccum);
     enc.clearBuffer(b.cellAccum);
     enc.clearBuffer(b.cellSeen);
     enc.clearBuffer(b.leafCounts);
     enc.clearBuffer(b.leafValid);
+    enc.clearBuffer(b.projAccum);
 
     const run = (pipeline: GPUComputePipeline, buffers: GPUBuffer[]): void => {
       const pass = enc.beginComputePass();
@@ -750,6 +777,12 @@ export class WebGpuBackend {
     }
     if (b.wantLeafCounts) {
       run(p6, [chunkInfo, validityBuf, visibility, b.regionBuf, b.leafCounts, b.leafValid, b.aggInfo]);
+    }
+    if (b.projBins > 0) {
+      run(p7, [
+        chunkInfo, validityBuf, visibility, b.regionBuf,
+        b.projBuf, b.projWeights, b.projAccum, b.aggInfo,
+      ]);
     }
   }
 
@@ -871,7 +904,8 @@ export type StagingKey =
   | 'cellAccum'
   | 'cellSeen'
   | 'leafCounts'
-  | 'leafValid';
+  | 'leafValid'
+  | 'projAccum';
 
 /** One segment asked for. `bytes <= 0` is "not wanted" and is dropped. */
 export interface StagingRequest {
@@ -959,6 +993,11 @@ interface AggregateBuffers {
   cellSeen: GPUBuffer;
   leafCounts: GPUBuffer;
   leafValid: GPUBuffer;
+  projBuf: GPUBuffer;
+  projWeights: GPUBuffer;
+  projAccum: GPUBuffer;
+  /** Total accumulator entries across every projection and plane; 0 ⇒ no Pass 7. */
+  projBins: number;
   /** `regionCount + groupCount`, or 0 when no regions were requested. */
   regionEntries: number;
   voxelCount: number;
@@ -966,13 +1005,13 @@ interface AggregateBuffers {
   numCameras: number;
 }
 
-/** The 48-byte AggInfo uniform matching the WGSL struct (§19.3). */
+/** The 64-byte AggInfo uniform matching the WGSL struct (§19.3). */
 function buildAggInfo(
   packed: PackedAggregate,
   numCameras: number,
   base: [number, number, number],
 ): ArrayBuffer {
-  const buf = new ArrayBuffer(48);
+  const buf = new ArrayBuffer(64);
   const u = new Uint32Array(buf);
   u[0] = packed.regionCount;
   u[1] = packed.groupCount;
@@ -983,6 +1022,11 @@ function buildAggInfo(
   u[6] = base[0];
   u[7] = base[1];
   u[8] = base[2];
+  u[9] = packed.projectionCount;
+  u[10] = packed.anyProjectionFilter ? 1 : 0;
+  // `camMask` is a vec4<u32>, so it starts at the struct's next 16-byte
+  // boundary — words 12..15, not 10..13.
+  u.set(packed.cameraMask, 12);
   return buf;
 }
 
@@ -1059,6 +1103,9 @@ function readAggregate(
       cpuInput.dims,
     );
   }
+
+  const projFlat = seg('projAccum');
+  if (projFlat) out.projections = assembleProjections(projFlat, packed);
 
   if (packed.probeCount > 0) {
     const { probeMasks, probeHits } = resolveProbes(cpuInput);

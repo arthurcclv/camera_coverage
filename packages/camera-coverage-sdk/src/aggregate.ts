@@ -2,9 +2,9 @@
  * Aggregation (§19): domain-neutral reductions the engine evaluates where the
  * masks live, so a caller never has to scan per-voxel data itself.
  *
- * Four primitives — oriented boxes, voxel columns, per-voxel popcounts, and
- * point lookups. The SDK deliberately knows nothing about what a caller calls
- * them (§19). Everything here is plain data so the descriptor crosses a Worker
+ * Five primitives — oriented boxes, voxel columns, per-voxel popcounts, point
+ * lookups, and weighted projections onto a camera's image plane. The SDK
+ * deliberately knows nothing about what a caller calls them (§19). Everything here is plain data so the descriptor crosses a Worker
  * boundary unchanged; a caller predicate could not (§16.1).
  *
  * This module owns three things the two backends share:
@@ -30,6 +30,10 @@ export const MAX_AGGREGATE_SLABS = 32;
 export const MAX_AGGREGATE_PROBES = 256;
 /** Group indices are a single `u32` mask word, so `0..31` (§19.2). */
 export const MAX_AGGREGATE_GROUPS = 32;
+export const MAX_AGGREGATE_PROJECTIONS = 8;
+/** Bins per projection are `R²` per plane, and the readback budget is §11.1's. */
+export const MAX_PROJECTION_RESOLUTION = 128;
+export const MAX_PROJECTION_PLANES = 4;
 
 /**
  * An oriented box, not the AABB of §7.1's `SamplingRegion`: sampling regions
@@ -62,11 +66,66 @@ export interface AggregateLeafCounts {
   maskRegions: number[];
 }
 
+/**
+ * A weighted image of what one camera sees, binned on its own image plane (§19.3
+ * Pass 7).
+ *
+ * The membership test is the camera's **mask bit**, not a second frustum test:
+ * the bit was written by Pass 2 under §8's exact rule, so a projection agrees
+ * with the engine's visibility by construction rather than by a reimplementation
+ * that could drift — and a set bit guarantees `w_clip > 0`, which is what makes
+ * the perspective divide below unconditionally safe.
+ *
+ * It carries its own `viewProj` rather than reading the run's camera list for
+ * the same reason a region carries its own rotation: the descriptor is plain
+ * data that must mean the same thing across a Worker boundary and on retained
+ * chunks the current camera list no longer describes (§19.4).
+ */
+export interface AggregateProjection {
+  /** Camera index whose visibility bit selects the voxels this projection bins. */
+  camera: number;
+  /** Column-major view-projection matrix for that camera — 16 finite numbers. */
+  viewProj: number[];
+  /** Image grid edge in bins; the image is `resolution × resolution`. 1..128. */
+  resolution: number;
+  /**
+   * Bin only voxels inside the union of these region indices; empty ⇒ no filter.
+   *
+   * The same filter `AggregateSlab` and `AggregateLeafCounts` carry, and for the
+   * same reason: a caller's *sampled* set (§6.3) bounds what is **computed** and
+   * may be conservative, while an aggregation's set must be exact (§19.1). A
+   * projection without the filter answers a question about voxels the caller
+   * does not count.
+   */
+  maskRegions: number[];
+  /**
+   * One accumulation plane per table, 1..4 tables of identical length
+   * `numCameras + 1`. A binned voxel adds `weights[k][n]` to plane `k`, where
+   * `n` is its popcount over {@link AggregateSpec.cameras}.
+   *
+   * The tables are the caller's, in the caller's own fixed point: WGSL has no
+   * float atomic, and rather than pick a scale on the caller's behalf the SDK
+   * only ever `atomicAdd`s integers it was handed (§19.2).
+   */
+  weights: Uint32Array[];
+}
+
 export interface AggregateSpec {
   regions?: AggregateRegion[];
   columns?: AggregateSlab[];
   leafCounts?: AggregateLeafCounts;
   probes?: Vec3[];
+  projections?: AggregateProjection[];
+  /**
+   * Camera bits every reduction counts, `CAM_WORDS` words. Omitted ⇒ all.
+   *
+   * This splits *which cameras a reduction counts* from *which cameras a run
+   * computes*. Without it the two are the same set, and a caller wanting a
+   * number over a subset — the outdoor cameras only, or every camera except a
+   * scratch one it added for a query — must run a second camera list, which
+   * renumbers every mask bit and disqualifies incremental recompute (§13.1).
+   */
+  cameras?: Uint32Array;
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +199,18 @@ export interface AggregateResult {
   probeMasks?: Uint32Array;
   /** One {@link ProbeHit} per probe. */
   probeHits?: Uint8Array;
+  /** One per descriptor projection, in descriptor order (§19.2). */
+  projections?: ProjectionAccum[];
+}
+
+/** One projection's binned weights (§19.2). Merges across chunks by addition. */
+export interface ProjectionAccum {
+  /** Echoed from the descriptor. */
+  resolution: number;
+  /** `weights.length` — how many planes `bins` holds. */
+  planeCount: number;
+  /** `planeCount × R × R`, plane-major then row-major: `k*R*R + y*R + x`. */
+  bins: Uint32Array;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,8 +233,15 @@ function finite3(v: readonly number[] | undefined, label: string): void {
   if (!v || v.length < 3 || !v.every(Number.isFinite)) invalid(`${label} must be three finite numbers.`);
 }
 
-/** Validate a descriptor against §19.6. Throws; returns nothing on success. */
-export function validateAggregateSpec(spec: AggregateSpec): void {
+/**
+ * Validate a descriptor against §19.6. Throws; returns nothing on success.
+ *
+ * `numCameras` is optional because the shape checks stand on their own, but the
+ * rules that *depend* on the run — a projection's camera index, its weight-table
+ * length, the width of `cameras` — can only be checked with it, and the engine
+ * always has it. Omitting it skips exactly those three.
+ */
+export function validateAggregateSpec(spec: AggregateSpec, numCameras?: number): void {
   const regions = spec.regions ?? [];
   if (regions.length > MAX_AGGREGATE_REGIONS) tooLarge('regions', regions.length, MAX_AGGREGATE_REGIONS);
   regions.forEach((r, i) => {
@@ -211,6 +289,51 @@ export function validateAggregateSpec(spec: AggregateSpec): void {
   const probes = spec.probes ?? [];
   if (probes.length > MAX_AGGREGATE_PROBES) tooLarge('probes', probes.length, MAX_AGGREGATE_PROBES);
   probes.forEach((p, i) => finite3(p, `probes[${i}]`));
+
+  const projections = spec.projections ?? [];
+  if (projections.length > MAX_AGGREGATE_PROJECTIONS) {
+    tooLarge('projections', projections.length, MAX_AGGREGATE_PROJECTIONS);
+  }
+  projections.forEach((p, i) => {
+    if (!Number.isInteger(p.resolution) || p.resolution < 1 || p.resolution > MAX_PROJECTION_RESOLUTION) {
+      invalid(`projections[${i}].resolution must be an integer in 1..${MAX_PROJECTION_RESOLUTION}; got ${p.resolution}.`);
+    }
+    if (!p.viewProj || p.viewProj.length !== 16 || !p.viewProj.every(Number.isFinite)) {
+      invalid(`projections[${i}].viewProj must be 16 finite numbers.`);
+    }
+    if (!Number.isInteger(p.camera) || p.camera < 0) {
+      invalid(`projections[${i}].camera must be a non-negative integer; got ${p.camera}.`);
+    }
+    checkMask(p.maskRegions, `projections[${i}].maskRegions`);
+    const planes = p.weights ?? [];
+    if (planes.length < 1 || planes.length > MAX_PROJECTION_PLANES) {
+      invalid(`projections[${i}].weights must hold 1..${MAX_PROJECTION_PLANES} tables; got ${planes.length}.`);
+    }
+    // One stride for every plane of a projection is what lets the shader index
+    // `weights[weightOffset + k * stride + n]` without a per-plane table.
+    for (const t of planes) {
+      if (t.length !== planes[0].length) {
+        invalid(`projections[${i}].weights tables must all be the same length; got ${planes.map((w) => w.length).join(', ')}.`);
+      }
+    }
+    if (numCameras !== undefined) {
+      if (p.camera >= numCameras) {
+        invalid(`projections[${i}].camera is ${p.camera}, outside the ${numCameras} cameras of this run.`);
+      }
+      if (planes[0].length !== numCameras + 1) {
+        invalid(
+          `projections[${i}].weights tables must have numCameras + 1 = ${numCameras + 1} entries; got ${planes[0].length}.`,
+        );
+      }
+    }
+  });
+
+  if (spec.cameras && numCameras !== undefined) {
+    const want = Math.max(1, Math.ceil(numCameras / 32));
+    if (spec.cameras.length !== want) {
+      invalid(`cameras must hold CAM_WORDS = ${want} words for ${numCameras} cameras; got ${spec.cameras.length}.`);
+    }
+  }
 }
 
 /** Whether a descriptor asks for anything at all (§19.6, last row). */
@@ -220,7 +343,8 @@ export function aggregateIsEmpty(spec: AggregateSpec | undefined): boolean {
     !spec.regions?.length &&
     !spec.columns?.length &&
     !spec.leafCounts &&
-    !spec.probes?.length
+    !spec.probes?.length &&
+    !spec.projections?.length
   );
 }
 
@@ -232,6 +356,12 @@ export function aggregateIsEmpty(spec: AggregateSpec | undefined): boolean {
 export const REGION_STRIDE_F32 = 12;
 /** u32 per packed slab: lo.xyzw, hi.xyzw, maskLo, maskHi, cellOffset, dimsA, dimsB, axis, pad×6. */
 export const SLAB_STRIDE_U32 = 20;
+/**
+ * Words per packed projection: viewProj[16] then camera, resolution, planeCount,
+ * binOffset, weightOffset, weightStride, maskLo, maskHi. 24 words keeps the
+ * record a multiple of 16 bytes, so the WGSL `array<vec4<f32>>` view lines up.
+ */
+export const PROJECTION_STRIDE_W = 24;
 
 export interface PackedAggregate {
   spec: AggregateSpec;
@@ -254,6 +384,25 @@ export interface PackedAggregate {
   wantLeafCounts: boolean;
   probeCount: number;
   probeData: Float32Array; // probeCount * 3
+  projectionCount: number;
+  /** `projectionCount * PROJECTION_STRIDE_W`, f32 view (the matrix half). */
+  projectionData: Float32Array;
+  /** The same bytes, u32 view (the integer half). */
+  projectionMeta: Uint32Array;
+  /** Every plane's table, concatenated in projection-then-plane order. */
+  projectionWeights: Uint32Array;
+  /** Total accumulator entries across every projection and plane. */
+  projectionBins: number;
+  /** Per projection, in descriptor order — what {@link ProjectionAccum} needs. */
+  projectionShapes: { resolution: number; planeCount: number; binOffset: number }[];
+  /** Whether any projection declared a `maskRegions`; gates Pass 7's region test. */
+  anyProjectionFilter: boolean;
+  /**
+   * `CAM_WORDS`-wide camera filter, padded to 4 words (§19.1). All-ones when the
+   * descriptor named none, so both backends can apply it unconditionally rather
+   * than branching per voxel on whether a filter exists.
+   */
+  cameraMask: Uint32Array;
 }
 
 /**
@@ -347,6 +496,53 @@ export function packAggregate(spec: AggregateSpec): PackedAggregate {
     probeData[i * 3 + 2] = p[2];
   });
 
+  const projections = spec.projections ?? [];
+  const projectionData = new Float32Array(projections.length * PROJECTION_STRIDE_W);
+  const projectionMeta = new Uint32Array(projectionData.buffer);
+  const projectionShapes: PackedAggregate['projectionShapes'] = [];
+  const weightChunks: Uint32Array[] = [];
+  // Whether *any* projection filters, so Pass 7 can skip the per-voxel region
+  // test entirely when none does — the common case for a caller that samples
+  // exactly what it counts.
+  let anyProjectionFilter = false;
+  let binOffset = 0;
+  let weightOffset = 0;
+  projections.forEach((p, i) => {
+    const o = i * PROJECTION_STRIDE_W;
+    for (let m = 0; m < 16; m++) projectionData[o + m] = p.viewProj[m];
+    const planeCount = p.weights.length;
+    const stride = p.weights[0].length;
+    projectionMeta[o + 16] = p.camera;
+    projectionMeta[o + 17] = p.resolution;
+    projectionMeta[o + 18] = planeCount;
+    projectionMeta[o + 19] = binOffset;
+    projectionMeta[o + 20] = weightOffset;
+    projectionMeta[o + 21] = stride;
+    const [pmLo, pmHi] = maskWords(p.maskRegions);
+    projectionMeta[o + 22] = pmLo;
+    projectionMeta[o + 23] = pmHi;
+    if (pmLo !== 0 || pmHi !== 0) anyProjectionFilter = true;
+    projectionShapes.push({ resolution: p.resolution, planeCount, binOffset });
+    for (const table of p.weights) weightChunks.push(table);
+    binOffset += planeCount * p.resolution * p.resolution;
+    weightOffset += planeCount * stride;
+  });
+  const projectionWeights = new Uint32Array(weightOffset);
+  let at = 0;
+  for (const table of weightChunks) {
+    projectionWeights.set(table, at);
+    at += table.length;
+  }
+
+  // Padded to 4 words and defaulted to all-ones: the shaders index `camMask[w]`
+  // for `w < CAM_WORDS` unconditionally, and a descriptor that named no filter
+  // must then read as "every bit counts" rather than as an empty mask.
+  const cameraMask = new Uint32Array(4).fill(0xffffffff);
+  if (spec.cameras) {
+    cameraMask.fill(0);
+    cameraMask.set(spec.cameras.subarray(0, 4));
+  }
+
   return {
     spec,
     regionCount: regions.length,
@@ -361,6 +557,14 @@ export function packAggregate(spec: AggregateSpec): PackedAggregate {
     wantLeafCounts: !!spec.leafCounts,
     probeCount: probes.length,
     probeData,
+    projectionCount: projections.length,
+    projectionData,
+    projectionMeta,
+    projectionWeights,
+    projectionBins: binOffset,
+    projectionShapes,
+    anyProjectionFilter,
+    cameraMask,
   };
 }
 
@@ -662,6 +866,35 @@ function groupsOf(packed: PackedAggregate, lo: number, hi: number): number {
   return m >>> 0;
 }
 
+/**
+ * The bin a world point lands in for packed projection `p`, or `-1` when it is
+ * outside the image (§19.3 Pass 7).
+ *
+ * Mirrors the WGSL `projectionBin` — same column-major matrix multiply, same
+ * `floor`, same clamp, same top-down `y`. The CPU path computes in f64 and the
+ * shader in f32, so a voxel within float epsilon of a bin edge can land either
+ * side; that is the same boundary caveat `regionMask` carries (§19.5), and it
+ * moves a weight between neighbouring bins rather than losing it.
+ */
+export function projectionBin(
+  packed: PackedAggregate,
+  p: number,
+  x: number,
+  y: number,
+  z: number,
+): number {
+  const d = packed.projectionData;
+  const o = p * PROJECTION_STRIDE_W;
+  const cw = d[o + 3] * x + d[o + 7] * y + d[o + 11] * z + d[o + 15];
+  if (!(cw > 0)) return -1;
+  const cx = d[o + 0] * x + d[o + 4] * y + d[o + 8] * z + d[o + 12];
+  const cy = d[o + 1] * x + d[o + 5] * y + d[o + 9] * z + d[o + 13];
+  const r = packed.projectionMeta[o + 17];
+  const bx = Math.min(r - 1, Math.max(0, Math.floor((cx / cw) * 0.5 * r + 0.5 * r)));
+  const by = Math.min(r - 1, Math.max(0, Math.floor(0.5 * r - (cy / cw) * 0.5 * r)));
+  return by * r + bx;
+}
+
 function maskAllows(filterLo: number, filterHi: number, lo: number, hi: number): boolean {
   if (filterLo === 0 && filterHi === 0) return true;
   return ((filterLo & lo) | (filterHi & hi)) !== 0;
@@ -680,7 +913,11 @@ export function aggregateChunkCPU(input: AggregateChunkInput): AggregateResult {
   const wantRegions = packed.regionCount > 0;
   const wantColumns = packed.slabCount > 0;
   const wantLeaves = packed.wantLeafCounts;
-  const needMask = wantRegions || wantColumns || wantLeaves;
+  const wantProjections = packed.projectionCount > 0;
+  const needMask = wantRegions || wantColumns || wantLeaves || wantProjections;
+  // §19.1: applied unconditionally — `packAggregate` defaults it to all-ones, so
+  // there is no per-voxel branch on whether a filter was named.
+  const cm = packed.cameraMask;
 
   const regionStride = REGION_BASE_FIELDS + numCameras;
   const entryCount = packed.regionCount + packed.groupCount;
@@ -689,6 +926,7 @@ export function aggregateChunkCPU(input: AggregateChunkInput): AggregateResult {
   const colSeen = wantColumns ? new Uint32Array(packed.totalCells * camWords) : null;
   const counts = wantLeaves ? new Uint8Array(voxelCount) : null;
   const leafValid = wantLeaves ? new Uint32Array((voxelCount + 31) >> 5) : null;
+  const projFlat = wantProjections ? new Uint32Array(packed.projectionBins) : null;
 
 
   if (needMask) {
@@ -705,18 +943,22 @@ export function aggregateChunkCPU(input: AggregateChunkInput): AggregateResult {
           // the region test cannot be skipped on validity alone.
           const wantHere = isValid || wantColumns;
           if (!wantHere) continue;
-          const [rLo, rHi] = wantRegions ? regionMask(packed, cx, cy, cz) : [0, 0];
+          const [rLo, rHi] = wantRegions || packed.anyProjectionFilter
+            ? regionMask(packed, cx, cy, cz)
+            : [0, 0];
 
           let camCount = 0;
           if (isValid && visibility) {
-            for (let w = 0; w < camWords; w++) camCount += popcount32(visibility[li * camWords + w]);
+            for (let w = 0; w < camWords; w++) {
+              camCount += popcount32(visibility[li * camWords + w] & cm[w]);
+            }
           }
 
           if (wantRegions && isValid) {
             for (let r = 0; r < packed.regionCount; r++) {
               const inR = r < 32 ? (rLo >>> r) & 1 : (rHi >>> (r - 32)) & 1;
               if (!inR) continue;
-              addRegion(regionFlat!, r * regionStride, camCount, li, camWords, visibility, numCameras);
+              addRegion(regionFlat!, r * regionStride, camCount, li, camWords, visibility, numCameras, cm);
             }
             let groups = packed.groupCount > 0 ? groupsOf(packed, rLo, rHi) : 0;
             while (groups !== 0) {
@@ -730,6 +972,7 @@ export function aggregateChunkCPU(input: AggregateChunkInput): AggregateResult {
                 camWords,
                 visibility,
                 numCameras,
+                cm,
               );
             }
           }
@@ -738,6 +981,34 @@ export function aggregateChunkCPU(input: AggregateChunkInput): AggregateResult {
             if (maskAllows(packed.leafMask[0], packed.leafMask[1], rLo, rHi)) {
               counts![li] = Math.min(255, camCount);
               leafValid![li >> 5] |= 1 << (li & 31);
+            }
+          }
+
+          if (wantProjections && isValid && visibility) {
+            const meta = packed.projectionMeta;
+            for (let p = 0; p < packed.projectionCount; p++) {
+              const o = p * PROJECTION_STRIDE_W;
+              // The §19.1 filter: a sampled set may be conservative, a counted
+              // set may not.
+              if (!maskAllows(meta[o + 22], meta[o + 23], rLo, rHi)) continue;
+              const cam = meta[o + 16];
+              const cwIdx = cam >>> 5;
+              // The camera's own mask bit is the whole membership test (§19.3):
+              // it already encodes frustum, range, and occlusion, so a second
+              // test here could only disagree with the engine.
+              if (cwIdx >= camWords) continue;
+              if (((visibility[li * camWords + cwIdx] >>> (cam & 31)) & 1) === 0) continue;
+              const bin = projectionBin(packed, p, cx, cy, cz);
+              if (bin < 0) continue;
+              const planes = meta[o + 18];
+              const res = meta[o + 17];
+              const wOff = meta[o + 20];
+              const wStride = meta[o + 21];
+              const bOff = meta[o + 19];
+              const n = Math.min(camCount, wStride - 1);
+              for (let pl = 0; pl < planes; pl++) {
+                projFlat![bOff + pl * res * res + bin] += packed.projectionWeights[wOff + pl * wStride + n];
+              }
             }
           }
 
@@ -775,7 +1046,7 @@ export function aggregateChunkCPU(input: AggregateChunkInput): AggregateResult {
               if (cap > colFlat![co + COLUMN_FIELD.max]) colFlat![co + COLUMN_FIELD.max] = cap;
               if (visibility) {
                 for (let w = 0; w < camWords; w++) {
-                  colSeen![ci * camWords + w] |= visibility[li * camWords + w];
+                  colSeen![ci * camWords + w] |= visibility[li * camWords + w] & cm[w];
                 }
               }
             }
@@ -793,6 +1064,7 @@ export function aggregateChunkCPU(input: AggregateChunkInput): AggregateResult {
     }
   }
   if (wantColumns) result.columns = assembleColumns(colFlat!, colSeen!, packed, camWords);
+  if (wantProjections) result.projections = assembleProjections(projFlat!, packed);
   if (wantLeaves) result.leafCounts = mergeLeafCounts(counts!, leafValid!, dims);
   if (packed.probeCount > 0) {
     const { probeMasks, probeHits } = resolveProbes(input);
@@ -810,13 +1082,14 @@ function addRegion(
   camWords: number,
   visibility: Uint32Array | null,
   numCameras: number,
+  cameraMask: Uint32Array,
 ): void {
   flat[o] += 1;
   if (camCount > 0) flat[o + 1] += 1;
   else flat[o + 2] += 1;
   if (!visibility) return;
   for (let w = 0; w < camWords; w++) {
-    let word = visibility[li * camWords + w] >>> 0;
+    let word = (visibility[li * camWords + w] & cameraMask[w]) >>> 0;
     while (word !== 0) {
       const bit = 31 - Math.clz32(word & -word);
       word &= word - 1;
@@ -861,6 +1134,15 @@ export function assembleColumns(
   });
 }
 
+/** Flat projection accumulator → the public {@link ProjectionAccum}s. Shared by both backends. */
+export function assembleProjections(flat: Uint32Array, packed: PackedAggregate): ProjectionAccum[] {
+  return packed.projectionShapes.map(({ resolution, planeCount, binOffset }) => ({
+    resolution,
+    planeCount,
+    bins: flat.slice(binOffset, binOffset + planeCount * resolution * resolution),
+  }));
+}
+
 /**
  * Probe lookups (§19.3): resolved on the CPU on both backends. A handful of
  * `O(1)` reads do not repay a dispatch and a staging segment; they are an
@@ -887,7 +1169,9 @@ export function resolveProbes(input: AggregateChunkInput): {
     }
     probeHits[p] = ProbeHit.Valid;
     if (!visibility) continue; // all-zero masks: the probe is valid and seen by nobody
-    for (let w = 0; w < camWords; w++) probeMasks[p * camWords + w] = visibility[li * camWords + w];
+    for (let w = 0; w < camWords; w++) {
+      probeMasks[p * camWords + w] = visibility[li * camWords + w] & packed.cameraMask[w];
+    }
   }
   return { probeMasks, probeHits };
 }
@@ -937,6 +1221,28 @@ export function emptyColumns(dimsA: number, dimsB: number, camWords: number): Co
     filteredCount: new Uint32Array(n),
     seenWords: new Uint32Array(n * camWords),
   };
+}
+
+/**
+ * Add a chunk's projection accumulators into a running total, in place (§19.2).
+ *
+ * Bins add rather than OR because a bin is a *sum of weights*, and two chunks
+ * legitimately contribute voxels to the same bin — the mount point's angular
+ * neighbourhood does not respect chunk boundaries. The target is `Float64Array`
+ * so a scene-wide total cannot overflow the per-chunk `u32` the shader is bound
+ * to (§19.2's fixed-point note).
+ */
+export function mergeProjections(into: Float64Array[], from: readonly ProjectionAccum[]): void {
+  for (let p = 0; p < into.length && p < from.length; p++) {
+    const src = from[p].bins;
+    const dst = into[p];
+    for (let b = 0; b < dst.length && b < src.length; b++) dst[b] += src[b];
+  }
+}
+
+/** Zeroed merge targets matching a descriptor's projections (§19.2). */
+export function emptyProjections(specs: readonly AggregateProjection[]): Float64Array[] {
+  return specs.map((s) => new Float64Array(s.weights.length * s.resolution * s.resolution));
 }
 
 /** A zeroed region-accumulator set of `count` entries. */

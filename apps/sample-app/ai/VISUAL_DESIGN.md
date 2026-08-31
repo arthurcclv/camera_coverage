@@ -47,6 +47,20 @@ Semantic colors always pair a bright foreground with a dark, desaturated
 background of the same hue (the badge pattern) — reuse that pattern for any new
 status chip.
 
+### Aim-optimizer heatmap (`aim_optimization.md` §5.2)
+| Role | Value | Notes |
+|---|---|---|
+| Score ramp | `rgb(20+235·t^0.8, 30+150·t^1.4, 70+40·(1−t))` | deep blue → amber |
+| Panel type scale | 12 px, `#d5dae2` values on `#7c8592` labels | `.aim-stats`, `.aim-summary` |
+| Gain figure | `#ffb84d` | the amber already used for "something changed" |
+
+The ramp deliberately **does not** reuse the coverage legend's palette. The heatmap
+answers a different question — *what would this camera be worth aimed here* — and two
+images in the same colors invite reading one as the other. It shares only the
+direction: cold is low, hot is high. It is normalized to its own panorama's maximum, so
+it is readable within one camera and **not** comparable across cameras; the numeric
+readout beside it is what carries absolute value.
+
 ### 3D viewport (Three.js gizmos, not CSS)
 | Element | Color | Source |
 |---|---|---|
@@ -195,6 +209,23 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   sections, or probes. The colour is the load-bearing difference: red means the
   panel below it is empty, amber means it is populated but incomplete, so the two
   must never be styled alike.
+
+- **Score heatmap** (`.aim-heatmap`): a 2:1 canvas of yaw × pitch, 2° per pixel,
+  `image-rendering: pixelated` and a crosshair cursor. Pixelated on purpose — smoothing
+  would imply an angular resolution the panorama does not have. Hovering it previews that
+  orientation in the viewport and **clicking picks it** for Apply, so the canvas is a
+  full *input*, not a legend — which is why it takes a crosshair rather than the default
+  cursor.
+- **Definition list** (`.aim-stats`) and **compact table** (`.aim-summary`): tabular
+  numerals, one-line rows, no headers. Used where a panel reports a handful of
+  before/after figures and a table header would outweigh the data.
+- **Comparison table** (`.aim-summary.aim-compare`): the same table with a header row,
+  for the measured per-zone before/after (`aim_optimization.md` §6.3). Deltas are colored
+  by direction — `#4de08a` for an improvement, `#ffb84d` for a regression — reusing the
+  app's existing success/warning hues rather than inventing a diverging scale, and a
+  regression additionally raises the amber `.warning-banner`. The union row is bold. The
+  colour is load-bearing: a zone that *lost* coverage is the one finding the user must act
+  on, and it must not read like the rows around it.
 
 ## Accessibility
 

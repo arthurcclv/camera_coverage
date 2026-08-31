@@ -13,14 +13,22 @@ export interface RunBarProps {
   autoRun: boolean;
   onAutoRunChange(autoRun: boolean): void;
   onRun(): void;
+  /**
+   * Suppress the Run button for a reason that is not engine status — an open
+   * aim-optimize session, which owns the engine's camera list for its duration
+   * (`aim_optimization.md` §3.1, §8.1).
+   */
+  runDisabled?: boolean;
 }
 
-export function RunBar({ status, stale, backend, errorMessage, warnings, autoRun, onAutoRunChange, onRun }: RunBarProps) {
+export function RunBar({
+  status, stale, backend, errorMessage, warnings, autoRun, onAutoRunChange, onRun, runDisabled,
+}: RunBarProps) {
   const busy = status === 'initializing' || status === 'computing';
   return (
     <div className="panel">
       <div className="status-line">
-        <button className="btn" disabled={busy} onClick={onRun}>
+        <button className="btn" disabled={busy || runDisabled} onClick={onRun}>
           {status === 'computing' ? 'Running…' : status === 'initializing' ? 'Initializing…' : 'Run coverage'}
         </button>
         <label className="checkbox-row" style={{ margin: 0 }}>

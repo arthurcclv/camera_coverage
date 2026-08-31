@@ -320,3 +320,32 @@ test('sceneReplaced resets flags, forces sampling re-apply, keeps collapse, sele
   assert.equal(s.samplingDirty, true);
   assert.equal(s.collapsedIds.has('group:cameras'), true); // collapse state survives import
 });
+
+test('toggleAimLock flips the flag and never marks stale (aim_optimization.md §4.5)', () => {
+  // The lock is app-only: it changes which cameras the optimizer touches, not
+  // anything the engine computes, so a toggle must not trigger a recompute.
+  const s = run(base(), { type: 'toggleAimLock', id: 'cam-1' });
+  assert.equal(s.cameras[0].aimLocked, true);
+  assert.equal(s.stale, false);
+  const back = run(s, { type: 'toggleAimLock', id: 'cam-1' });
+  assert.equal(back.cameras[0].aimLocked, false);
+  assert.equal(back.stale, false);
+});
+
+test('applyAims writes every proposal in one edit and marks stale once (aim_optimization.md §6.2)', () => {
+  const scene: Scene = {
+    geometry: [], cameras: [cam('cam-1'), cam('cam-2'), cam('cam-3')], probes: [], sections: [],
+    clipSectionId: null, zones: [], volumes: [], useZones: false,
+  };
+  const start = { ...initSceneState(scene), hasRunOnce: true };
+  const rotations = new Map<string, [number, number, number, number]>([
+    ['cam-1', [0, 1, 0, 0]],
+    ['cam-3', [0, 0, 1, 0]],
+  ]);
+
+  const s = run(start, { type: 'applyAims', rotations });
+  assert.deepEqual(s.cameras[0].rotation, [0, 1, 0, 0]);
+  assert.deepEqual(s.cameras[1].rotation, start.cameras[1].rotation, 'a camera with no proposal moved');
+  assert.deepEqual(s.cameras[2].rotation, [0, 0, 1, 0]);
+  assert.equal(s.stale, true);
+});

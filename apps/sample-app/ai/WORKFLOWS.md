@@ -23,8 +23,9 @@ type-stripping) is required for the tests.
 Same discipline as the rest of the repo — do not implement ahead of an approved
 spec change:
 
-1. **Read** the relevant section of `specs/spec.md` (or
-   `specs/volumetric_rendering.md` for the overlay) first.
+1. **Read** the relevant section of `specs/spec.md` (or the feature docs beside it:
+   `specs/volumetric_rendering.md` for the overlay, `specs/sampling_volumes.md` for
+   zones, `specs/aim_optimization.md` for the aim optimizer) first.
 2. **Write the spec edit** describing the new/changed behavior and **get approval**
    before coding.
 3. **Implement** against the approved spec.
@@ -68,6 +69,11 @@ Then add a test — for the reducer transition and/or the pure function.
   Existing pattern to follow: `coverageOverlay.test.ts`, `viewportSelection.test.ts`,
   `volumetric.test.ts`.
 - Every change ships with a test.
+- **Engine-driven features:** `test/optimizeAcceptance.test.ts` is the pattern where a
+  derivation must be checked against the *real* engine — it drives `CoverageEngine`
+  under `backend: 'cpu'` directly (no worker, no React) and brute-forces a ground truth
+  the implementation shares no code with. It runs in well under a second; reach for it
+  when a feature's correctness is a claim about what the SDK would have computed.
 - **Pointer-interaction features:** extract the geometry into a pure function that
   takes plain numbers, and test *that*. `scene/reorder.ts` is the pattern —
   `insertionTargetAt` takes a pointer Y plus row extents as data, so the midpoint and

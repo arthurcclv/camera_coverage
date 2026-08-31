@@ -81,6 +81,18 @@ export type SceneAction =
   /** Hierarchy drag-reorder (§5.5.1): move `id` before sibling `beforeId`, or last when null. */
   | { type: 'reorderEntity'; kind: EntityKind; id: string; beforeId: string | null }
   | { type: 'changeCamera'; id: string; patch: Partial<CameraConfig> }
+  /**
+   * Toggle a camera's aim lock (`aim_optimization.md` §4.5). Separate from
+   * `changeCamera` because the flag is app-only and changes nothing the engine
+   * computes, so it must **not** mark the result stale.
+   */
+  | { type: 'toggleAimLock'; id: string }
+  /**
+   * Adopt the optimizer's proposals (`aim_optimization.md` §6.2). One action
+   * rather than one per camera: the whole set is one edit, and dispatching N
+   * would mark the result stale N times and fire N auto-runs.
+   */
+  | { type: 'applyAims'; rotations: ReadonlyMap<string, Quat> }
   | { type: 'changeProbe'; id: string; position: Vec3 }
   | { type: 'changeSection'; id: string; patch: Partial<Section> }
   | { type: 'changeVolume'; id: string; patch: Partial<SamplingVolume> }
@@ -292,6 +304,23 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
       return {
         ...state,
         cameras: state.cameras.map((c) => (c.id === action.id ? { ...c, ...action.patch } : c)),
+        ...cameraInput(state),
+      };
+
+    case 'toggleAimLock':
+      // App-only flag: no `cameraInput`, so it never marks the result stale.
+      return {
+        ...state,
+        cameras: state.cameras.map((c) => (c.id === action.id ? { ...c, aimLocked: !c.aimLocked } : c)),
+      };
+
+    case 'applyAims':
+      return {
+        ...state,
+        cameras: state.cameras.map((c) => {
+          const rotation = action.rotations.get(c.id);
+          return rotation ? { ...c, rotation } : c;
+        }),
         ...cameraInput(state),
       };
 
