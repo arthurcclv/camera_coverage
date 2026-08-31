@@ -19,8 +19,8 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
 1. **React UI** — `App.tsx` owns *all* state and layout; `ui/*` components are
    presentational, driven by props and callbacks.
 2. **SceneView** (`scene/sceneView/`) — owns everything Three.js behind one small
-   interface (`sync` · `onSelect` · `onTransform` · `resetCoverage`/
-   `addCoverageChunk` · `dispose`). React holds the canonical data and pushes one
+   interface (`sync` · `onSelect` · `onTransform` · `beginCoverageRun`/
+   `addCoverageCounts` · `dispose`). React holds the canonical data and pushes one
    snapshot per change through `sync()`, which diffs each field by reference and
    drives the `scene/*` imperative objects (gizmos, overlay, viewport); selection
    and transform edits come back as resolved events. There is no
@@ -52,11 +52,13 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
   carry `enabled: false` rather than being filtered out — spec §5.4, see
   DECISIONS.md), builds a `WorkspaceGrid`, and calls
   `compute({ mode: 1, incremental: true, onRunStart, onChunkDone })`.
-  `onRunStart` decides the consumers' lifecycle: on a **full** run it resets them via
-  `coverageRun.reset(grid, ids)` (probe-visibility, section-heatmap, and
-  zone-coverage stores) plus the overlay inline (`SceneView.resetCoverage()`); on an
-  **incremental** run it resets nothing, because each store is keyed by `chunkId` and an
-  arriving chunk replaces just that entry (SDK spec §13.1). Each streamed chunk then
+  `onRunStart` decides the consumers' lifecycle: on a **full** run it resets the
+  three stores via `coverageRun.reset(grid, ids)` (probe-visibility,
+  section-heatmap, and zone-coverage); on an **incremental** run it resets nothing,
+  because each store is keyed by `chunkId` and an arriving chunk replaces just that
+  entry (SDK spec §13.1). Either way it opens the overlay's run inline with
+  `SceneView.beginCoverageRun(grid.voxelSize, { incremental })`, which both binds
+  the run's one resolution and clears the retained chunks when the run is full. Each streamed chunk then
   feeds `coverageRun.addChunk()` (the three stores) and the overlay
   (`SceneView.addCoverageChunk()`) — **four** retained-data consumers, three
   behind the coordinator and the overlay inline (SceneView owns it). After the last
@@ -136,7 +138,7 @@ default" — see DECISIONS.md).
   the `SceneView` class: it constructs and owns the viewport + all gizmo sets +
   the overlay, wires the pick raycaster and the pointer/`objectChange` listeners,
   and presents `create` · `sync(SceneViewState)` · `onSelect` · `onTransform` ·
-  `onPlace` · `resetCoverage`/`addCoverageCounts` · `dispose`. `sync` diffs each
+  `onPlace` · `beginCoverageRun`/`addCoverageCounts`/`clearCoverage` · `dispose`. `sync` diffs each
   snapshot field by reference and fans it out to the objects below; drags come back
   as resolved `onTransform` events, clicks as resolved `onSelect`, and an armed
   "Place on surface" hit as an `onPlace` world point. The decision logic it owns

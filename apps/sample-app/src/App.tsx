@@ -879,7 +879,7 @@ export function App() {
       setSummary(null);
       setInitializedVoxelSize(null);
       initializedRoomRef.current = null;
-      viewRef.current?.resetCoverage(); // the overlay lives in SceneView
+      viewRef.current?.clearCoverage(); // the overlay lives in SceneView
       void cancelInFlight(); // spec §14.4 step 4, now an actual cancel (SDK §13.2)
       coverageRun.clear(); // wipes the three stores + invalidates in-flight runs
       setMasksVersion((v) => v + 1);
@@ -1103,19 +1103,15 @@ export function App() {
         // A full run re-sends every chunk, so the stores start empty. An
         // incremental run re-sends only a few — clearing here would blank the
         // rest of the scene, silently (spec §8).
-        if (!incremental) {
-          coverageRun.reset(grid, runCameras, descriptor);
-          viewRef.current?.resetCoverage();
-        } else {
-          viewRef.current?.beginCoverageRun();
-        }
+        if (!incremental) coverageRun.reset(grid, runCameras, descriptor);
+        viewRef.current?.beginCoverageRun(grid.voxelSize, { incremental });
       },
       onAggregate: (result) => {
         // A newer scene may have replaced (and cleared) the store mid-stream;
         // don't let a stale chunk's accumulators repopulate it (spec §14.4).
         if (!coverageRun.isCurrent(gen)) return;
         const chunk = grid.chunk(result.chunkId);
-        viewRef.current?.addCoverageCounts(result, chunk.origin, chunk.dims, grid.voxelSize);
+        viewRef.current?.addCoverageCounts(result, chunk.origin, chunk.dims);
         coverageRun.addResult(result);
       },
     });
@@ -1166,10 +1162,12 @@ export function App() {
       coverageRun.adopt(aggregate, collected);
       const view = viewRef.current;
       if (view) {
-        view.resetCoverage();
+        // A re-aggregation replaces every retained chunk, so it starts like a
+        // full run rather than an incremental one.
+        view.beginCoverageRun(runGrid.voxelSize, { incremental: false });
         for (const r of collected) {
           const chunk = runGrid.chunk(r.chunkId);
-          view.addCoverageCounts(r, chunk.origin, chunk.dims, runGrid.voxelSize);
+          view.addCoverageCounts(r, chunk.origin, chunk.dims);
         }
         view.flushCoverage();
       }

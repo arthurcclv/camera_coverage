@@ -29,11 +29,17 @@ import { RenderOrder } from './renderOrder.ts';
 
 export type OverlayMode = 'coverage' | 'blindspots';
 
-/** One chunk's contribution: its merged leaves plus where the chunk sits. */
+/**
+ * One chunk's contribution: its merged leaves plus where the chunk sits.
+ *
+ * No `voxelSize` here. It is a single field on the `WorkspaceGrid` every chunk is
+ * cut from, so every retained chunk necessarily shares one — see the overlay's
+ * own {@link CoverageOverlay.voxelSize}. `origin` and `dims` genuinely do differ
+ * per chunk (edge chunks are clamped), so those stay.
+ */
 interface ChunkLeaves {
   origin: Vec3;
   dims: [number, number, number];
-  voxelSize: number;
   leaves: LeafCounts;
 }
 
@@ -96,6 +102,17 @@ export class CoverageOverlay {
    * predecessor rather than pile on top of it.
    */
   private chunks = new Map<number, ChunkLeaves>();
+  /**
+   * The resolution every retained chunk was cut at, bound once per run by
+   * {@link beginRun} rather than repeated on each arriving chunk.
+   *
+   * The map cannot mix resolutions: `voxelSize` is one field on the run's
+   * `WorkspaceGrid`, and changing it re-`init()`s the grid, which discards the
+   * incremental baseline and forces the next run full — and a full run clears
+   * the map before it streams. Holding it here makes that invariant structural
+   * instead of a convention every caller has to keep. 0 == nothing retained.
+   */
+  private voxelSize = 0;
   /** Whether a run is streaming — while it is, `rebuild()` is deferred to `flush()`. */
   private streaming = false;
   private opts: OverlayOptions = {
@@ -107,28 +124,46 @@ export class CoverageOverlay {
   };
 
   /**
-   * Clear accumulated chunks before a **full** run (spec §8). An incremental run
-   * must NOT call this — it streams only a few chunks, so clearing first would
-   * blank the rest of the overlay with no error. Call {@link beginRun} instead.
+   * Empty the overlay outright — every retained chunk and the resolution they
+   * were retained at. This is the scene replace (spec §14.4), where no run
+   * follows, so it rebuilds straight away rather than waiting for a flush.
+   *
+   * Not for the start of a full run: use {@link beginRun}, which is what binds
+   * the run's `voxelSize`.
    */
-  reset(): void {
+  clear(): void {
     this.chunks.clear();
-    // Rebuild straight away rather than waiting for a flush: `reset()` is also
-    // how a scene replace empties the overlay (spec §14.4), and that clear has
-    // to be visible even when no run follows it.
-    this.streaming = true;
+    this.voxelSize = 0;
+    this.streaming = false;
     this.rebuild();
   }
 
   /**
-   * Enter streaming mode: `addResult` retains without rebuilding until
-   * {@link flush}. `rebuild()` walks every retained chunk and re-uploads the whole
-   * renderer, so doing it per arriving chunk is quadratic in chunk count — and on
-   * an incremental run it would cost a full-scene rebuild per recomputed chunk,
-   * cancelling the saving that run just bought (spec §9).
+   * Enter streaming mode for one run at `voxelSize`: `addResult` retains without
+   * rebuilding until {@link flush}. `rebuild()` walks every retained chunk and
+   * re-uploads the whole renderer, so doing it per arriving chunk is quadratic in
+   * chunk count — and on an incremental run it would cost a full-scene rebuild
+   * per recomputed chunk, cancelling the saving that run just bought (spec §9).
+   *
+   * A **full** run (spec §8) re-sends every chunk, so it drops what is retained
+   * first and adopts the new resolution. An **incremental** run re-sends only a
+   * few and every other chunk must stand, so it keeps them — which is only sound
+   * at the resolution they were computed at. A mismatch there means the grid
+   * changed without forcing a full run, and throws rather than drawing a mix.
    */
-  beginRun(): void {
+  beginRun(voxelSize: number, opts: { incremental: boolean }): void {
     this.streaming = true;
+    if (opts.incremental) {
+      if (voxelSize !== this.voxelSize) {
+        throw new Error(
+          `incremental run at voxelSize ${voxelSize} against chunks retained at ${this.voxelSize}`,
+        );
+      }
+      return;
+    }
+    this.chunks.clear();
+    this.voxelSize = voxelSize;
+    this.rebuild();
   }
 
   /** Leave streaming mode and rebuild once, at the end of a run (spec §9). */
@@ -144,10 +179,10 @@ export class CoverageOverlay {
    * The arrays are adopted, not copied: they were transferred across the Worker
    * boundary for this purpose and nothing else holds them.
    */
-  addResult(result: AggregateResult, origin: Vec3, dims: [number, number, number], voxelSize: number): void {
+  addResult(result: AggregateResult, origin: Vec3, dims: [number, number, number]): void {
     const leaves = result.leafCounts;
     if (!leaves) return;
-    this.chunks.set(result.chunkId, { origin, dims, voxelSize, leaves });
+    this.chunks.set(result.chunkId, { origin, dims, leaves });
     if (!this.streaming) this.rebuild();
   }
 
@@ -187,7 +222,7 @@ export class CoverageOverlay {
       const { dropped } = this.renderer.addVoxelLeaves({
         origin: c.origin,
         dims: c.dims,
-        voxelSize: c.voxelSize,
+        voxelSize: this.voxelSize,
         index: c.leaves.index,
         edge: c.leaves.size,
         keys: c.leaves.count,

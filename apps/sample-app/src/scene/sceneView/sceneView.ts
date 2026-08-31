@@ -258,31 +258,29 @@ export class SceneView {
     this.placeHandler = handler;
   }
 
-  /** Clear the coverage overlay's retained chunks before a **full** run (spec §9, §14.4). */
-  resetCoverage(): void {
-    this.overlay.reset();
+  /** Empty the coverage overlay outright, with no run following (spec §14.4). */
+  clearCoverage(): void {
+    this.overlay.clear();
   }
 
   /**
-   * Begin streaming a run without clearing — the incremental case (spec §8), where
-   * arriving chunks replace their predecessors and every other chunk stands.
+   * Begin streaming a coverage run at the run grid's `voxelSize` (spec §9). A full
+   * run drops the retained chunks first; an incremental one (spec §8) keeps them,
+   * so arriving chunks replace their predecessors and every other chunk stands.
    */
-  beginCoverageRun(): void {
-    this.overlay.beginRun();
+  beginCoverageRun(voxelSize: number, opts: { incremental: boolean }): void {
+    this.overlay.beginRun(voxelSize, opts);
   }
 
   /**
    * Feed one chunk's `leafCounts` aggregation into the coverage overlay (spec
-   * §3.3, §9). The chunk's geometry comes from the caller's `WorkspaceGrid`,
+   * §3.3, §9). The chunk's placement comes from the caller's `WorkspaceGrid`,
    * since an `AggregateResult` carries a `chunkId` and accumulators, not a place.
+   * The resolution does not: it is the whole run's, bound by
+   * {@link beginCoverageRun}.
    */
-  addCoverageCounts(
-    result: AggregateResult,
-    origin: Vec3,
-    dims: [number, number, number],
-    voxelSize: number,
-  ): void {
-    this.overlay.addResult(result, origin, dims, voxelSize);
+  addCoverageCounts(result: AggregateResult, origin: Vec3, dims: [number, number, number]): void {
+    this.overlay.addResult(result, origin, dims);
   }
 
   /** Rebuild the overlay once, after a run's last chunk (spec §9). */
