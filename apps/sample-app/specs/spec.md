@@ -71,6 +71,7 @@ apps/sample-app/
       probeGizmos.ts       per-probe markers + selected-probe sightlines (§12.4)
       probeVisibility.ts   retained ChunkResults + world-point → camera-mask lookup (§12.2)
       volumetric.ts        voxel volumetric renderer (§2.3, volumetric_rendering.md)
+      sceneLighting.ts     the viewport's fixed four-light rig (§2.3.1)
       coverageOverlay.ts   maps ChunkResult coverage → volumetric voxels (§9)
       sectionHeatmap.ts    retained ChunkResults → per-section column aggregate + heatmap texture + stats (§13)
       heatmapLegend.ts     Turbo colormap + hue ramp + legend-scale builders (section camera-count/blind + coverage-fraction + coverage-overlay hue modes) (§13.5, §13.6, §9)
@@ -190,6 +191,38 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
   backends.
 - `WebGPURenderer` initializes **asynchronously** (`await renderer.init()` before the
   first frame); viewport setup accounts for this.
+
+### 2.3.1 Scene lighting
+
+The viewport lights the scene with **four fixed lights** — no shadow maps, no
+environment map, and no user controls. The goal is legibility rather than realism:
+**every surface must be readable from every viewing angle**, since the user orbits
+freely to judge coverage and a face that renders black cannot be judged at all.
+
+| Light | Color | Intensity | Position |
+| --- | --- | --- | --- |
+| `HemisphereLight` | sky `#ffffff` / ground `#6a6f7a` | 1.1 | — |
+| `DirectionalLight` (key) | `#ffffff` | 1.4 | `(15, 25, 10)` |
+| `DirectionalLight` (fill) | `#ffffff` | 0.5 | `(-15, 8, -10)` |
+| `AmbientLight` | `#ffffff` | 0.5 | — |
+
+- The **key** light establishes form; the **fill** light sits roughly opposite it
+  and lower, so surfaces facing away from the key are shaded rather than black —
+  and the geometry keeps its shape, which a bare ambient lift would flatten.
+- The hemisphere **ground** color is a mid grey, deliberately *not* the near-black
+  `#30323a` of the UI panel palette: it is bounce light, not chrome, and a dark
+  ground color is what makes downward-facing faces read as unlit holes.
+- `AmbientLight` sets the floor brightness no surface falls below.
+- Loaded glTF materials are used **as authored** — only `side` is overridden
+  (§14.6). Consequently a material authored as **fully metallic**
+  (`metalness: 1.0`) still renders black under this rig, because a metal surface
+  shows only reflections and there is no environment map for it to reflect. That
+  is a known limitation of the asset, not a lighting bug; the fix is to author
+  non-unit metalness.
+
+The rig lives in `scene/sceneLighting.ts` rather than inline in `viewport.ts`, so
+its invariants are testable without a `WebGPURenderer` (which needs a real GPU
+adapter).
 
 ### 2.4 Viewport toolbar
 

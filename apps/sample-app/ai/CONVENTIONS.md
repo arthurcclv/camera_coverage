@@ -101,7 +101,9 @@ compile error instead (`ui/entityMenu.ts`). The same reasoning covers the reduce
   Most suites are pure: `sceneTree`, `coverageOverlay`, `transformSpace`,
   `volumetric`, `leftPanelSplit`, `probeVisibility`, `viewportSelection`,
   `sectionHeatmap`, `sceneReducer`, `coverageRun` (the run coordinator: generation
-  guard + reset/addChunk/clear fan-out), `sceneView/pick`, `sceneView/transformReadback`.
+  guard + reset/addChunk/clear fan-out), `sceneView/pick`, `sceneView/transformReadback`,
+  `sceneLighting` (the viewport's light rig, extracted from `viewport.ts` precisely
+  so it is reachable here).
   A few drive real (renderer-free) Three.js gizmo objects and assert on their
   state — `cameraGizmos`, `samplingVolumeGizmos`, and `gizmoSet` (the shared spine,
   via a minimal subclass: reconcile/dispose/getAttachTarget/pickHit) — which is how

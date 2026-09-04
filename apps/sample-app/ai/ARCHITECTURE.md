@@ -245,12 +245,22 @@ default" — see DECISIONS.md).
   the status/prompt/error strings. Generic over the handle type — only `.name` is
   read — so `test/saveTarget.test.ts` needs no File System Access API. App.tsx
   holds the handle and does the awaits; every decision lives here.
-- `viewport.ts` — async `WebGPURenderer` init, orbit + transform controls, lights,
-  grid, render loop, and the five view cameras of the View selector. The
+- `viewport.ts` — async `WebGPURenderer` init, orbit + transform controls, the
+  light rig (from `sceneLighting.ts`), grid, render loop, and the five view
+  cameras of the View selector. The
   **Selected** view (spec §2.4.1) is driven through `setCameraViewSource` and
   publishes its frame-guide rect back out via the `onCameraGuide` option, so the
   outline App draws and the FOV the renderer used come from one `fitCameraView`
   call and cannot disagree.
+- `sceneLighting.ts` — `createSceneLights()`: the viewport's fixed four-light rig
+  (hemisphere + key/fill directionals + ambient, spec §2.3.1). A pure factory
+  returning a `SceneLights` record keyed by role — not an array, so neither the
+  caller nor the tests depend on add order — and holding no scene reference, so
+  the rig's intensities and directions are assertable in `node --test` without a
+  `WebGPURenderer` (which needs a real GPU adapter). Imports plain `three`, not
+  `three/webgpu`, per the convention the gizmo modules follow. Unit-tested in
+  `test/sceneLighting.test.ts`, which pins the §2.3.1 table exactly and then the
+  property it exists for (no direction unlit).
 - `viewCameras.ts` — the pure geometry behind the View selector: `ViewId` (five
   views) and `OrthoViewId` (the three elevations — `Exclude<ViewId,'perspective'>`
   is *not* that set, since the `camera` view is perspective too), the labels,

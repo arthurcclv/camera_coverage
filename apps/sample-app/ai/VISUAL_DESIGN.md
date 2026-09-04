@@ -93,6 +93,40 @@ pass), not opaque voxels — see [DECISIONS.md](./DECISIONS.md). Hue is
 user-controlled via a rainbow spectrum slider; intensity encodes coverage
 fraction (Coverage mode) or is flat (Blind-spots mode).
 
+### 3D viewport lighting (spec §2.3.1)
+
+A fixed four-light rig, no shadow maps and no environment map. Legibility beats
+realism here: the user orbits freely to judge coverage, and a face that renders
+black cannot be judged at all.
+
+The four roles: a `HemisphereLight` for sky/ground bounce, a key
+`DirectionalLight` that establishes form, an opposing fill `DirectionalLight`
+that keeps the shaded side shaped, and an `AmbientLight` setting the brightness
+floor.
+
+**The colors, intensities and positions live in one place only — spec §2.3.1's
+table** (implemented in `scene/sceneLighting.ts`, pinned exactly by
+`test/sceneLighting.test.ts`). They are deliberately not restated here: three
+copies of a number table is three places for it to drift. What follows is the
+design reasoning those numbers serve.
+
+**The hemisphere ground color deliberately diverges from the panel palette.**
+`#6a6f7a` is a mid grey, not the near-black `#30323a` used for UI surfaces —
+because this value is *light*, not chrome. Reusing the dark surface token here is
+what makes downward-facing faces read as unlit holes. The same reasoning applies
+to any future viewport light: pick it for what it does to geometry, not for
+palette consistency.
+
+Two lights rather than one, plus a modest ambient rather than a large one: a bare
+ambient lift raises the black areas but flattens the geometry into paper. The
+opposite-side fill is what preserves shape while removing the black.
+
+**Known limitation.** Loaded glTF materials render as authored (only `side` is
+overridden, spec §14.6), so a fully metallic material (`metalness: 1.0`) still
+renders black under this rig — a metal surface shows only reflections and there
+is no environment map to reflect. If parts of a loaded scene are black *after*
+this rig, check the asset's metalness before touching the lights.
+
 ## Typography
 
 - **Font:** system stack — `-apple-system, BlinkMacSystemFont, 'Segoe UI',

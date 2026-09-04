@@ -6,6 +6,49 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Black faces on loaded scenes are fixed with fill light, not an environment map
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.3.1.
+
+**Why.** Imported glTF scenes showed patches of pure black. The old rig was one key
+`DirectionalLight` at `(15, 25, 10)` plus `AmbientLight` at 0.25 and a
+`HemisphereLight` whose ground color was `#30323a` — the near-black UI *surface*
+token, borrowed for a *light*. Anything facing away from `+X+Y+Z` therefore
+received roughly 0.25–0.4 total and read as an unlit hole on a dark UI. Since the
+user orbits freely to judge coverage, a face that renders black is a face they
+cannot judge.
+
+**Decision.** Raise the fill: hemisphere ground `#30323a` → `#6a6f7a`, ambient
+0.25 → 0.5, and add a second `DirectionalLight` at 0.5 from `(-15, 8, -10)` —
+roughly opposite the key and lower. The ambient lift alone would have removed the
+black while flattening the geometry into paper; the opposite-side directional is
+what keeps the shaded side shaped.
+
+**Why not an environment map.** `PMREMGenerator` over Three's `RoomEnvironment`
+would have been ~3 lines, needed no asset, and would additionally have fixed
+*fully metallic* materials — which render black under **any** number of lights,
+since a metal surface shows only reflections and the scene sets no
+`scene.environment` for it to reflect. It was rejected for now because the scenes
+in hand are hand-authored with sane metalness, so it would have bought a cube
+render target and a startup PMREM pass to solve a problem this app does not
+currently have. **Revisit if CAD/BIM exports enter the picture** — Revit/IFC
+pipelines commonly emit `metalness: 1.0` with no textures, and no lighting change
+can rescue those.
+
+**Consequence to keep in mind.** Loaded materials render as authored (only `side`
+is overridden, spec §14.6), so "black after this change" is a metalness symptom,
+not a lighting one. §2.3.1 and VISUAL_DESIGN.md both say so, because the instinct
+on seeing black is to reach for the intensities again.
+
+**Why its own module.** The rig moved out of `viewport.ts` into
+`scene/sceneLighting.ts`. `viewport.ts` cannot be instantiated in `node --test`
+(it awaits `WebGPURenderer.init()`, which needs a GPU adapter), so inline lights
+were untestable by construction; a pure factory returning the rig keyed by role
+(`{ hemi, key, fill, ambient }`) is assertable directly — and keying it by role
+rather than array position means the test asserts the §2.3.1 table by name.
+
+---
+
 ## The polyline rubber band tracks a plane, not the scene mesh
 
 Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §6.2.

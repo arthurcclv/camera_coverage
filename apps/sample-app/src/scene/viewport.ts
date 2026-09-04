@@ -52,6 +52,7 @@ import {
   type OrthoViewId,
   type ViewId,
 } from './viewCameras.ts';
+import { createSceneLights } from './sceneLighting.ts';
 
 export type RenderBackend = 'webgpu' | 'webgl2';
 
@@ -192,12 +193,8 @@ export async function createViewport(
   const renderBackend: RenderBackend = backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
   container.appendChild(renderer.domElement);
 
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x30323a, 1.1);
-  scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffffff, 1.4);
-  sun.position.set(15, 25, 10);
-  scene.add(sun);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+  // Fixed light rig (spec §2.3.1) — see `sceneLighting.ts` for the rationale.
+  scene.add(...Object.values(createSceneLights()));
 
   const grid = new THREE.GridHelper(24, 24, 0x444a55, 0x2a2e36);
   scene.add(grid);
