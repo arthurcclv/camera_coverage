@@ -934,6 +934,15 @@ the scene's point of view: the optics every camera this run *creates* starts at 
 editing it moves the pool's fingerprint, so Build's label two cards up flips to **Rebuild**
 (§3.3.1). `FOV` and `Name prefix` are spent only at Apply and mark nothing stale.
 
+**`Size` accepts 1 – 10,000 positions.** The ceiling is a guard against a mistyped digit
+committing an unattended GPU run, not a limit the method has: a pool is a flat list of
+positions and its memory is megabytes at any size in that range (§3.3). It sits at 10,000
+because the sites this tool is aimed at are hundreds of metres across and want ~100
+cameras, and covering one takes thousands of candidates rather than hundreds. The cost of
+asking for them is stated before it is paid — the button reads `Extend to 8000` and the
+progress line counts the build steps (§3.3.1) — and an extend is the usual way up, so a
+large pool is reached by growing a small one, not by guessing the number first.
+
 **`Seed` is a draw input, not a search input**, which is what puts it in the first card. It
 picks *which* points get built — it offsets every constraint's sub-sequence (§4.1) — so it
 is spent on the GPU with Build, and it is the field that decides between an extend and a

@@ -22,7 +22,7 @@
  * cases the press will cost — Build, Extend to N, Truncate to N, or Rebuild.
  * They differ by two orders of magnitude on a real site.
  */
-import { poolSummary } from '../placement/pool.ts';
+import { poolSummary, POOL_SIZE_MAX } from '../placement/pool.ts';
 import { buildLabel } from '../placement/mode.ts';
 import type { ConstraintGroup, CameraConstraint } from '../placement/region.ts';
 import type { PlacementSession } from '../placement/usePlacement.ts';
@@ -97,7 +97,7 @@ export function CandidatePositionsPanel({
             className="number-field"
             value={group.poolSize}
             min={1}
-            max={1000}
+            max={POOL_SIZE_MAX}
             digits={0}
             integer
             seed="display"

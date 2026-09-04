@@ -133,6 +133,15 @@ export interface ConstraintOverlap {
  */
 export const REJECT_ATTEMPT_FACTOR = 3;
 
+/**
+ * The largest pool the `Size` field will accept (§5.1).
+ *
+ * Not a limit of the method — a pool is a flat list of positions and costs
+ * megabytes at any size in range — but a guard against a mistyped digit
+ * committing an unattended GPU run.
+ */
+export const POOL_SIZE_MAX = 10_000;
+
 // --- Blocking (§10) ----------------------------------------------------------
 
 /**

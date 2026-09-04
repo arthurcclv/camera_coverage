@@ -32,6 +32,7 @@ import {
   targetRevision,
   OVERLAP_SAMPLES,
   REJECT_ATTEMPT_FACTOR,
+  POOL_SIZE_MAX,
 } from '../src/placement/pool.ts';
 import type { SamplingVolume } from '../src/scene/samplingVolumes.ts';
 import { HALTON_DIMS, ballOffset, constraintOffset, halton, haltonPoint } from '../src/placement/halton.ts';
@@ -211,6 +212,38 @@ test('the draw is prefix-stable: raising poolSize keeps every earlier position',
     `${d.constraintId}#${d.seqIndex}@${d.position.join(',')}`;
   const larger = new Set(b.map(key));
   for (const d of a) assert.ok(larger.has(key(d)), `lost ${key(d)}`);
+});
+
+test('the field ceiling is a size the draw actually holds up at (§5.1)', () => {
+  // `Size` accepts up to POOL_SIZE_MAX, and the two properties the whole extend
+  // path rests on have to survive there: the shares still sum, and the prefix a
+  // smaller pool built is still the prefix of the bigger one.
+  const cs = [post(), rail(), wall()];
+  const gMax = group({ poolSize: POOL_SIZE_MAX });
+  const shares = poolSplit(basisFor(cs, [], gMax), POOL_SIZE_MAX);
+  assert.equal(
+    shares.reduce((a, b) => a + b, 0),
+    POOL_SIZE_MAX,
+  );
+
+  const small = group({ poolSize: 1000 });
+  const a = planDraws(small, basisFor(cs, [], small));
+  const b = planDraws(gMax, basisFor(cs, [], gMax));
+  assert.equal(a.length, 1000);
+  assert.equal(b.length, POOL_SIZE_MAX);
+  const key = (d: { constraintId: string; seqIndex: number; position: Vec3 }) =>
+    `${d.constraintId}#${d.seqIndex}@${d.position.join(',')}`;
+  const larger = new Set(b.map(key));
+  for (const d of a) assert.ok(larger.has(key(d)), `lost ${key(d)}`);
+
+  // And the extend from the old ceiling to the new one costs only the difference.
+  const held = new Map(
+    cs.map((c, i) => {
+      const kept = poolSplit(basisFor(cs, [], small), 1000)[i];
+      return [c.id, { kept, nextSeq: kept }];
+    }),
+  );
+  assert.equal(planDraws(gMax, basisFor(cs, [], gMax), { held }).length, POOL_SIZE_MAX - 1000);
 });
 
 test('an extension draws only what is new', () => {

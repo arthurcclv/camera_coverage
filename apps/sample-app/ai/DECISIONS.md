@@ -6,6 +6,31 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The pool ceiling is a named constant at 10,000, not a literal in the panel
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §5.1.
+
+**Why.** The `Size` field carried a bare `max={1000}` — a number the spec never
+stated and no test covered, so nothing tied it to anything. It was also wrong for
+the target site: 440 × 201 × 1120 m wanting ~96 cameras needs thousands of
+candidate positions, and 1000 capped a real run rather than a typo.
+
+**Decision.** `POOL_SIZE_MAX = 10_000` lives in `placement/pool.ts` beside the
+other sampling constants, and the panel reads it. The ceiling is a guard against a
+mistyped digit committing an unattended GPU run, not a claim about the method: a
+pool is a flat list of positions and costs megabytes at any size in range. The
+scene-file validation is unchanged — imports still require only `poolSize ≥ 1`, so
+a scene authored elsewhere is not rejected by a UI affordance.
+
+**What the raise rests on.** Extending, not rebuilding: `planDraws` is
+prefix-stable, so reaching 10,000 is normally a sequence of extends from a small
+pool, each costing only the difference. The test pins exactly that at the ceiling —
+shares still sum to `poolSize`, the 1000-position prefix survives intact, and the
+extend to 10,000 plans 9000 draws — because those are the properties that make the
+new bound usable rather than merely permitted.
+
+---
+
 ## A disabled entity is hidden, and selection is the only way back
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4.3.
