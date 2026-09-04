@@ -24,8 +24,16 @@ import {
   truncatedShares,
   poolSplit,
   replacementDraw,
+  drawBasis,
+  soloBasis,
+  overlapSummary,
+  overlapFraction,
+  type DrawBasis,
+  targetRevision,
+  OVERLAP_SAMPLES,
   REJECT_ATTEMPT_FACTOR,
 } from '../src/placement/pool.ts';
+import type { SamplingVolume } from '../src/scene/samplingVolumes.ts';
 import { HALTON_DIMS, ballOffset, constraintOffset, halton, haltonPoint } from '../src/placement/halton.ts';
 import {
   DEFAULT_TEMPLATE,
@@ -48,6 +56,9 @@ function group(over: Partial<ConstraintGroup> = {}): ConstraintGroup {
     fov: 60,
     far: 30,
     namePrefix: 'Dock',
+    zoneIds: [],
+    restrictScoring: true,
+    restrictMounts: false,
     poolSize: 200,
     maxCount: 10,
     trials: 100,
@@ -94,6 +105,15 @@ function camera(id: string): SceneCamera {
 
 const NO_FILTER: MarkedFilter = { regions: [], maskRegions: [] };
 
+/**
+ * The §4.1 draw basis for a constraint list — every helper above builds an
+ * enabled constraint of `cg-1`, so this is "these constraints at their primitive
+ * measures" unless a mount filter is handed in.
+ */
+function basisFor(cs: CameraConstraint[], mountVolumes: SamplingVolume[] = [], g = group()): DrawBasis {
+  return drawBasis(g, cs, mountVolumes);
+}
+
 // --- The split (§4.1) --------------------------------------------------------
 
 test('poolSplit matches the worked example in §4.1', () => {
@@ -101,11 +121,11 @@ test('poolSplit matches the worked example in §4.1', () => {
   // Rounding (not truncating) is what earns the rail its fifth position, and the
   // overshoot the post's floor-of-1 creates comes off the wall — the largest
   // weight — not off the rail.
-  assert.deepEqual(poolSplit([post(), rail(), wall()], 200), [1, 5, 194]);
+  assert.deepEqual(poolSplit(basisFor([post(), rail(), wall()]), 200), [1, 5, 194]);
 });
 
 test('poolSplit weights by primitive measure and sums to poolSize', () => {
-  const shares = poolSplit([post(), rail(), wall()], 200);
+  const shares = poolSplit(basisFor([post(), rail(), wall()]), 200);
   // Weights 1 : 60 : 2400 — the wall takes almost all of it.
   assert.equal(shares.reduce((a, b) => a + b, 0), 200);
   assert.ok(shares[2] > shares[1] && shares[1] > shares[0]);
@@ -114,24 +134,24 @@ test('poolSplit weights by primitive measure and sums to poolSize', () => {
 
 test('poolSplit floors every enabled constraint at 1, so a lone post is never starved', () => {
   // A post against a wall 2400× its measure would round to zero without the floor.
-  const shares = poolSplit([post(), wall()], 50);
+  const shares = poolSplit(basisFor([post(), wall()]), 50);
   assert.equal(shares[0], 1);
   assert.equal(shares.reduce((a, b) => a + b, 0), 50);
 });
 
 test('poolSplit gives one each when there are more constraints than positions', () => {
-  const shares = poolSplit([post('a'), post('b'), post('c')], 2);
+  const shares = poolSplit(basisFor([post('a'), post('b'), post('c')]), 2);
   assert.deepEqual(shares, [1, 1, 1]);
 });
 
 test('poolSplit shares evenly when nothing has a measure', () => {
-  const shares = poolSplit([post('a'), post('b'), post('c'), post('d')], 20);
+  const shares = poolSplit(basisFor([post('a'), post('b'), post('c'), post('d')]), 20);
   assert.deepEqual(shares, [5, 5, 5, 5]);
 });
 
 test('poolSplit ignores distance — the split cannot collapse when d is 0', () => {
-  const pinned = poolSplit([rail('r', 0), wall('w', 0)], 100);
-  const loose = poolSplit([rail('r', 2), wall('w', 2)], 100);
+  const pinned = poolSplit(basisFor([rail('r', 0), wall('w', 0)]), 100);
+  const loose = poolSplit(basisFor([rail('r', 2), wall('w', 2)]), 100);
   assert.deepEqual(pinned, loose);
 });
 
@@ -181,8 +201,8 @@ test('the draw is prefix-stable: raising poolSize keeps every earlier position',
   const g200 = group({ poolSize: 200 });
   const g260 = group({ poolSize: 260 });
   const cs = [post(), rail(), wall()];
-  const a = planDraws(g200, cs);
-  const b = planDraws(g260, cs);
+  const a = planDraws(g200, basisFor(cs, [], g200));
+  const b = planDraws(g260, basisFor(cs, [], g260));
   assert.equal(a.length, 200);
   assert.equal(b.length, 260);
 
@@ -195,16 +215,16 @@ test('the draw is prefix-stable: raising poolSize keeps every earlier position',
 
 test('an extension draws only what is new', () => {
   const cs = [post(), rail(), wall()];
-  const shares = poolSplit(cs, 200);
+  const shares = poolSplit(basisFor(cs), 200);
   const held = new Map(cs.map((c, i) => [c.id, { kept: shares[i], nextSeq: shares[i] }]));
-  const extra = planDraws(group({ poolSize: 260 }), cs, { held });
+  const extra = planDraws(group({ poolSize: 260 }), basisFor(cs), { held });
   assert.equal(extra.length, 60);
   // Nothing already built is redrawn.
   for (const d of extra) assert.ok(d.seqIndex >= (held.get(d.constraintId)?.nextSeq ?? 0));
 
   // And the kept prefix is bit-identical to what a full build step would have
   // produced — the whole basis for reusing it (§3.3.1).
-  const full = planDraws(group({ poolSize: 260 }), cs);
+  const full = planDraws(group({ poolSize: 260 }), basisFor(cs));
   const key = (d: { constraintId: string; seqIndex: number; position: Vec3 }) =>
     `${d.constraintId}#${d.seqIndex}@${d.position.join(',')}`;
   const fullKeys = new Set(full.map(key));
@@ -216,18 +236,18 @@ test('an extension after rejections needs both kept and nextSeq', () => {
   // moved 5 further on (§4.2). Planning from `kept` would rebuild the five
   // known-bad draws; planning `share − nextSeq` would come up five short.
   const cs = [post(), rail(), wall()];
-  const shares = poolSplit(cs, 200);
+  const shares = poolSplit(basisFor(cs), 200);
   const held = new Map(
     cs.map((c, i) => [
       c.id,
       { kept: shares[i], nextSeq: shares[i] + (c.id === 'con-rail' ? 5 : 0) },
     ]),
   );
-  const extra = planDraws(group({ poolSize: 260 }), cs, { held });
+  const extra = planDraws(group({ poolSize: 260 }), basisFor(cs), { held });
   assert.equal(extra.length, 60, 'the extension is still 60 positions, rejections or not');
   const railDraws = extra.filter((d) => d.constraintId === 'con-rail');
   const railHeld = held.get('con-rail')!;
-  assert.equal(railDraws.length, poolSplit(cs, 260)[1] - railHeld.kept);
+  assert.equal(railDraws.length, poolSplit(basisFor(cs), 260)[1] - railHeld.kept);
   for (const d of railDraws) {
     assert.ok(d.seqIndex >= railHeld.nextSeq, 'a rejected draw must never be planned again');
   }
@@ -235,12 +255,12 @@ test('an extension after rejections needs both kept and nextSeq', () => {
 
 test('a truncation builds nothing and keeps each constraint its first share', () => {
   const cs = [post(), rail(), wall()];
-  const shares260 = poolSplit(cs, 260);
+  const shares260 = poolSplit(basisFor(cs), 260);
   const held = new Map(cs.map((c, i) => [c.id, { kept: shares260[i], nextSeq: shares260[i] }]));
   // Lowering the size: every share is already met or exceeded, so nothing is drawn.
-  assert.equal(planDraws(group({ poolSize: 120 }), cs, { held }).length, 0);
+  assert.equal(planDraws(group({ poolSize: 120 }), basisFor(cs), { held }).length, 0);
 
-  const keep = truncatedShares(group({ poolSize: 120 }), cs);
+  const keep = truncatedShares(group({ poolSize: 120 }), basisFor(cs));
   assert.equal([...keep.values()].reduce((a, b) => a + b, 0), 120);
   cs.forEach((c, i) => assert.ok((keep.get(c.id) ?? 0) <= shares260[i]));
 });
@@ -249,15 +269,15 @@ test('a moved fingerprint plans every draw again, whichever way the size went', 
   // `planDraws` is told nothing about fingerprints — the session drops `held`
   // entirely when one moves (§3.3.1), so both directions replan in full.
   const cs = [post(), rail(), wall()];
-  assert.equal(planDraws(group({ poolSize: 260 }), cs).length, 260);
-  assert.equal(planDraws(group({ poolSize: 120 }), cs).length, 120);
+  assert.equal(planDraws(group({ poolSize: 260 }), basisFor(cs)).length, 260);
+  assert.equal(planDraws(group({ poolSize: 120 }), basisFor(cs)).length, 120);
 });
 
 test('each constraint has its own sub-sequence, so editing one leaves the others alone', () => {
   const g = group({ poolSize: 90 });
-  const before = planDraws(g, [post('p'), rail('r'), wall('w')]);
+  const before = planDraws(g, basisFor([post('p'), rail('r'), wall('w')], [], g));
   // Reshape the wall: same ids elsewhere, so the rail and post must not move.
-  const after = planDraws(g, [post('p'), rail('r'), wall('w', 0.3, [90, 40])]);
+  const after = planDraws(g, basisFor([post('p'), rail('r'), wall('w', 0.3, [90, 40])], [], g));
   const only = (ds: typeof before, id: string) =>
     ds.filter((d) => d.constraintId === id).map((d) => d.position.join(','));
   assert.deepEqual(only(after, 'p'), only(before, 'p'));
@@ -287,11 +307,11 @@ test('replacementDraw advances the sequence and stops at the attempt cap', () =>
   const g = group();
   const c = rail('r');
   const share = 5;
-  const at = replacementDraw(g, c, share, share);
+  const at = replacementDraw(g, c, share, share, soloBasis(c));
   assert.ok(at !== null);
   assert.equal(at!.seqIndex, share);
   // Spending the whole budget terminates the constraint rather than looping.
-  assert.equal(replacementDraw(g, c, share * REJECT_ATTEMPT_FACTOR, share), null);
+  assert.equal(replacementDraw(g, c, share * REJECT_ATTEMPT_FACTOR, share, soloBasis(c)), null);
 });
 
 test('a constraint sealed inside geometry terminates, and the readout names it', () => {
@@ -309,7 +329,7 @@ test('a constraint sealed inside geometry terminates, and the readout names it',
   let rejected = 0;
   const kept: number[] = [];
   for (;;) {
-    const draw = replacementDraw(g, buried, spent, share);
+    const draw = replacementDraw(g, buried, spent, share, soloBasis(buried));
     if (draw === null) break;
     spent++;
     const outcome = classifyBuildStep(true, 0);
@@ -502,5 +522,233 @@ test('a lone constraint takes the whole pool budget, so a reposition samples poo
   // §4.6: "its `poolSize` share scaled up to the group's `poolSize`, since it is
   // the only constraint being sampled."
   const g = group({ poolSize: 40 });
-  assert.equal(planDraws(g, [rail('con-1')]).length, 40);
+  assert.equal(planDraws(g, basisFor([rail('con-1')], [], g)).length, 40);
+});
+
+
+// --- The mount filter and the effective measure (§4.1.1) ---------------------
+
+/** An axis-aligned target volume; `zoneId` is what `volumesOfZones` matches on. */
+function box(zoneId: string, position: Vec3, size: Vec3): SamplingVolume {
+  return { id: `v-${zoneId}-${position.join('_')}`, zoneId, position, rotation: IDENTITY, size };
+}
+
+/** A box covering the rail's first 6 m of its 60 m run — a 10% overlap. */
+const RAIL_TIP: SamplingVolume = box('zone-1', [0, 5, 3], [2, 2, 6]);
+/** A box swallowing everything the fixtures place. */
+const EVERYTHING: SamplingVolume = box('zone-1', [0, 5, 30], [400, 400, 400]);
+
+test('overlapFraction estimates a constraint by running its own draw (§4.1.1)', () => {
+  const g = group();
+  // Wholly inside ⇒ 1, wholly outside ⇒ 0, and no volumes at all ⇒ 0.
+  assert.equal(overlapFraction(rail(), g.seed, [EVERYTHING]), 1);
+  assert.equal(overlapFraction(rail(), g.seed, [box('zone-1', [500, 5, 0], [2, 2, 2])]), 0);
+  assert.equal(overlapFraction(rail(), g.seed, []), 0);
+  // A 6 m window on a 60 m rail is ~10% of its arc length, and the estimate is a
+  // measurement of the sampler rather than of the primitive, so it lands near it.
+  const tip = overlapFraction(rail(), g.seed, [RAIL_TIP]);
+  assert.ok(tip > 0.03 && tip < 0.2, `expected ~0.1, got ${tip}`);
+});
+
+test('overlapFraction honours `distance`, which a primitive-only estimator would not', () => {
+  // The rail sits at z ∈ [0, 60] on the line x = 0. This box is 1 m to the side
+  // of it and never touches the primitive — but `distance = 2` reaches in, so
+  // real draws land inside and the constraint is genuinely usable.
+  const beside = box('zone-1', [1.4, 5, 30], [1.2, 4, 60]);
+  assert.equal(overlapFraction(rail('con-rail', 0), 1, [beside]), 0);
+  assert.ok(overlapFraction(rail('con-rail', 2), 1, [beside]) > 0);
+});
+
+test('overlapFraction is deterministic under `seed` and moves with it', () => {
+  const a = overlapFraction(rail(), 1, [RAIL_TIP]);
+  assert.equal(overlapFraction(rail(), 1, [RAIL_TIP]), a);
+  // A different seed is a different sub-sequence, so the estimate is a different
+  // sample of the same quantity — close, but not the same number.
+  assert.notEqual(overlapFraction(rail(), 99, [RAIL_TIP]), a);
+  assert.ok(Math.abs(overlapFraction(rail(), 99, [RAIL_TIP]) - a) < 0.15);
+});
+
+test('drawBasis without a mount filter is the pre-feature behaviour exactly', () => {
+  const cs = [post(), rail(), wall()];
+  const basis = drawBasis(group(), cs, []);
+  assert.deepEqual(basis.constraints.map((c) => c.id), cs.map((c) => c.id));
+  assert.deepEqual(basis.weights, [1, 60, 2400]);
+  assert.deepEqual(basis.overlaps, []);
+  assert.deepEqual(poolSplit(basis, 200), poolSplit(basisFor(cs), 200));
+});
+
+test('the effective-measure split moves the pool from the wall to the rail (§4.1.1)', () => {
+  // The wall spans x,z ∈ [-30, 30]; this box keeps a 6 m strip of it, ~10% of the
+  // area, while swallowing the whole 60 m rail and the post.
+  const strip = box('zone-1', [0, 5, 30], [6, 6, 400]);
+  const cs = [post(), rail(), wall()];
+  const g = group();
+
+  // Unfiltered, the wall's 2400 m² claims 194 of 200 (the spec's worked example).
+  assert.deepEqual(poolSplit(basisFor(cs), 200), [1, 5, 194]);
+
+  const basis = drawBasis(g, cs, [strip]);
+  const shares = poolSplit(basis, 200);
+  assert.equal(shares.reduce((a, b) => a + b, 0), 200);
+  // Every constraint survives — the wall keeps a plurality, since a tenth of
+  // 2400 m² is still forty times the rail's 60 m. What changes is the *ratio*:
+  // the wall is now weighted by its usable area, so the rail takes back an order
+  // of magnitude of the pool it was starved of. Asserting the shift rather than
+  // an absolute share is the point — the absolute number is just arithmetic on
+  // the fixture, while the shift is the behaviour the filter exists to produce.
+  assert.equal(basis.constraints.length, 3);
+  const wallShare = shares[basis.constraints.findIndex((c) => c.id === 'con-wall')];
+  const railShare = shares[basis.constraints.findIndex((c) => c.id === 'con-rail')];
+  const before = 194 / 5;
+  const after = wallShare / railShare;
+  assert.ok(wallShare < 194, `wall kept ${wallShare}, no better than unfiltered`);
+  assert.ok(railShare > 5, `rail kept only ${railShare}`);
+  assert.ok(after < before / 5, `wall:rail went ${before.toFixed(1)} → ${after.toFixed(1)}`);
+});
+
+test('a zero-overlap constraint is dropped and its floor redistributed (§4.1.1)', () => {
+  const far = rail('con-far');
+  // Only the post is inside; the rail is 500 m away in x.
+  const onlyPost = box('zone-1', [0, 5, 0], [1, 1, 1]);
+  const cs = [post(), { ...far, points: [[500, 5, 0], [500, 5, 60]] } as CameraConstraint];
+  const basis = drawBasis(group(), cs, [onlyPost]);
+
+  assert.deepEqual(basis.constraints.map((c) => c.id), ['con-post']);
+  // The dropped one is still *reported*, at 0% — that is the §5.1 readout's whole
+  // job, and the difference between "the tool is broken" and "my rail isn't in
+  // the zone".
+  assert.equal(basis.overlaps.length, 2);
+  assert.equal(basis.overlaps.find((o) => o.constraintId === 'con-far')!.fraction, 0);
+  // It takes no floor of 1: the shares still sum to `poolSize`.
+  const shares = poolSplit(basis, 200);
+  assert.equal(shares.reduce((a, b) => a + b, 0), 200);
+});
+
+test('every drawn position satisfies inRegion *and* the mount filter (§4.1.1)', () => {
+  const strip = box('zone-1', [0, 5, 45], [80, 8, 30]);
+  const cs = [rail(), wall()];
+  const g = group({ poolSize: 40 });
+  const basis = drawBasis(g, cs, [strip]);
+  const draws = planDraws(g, basis, {
+    weights: basis.weights,
+    mountVolumes: basis.mountVolumes,
+  });
+  assert.ok(draws.length > 0);
+  for (const d of draws) {
+    const c = cs.find((x) => x.id === d.constraintId)!;
+    assert.ok(inRegion(d.position, c), `${d.constraintId}#${d.seqIndex} left its region`);
+    // The OBB test the mount filter runs, restated rather than imported, so a
+    // sign flip in `inVolume` could not make this pass by agreeing with itself.
+    const local = [d.position[0] - strip.position[0], d.position[1] - strip.position[1], d.position[2] - strip.position[2]];
+    assert.ok(
+      Math.abs(local[0]) <= strip.size[0] / 2 &&
+        Math.abs(local[1]) <= strip.size[1] / 2 &&
+        Math.abs(local[2]) <= strip.size[2] / 2,
+      `${d.constraintId}#${d.seqIndex} landed outside the target zone`,
+    );
+  }
+});
+
+test('the mount filter preserves prefix-stability, so Extend still works (§3.3.1)', () => {
+  const strip = box('zone-1', [0, 5, 45], [80, 8, 30]);
+  const cs = [rail(), wall()];
+  const small = group({ poolSize: 20 });
+  const big = group({ poolSize: 60 });
+  const basisS = drawBasis(small, cs, [strip]);
+  const basisB = drawBasis(big, cs, [strip]);
+  // The estimate does not depend on `poolSize`, so both plan against the same
+  // weights — which is what makes the prefix claim meaningful at all.
+  assert.deepEqual(basisS.weights, basisB.weights);
+
+  const key = (d: { constraintId: string; seqIndex: number }) => `${d.constraintId}#${d.seqIndex}`;
+  const drawsS = planDraws(small, basisS);
+  const drawsB = planDraws(big, basisB);
+  // Per constraint, the small pool's kept draws are a verbatim prefix of the big
+  // one's: rejection sampling skips the same indices in the same order.
+  for (const c of cs) {
+    const a = drawsS.filter((d) => d.constraintId === c.id).map(key);
+    const b = drawsB.filter((d) => d.constraintId === c.id).map(key);
+    assert.deepEqual(b.slice(0, a.length), a, `${c.id} reshuffled between pool sizes`);
+  }
+});
+
+test('replacementDraw skips out-of-zone draws without spending the GPU budget (§4.1.1)', () => {
+  const g = group();
+  const r = rail();
+  const tip = box('zone-1', [0, 5, 3], [2, 2, 6]);
+  // Unfiltered, the replacement is the very next sequence index.
+  assert.equal(replacementDraw(g, r, 5, 10, soloBasis(r))!.seqIndex, 5);
+  // Filtered, it is the next index that *passes* — later, and still inside.
+  const next = replacementDraw(g, r, 5, 10, soloBasis(r, [tip]))!;
+  assert.ok(next.seqIndex >= 5);
+  assert.ok(next.position[2] >= 0 && next.position[2] <= 6);
+  // The GPU cap is still the authority: past `share × REJECT_ATTEMPT_FACTOR`
+  // there is no replacement, filter or no filter.
+  assert.equal(replacementDraw(g, r, 10 * REJECT_ATTEMPT_FACTOR, 10, soloBasis(r, [tip])), null);
+});
+
+test('targetRevision is order-insensitive and follows the listed volumes (§3.3.1)', () => {
+  const vols = [box('zone-1', [0, 5, 0], [2, 2, 2]), box('zone-2', [9, 5, 0], [2, 2, 2])];
+  // `zoneIds` is a set: a reorder must not discard minutes of GPU.
+  assert.equal(targetRevision(['zone-1', 'zone-2'], vols), targetRevision(['zone-2', 'zone-1'], vols));
+  // An unlisted zone's volume moving changes nothing...
+  const movedOther = [vols[0], { ...vols[1], position: [99, 5, 0] as Vec3 }];
+  assert.equal(targetRevision(['zone-1'], vols), targetRevision(['zone-1'], movedOther));
+  // ...while a listed one's does, because every cached set was filtered by it.
+  const movedListed = [{ ...vols[0], position: [99, 5, 0] as Vec3 }, vols[1]];
+  assert.notEqual(targetRevision(['zone-1'], vols), targetRevision(['zone-1'], movedListed));
+  // No target ⇒ no contribution, which is what leaves an untargeted group on the
+  // app's own marked revision.
+  assert.equal(targetRevision([], vols), '');
+});
+
+test('overlapSummary reports a percentage per constraint, not a discard count (§5.1)', () => {
+  // The line the Build card and the group card both show. It is a function of the
+  // *estimate*, not of a pool, which is what puts it on screen before Build.
+  const cs = [rail('con-rail'), wall('con-wall')];
+  const text = overlapSummary(
+    [
+      { constraintId: 'con-rail', fraction: 1 },
+      { constraintId: 'con-wall', fraction: 0.04 },
+    ],
+    cs,
+  )!;
+  assert.match(text, /100%/);
+  assert.match(text, /4%/);
+  assert.match(text, /con-rail|Rail|Polyline/i, 'the constraint is named, not just numbered');
+  assert.equal(overlapSummary([], cs), null, 'no mount filter, no line');
+
+  // A zero is *listed*, never dropped: §4.1.1's whole remedy is seeing `0%` beside
+  // a `4%`.
+  assert.match(overlapSummary([{ constraintId: 'con-wall', fraction: 0 }], cs)!, /0%/);
+});
+
+test('poolSummary carries §10’s empty-pool line, and leaves the percentages to overlapSummary', () => {
+  const cs = [rail('con-rail'), wall('con-wall')];
+  const pool = {
+    ...emptyPool('cg-1', 'fp', 200, 1),
+    markedTotal: 1000,
+    poolCeiling: 500,
+    overlaps: [
+      { constraintId: 'con-rail', fraction: 1 },
+      { constraintId: 'con-wall', fraction: 0.04 },
+    ],
+  };
+  const text = poolSummary(pool, cs);
+  assert.doesNotMatch(text, /100%/, 'the percentages are the card’s own line, shown before Build too');
+  assert.doesNotMatch(text, /overlaps this group's target zones/);
+
+  // Every constraint at zero is the §10 "warn but allow" case: Build ran, the
+  // pool is empty, and the readout says exactly why.
+  const none = poolSummary(
+    { ...pool, overlaps: pool.overlaps.map((o) => ({ ...o, fraction: 0 })) },
+    cs,
+  );
+  assert.match(none, /No constraint overlaps this group's target zones/);
+});
+
+test('OVERLAP_SAMPLES is large enough to resolve a 1% overlap (§4.1.1)', () => {
+  // The §4.1.1 claim the zero-drop rule rests on: a dropped constraint had well
+  // under ~1% usable extent. At 256 draws a 1% overlap is ~2.5 expected hits.
+  assert.ok(OVERLAP_SAMPLES >= 256);
 });

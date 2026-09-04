@@ -108,3 +108,61 @@ test('fillOpacity: selected reads strongest, disabled weakest', () => {
   assert.ok(fillOpacity(true, true) > fillOpacity(false, true));
   assert.ok(fillOpacity(false, true) > fillOpacity(false, false));
 });
+
+// --- The mount filter's dimming (`camera_placement.md` §5, §4.1.1) -----------
+
+/** Every non-fill mesh/line material — the crisp part: handles and edges. */
+function edges(gizmos: ConstraintGizmoSet): THREE.Material[] {
+  const found: THREE.Material[] = [];
+  gizmos.group.traverse((o) => {
+    const mat = (o as THREE.Mesh).material as THREE.MeshBasicMaterial | undefined;
+    if (mat && mat.userData.fill !== true && 'color' in mat) found.push(mat);
+  });
+  return found;
+}
+
+test('a constraint the mount filter excludes draws weaker than the same one unfiltered (§4.1.1)', () => {
+  // The property, not the constant: a wall with no zone overlap has to look
+  // different from a good one *before* Build is pressed.
+  const gizmos = new ConstraintGizmoSet();
+
+  gizmos.update([plane('con-1')], null, null);
+  const live = fills(gizmos)[0].opacity;
+
+  gizmos.update([plane('con-1')], null, null, new Set(['con-1']));
+  assert.ok(fills(gizmos)[0].opacity < live, 'excluded fades');
+  for (const mat of edges(gizmos)) {
+    assert.equal(mat.opacity, 0.35, 'edges take the disabled treatment');
+    assert.equal(mat.transparent, true);
+  }
+
+  gizmos.dispose();
+});
+
+test('an excluded constraint still reads stronger when selected, and recovers when the set clears', () => {
+  const gizmos = new ConstraintGizmoSet();
+
+  gizmos.update([plane('con-1')], null, null, new Set(['con-1']));
+  const unselected = fills(gizmos)[0].opacity;
+  gizmos.update([plane('con-1')], 'con-1', null, new Set(['con-1']));
+  assert.ok(fills(gizmos)[0].opacity > unselected, 'selection still reads through the dimming');
+
+  // Clearing the filter is a plain update, not a rebuild: the entry flag is what
+  // the renderer reads, so a stale `true` would leave a good wall dimmed forever.
+  gizmos.update([plane('con-1')], null, null);
+  assert.equal(fills(gizmos)[0].opacity, fillOpacity(false, true));
+  for (const mat of edges(gizmos)) assert.equal(mat.opacity, 1);
+
+  gizmos.dispose();
+});
+
+test('the mount filter names one constraint without touching its neighbours', () => {
+  const gizmos = new ConstraintGizmoSet();
+  gizmos.update([plane('con-1'), plane('con-2')], null, null, new Set(['con-2']));
+
+  const [first, second] = fills(gizmos);
+  assert.equal(first.opacity, fillOpacity(false, true), 'con-1 is untouched');
+  assert.ok(second.opacity < first.opacity, 'con-2 is the one excluded');
+
+  gizmos.dispose();
+});

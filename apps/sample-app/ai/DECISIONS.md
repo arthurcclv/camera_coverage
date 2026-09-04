@@ -6,6 +6,138 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## A constraint group's target zones override the app's marked set
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §3.1.2, §3.3.1.
+
+**Why.** Placement already scored against the app's marked set — the enabled zones' union
+— which is what made its percentage comparable with the stats panel's. What it could not
+express was *which* area a group of cameras is for. "These eight cameras serve the loading
+dock" is a sentence about a group, and the model had nowhere to write it: a user wanting it
+had to disable every other zone globally, which changed every panel in the app to answer a
+question about one group.
+
+**Decision.** A group carries `zoneIds` plus two flags. `restrictScoring` (default **true**)
+makes those zones' volumes the group's **target set** — the "counted voxels" its score is
+of. `restrictMounts` (default **false**) additionally requires a drawn position to lie
+inside one of them. An **empty list makes both inert**, so a scene not using the feature
+behaves bit-identically.
+
+**One list, two flags** — its own decision, below.
+
+**The list overrides `useZones` and each zone's `enabled`.** The group states its own
+target; a display toggle does not get to redefine what a search was run for. This is safe
+because `setSampling` is fed *every* volume whatever its zone's `enabled`, so a listed
+zone's voxels are always computed. It also makes a targeted pool **more** stable than
+before: its fingerprint covers only the listed zones, so toggling an unrelated zone to look
+at something no longer discards minutes of GPU.
+
+**Trade-off.** The group's percentage is no longer of the app's denominator, and §3.3 had
+leaned on that shared denominator so the two panels "could not disagree about the word
+counted". So the disagreement is made legible instead of prevented: the curve's axis names
+the target zones and the Build card states the resolved voxel count. The denominator itself
+is the **sum of the listed zones' `validVoxels`**, which the per-zone aggregation already
+reports — no extra aggregation group, no extra run — and it over-counts where two listed
+zones' volumes overlap, so the rate reads low rather than high, which is the safe direction
+for a number that is already an aim-free upper bound.
+
+**Defaults, and what they cost.** `restrictScoring` defaults on and `restrictMounts` off
+because only the second can empty a pool: a position that reaches nothing was already
+rejected, while a mount filter can starve every constraint at once. When it does, Build
+still **runs** rather than blocking — the estimate is an estimate, only CPU was spent, and
+the readout says exactly why.
+
+---
+
+## One zone list with two flags, rather than two lists
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §3.1.2.
+
+**Why.** A group wants to say two different things about zones — *score me against the
+loading dock* and *mount me inside the maintenance bay* — and they are not the same set.
+
+**Rejected: one always-on list.** It forces mount-region ⊆ target-region, which is wrong on
+real geometry: zones hug the surfaces they were seeded from, so the wall bounding a bay
+usually sits just *outside* that bay's box, and a group targeting the bay would then admit
+no mount at all.
+
+**Rejected: two lists.** Two lists are two things to keep in sync, and every zone deletion,
+regeneration and file-format rule would have to be written twice. The case that genuinely
+needs independent sets is served by **two groups** — which is what groups are for.
+
+**Decision.** One `zoneIds` list, with `restrictScoring` and `restrictMounts` saying what it
+is *for*. An empty list makes both inert, so the feature costs a scene that does not use it
+nothing, and the two flags are honoured separately: `restrictScoring` off with
+`restrictMounts` on is "mount in the bay, score against the app's marked set", a sentence a
+user can mean.
+
+**Consequence.** Two states now share the constraint gizmo's dimmed treatment — *disabled*
+and *excluded by the mount filter* — because for a placement run they mean the same thing.
+The panel therefore carries the §4.1.1 overlap percentages in words beside the list, which
+is `VISUAL_DESIGN.md`'s redundant text cue and also the number with a remedy attached.
+
+---
+
+## The mount filter splits by an effective measure estimated with the sampler itself
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §4.1.1.
+
+**Why.** Restricting mounts to zones by plain rejection sampling looks right and is not:
+the pool split is proportional to *primitive measure*, so a 60 × 40 m wall with 5% of its
+area inside the target zones still claims 194 of 200 positions and delivers ten, while the
+rail beside it — wholly inside — keeps its five. The pool comes up short *and*
+misallocated, and the rejection count blames the wrong constraint.
+
+**Decision.** Each constraint's weight becomes its **effective measure**, `measure × hits /
+K` with `K = 256`, where the hits come from running that constraint's own five-dimensional
+Halton draw and testing the results against the zones' OBBs. A constraint estimating to
+**zero** is dropped from the draw entirely — not kept at weight 0 — so §4.1's floor of 1
+stays meaningful and the shares still sum to `poolSize`.
+
+**The estimator is the sampler**, deliberately. It honours `distance` for free: a rail
+0.3 m outside a zone with `distance = 2` yields plenty of valid mounts, and a
+primitive-only estimator (clipping segments and rectangles against the OBBs — exact, and
+the obvious alternative) would call it zero and drop it, because it measures the wrong
+object. It is also directly the acceptance rate the rejection loop will see, so the attempt
+cap is sized from a measurement; it is one geometry path rather than two that could drift;
+and it is deterministic under `seed`, so shares are reproducible from the file.
+
+**Reported as a percentage per constraint, not a discard count.** Under effective-measure
+splitting a discard count is the sampler hitting its expected rate and means nothing on its
+own; `North wall 4%` names the constraint to move, widen, or stop listing. The same number
+dims that constraint's gizmo in the viewport, so a wall with no overlap looks different
+from a good one *before* Build is pressed rather than after minutes of GPU.
+
+**Two budgets, not one.** Mount-filter discards cost a few dozen flops; §4.2's rejections
+cost ~1.2 s of GPU each. They get separate caps (`MOUNT_ATTEMPT_FACTOR` = 200 vs
+`REJECT_ATTEMPT_FACTOR` = 3), and an out-of-zone draw never consumes the GPU budget.
+
+---
+
+## Regenerating zones clears every group's target list
+
+Behavior in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md) §3.4,
+[`../specs/camera_placement.md`](../specs/camera_placement.md) §7.
+
+**Why.** "Generate from geometry" replaces the whole zone set with freshly-numbered
+entities, so `zone-3` still exists afterwards and names a *different* box. Pruning
+references by liveness — the right rule for a single deletion — would never fire, and a
+group would silently retarget to unrelated geometry and rebuild its pool against a target
+nobody chose. That is precisely the plausible-wrong-number failure the aggregation
+descriptor is written to prevent.
+
+**Decision.** Deleting one zone **prunes** it from every group's `zoneIds`, matching the
+eager unbinding `clipSectionId` and a camera's `constraintId` already get. Regenerating
+**clears** every list outright, with a status line naming the groups that lost a target. A
+group left empty falls back to the app's marked set rather than becoming unusable.
+
+**Rejected.** A stable per-zone uuid would preserve the references across a regenerate and
+is the better long-term answer — but it changes the id scheme the zone spec calls "stable
+identity, never renamed", the file format, and every id-based lookup, so it is future work
+rather than this feature's.
+
+---
+
 ## Placement *builds* its pool; the aim optimizer still *captures*
 
 Conventions in [`CONVENTIONS.md`](CONVENTIONS.md); behavior in

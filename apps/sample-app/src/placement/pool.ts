@@ -16,7 +16,14 @@ import {
 } from '@linkervision/camera-coverage-sdk';
 import type { SceneCamera } from '../cameras/camera.ts';
 import { toCameraConfig } from '../cameras/camera.ts';
-import type { MarkedFilter } from '../scene/aggregateSpec.ts';
+import { markedFilterForZones, type MarkedFilter } from '../scene/aggregateSpec.ts';
+import {
+  inAnyVolume,
+  volumesOfZones,
+  zoneLabel,
+  type SamplingVolume,
+  type Zone,
+} from '../scene/samplingVolumes.ts';
 import { CAPTURE_SLOTS, captureRig } from '../optimize/cubeRig.ts';
 import { ballOffset, constraintOffset, haltonPoint } from './halton.ts';
 import { EMPTY_LEAF_SET, type LeafSet } from './leafSet.ts';
@@ -28,6 +35,29 @@ import {
   type CameraConstraint,
   type ConstraintGroup,
 } from './region.ts';
+
+/**
+ * What a group's target zones resolve to for one build (§3.1.2).
+ *
+ * One value rather than four accessors because all of it is derived from the same
+ * `(group.zoneIds, zones, volumes)` and every consumer needs it consistent: a
+ * filter from the listed zones with a total from the enabled ones would be a
+ * percentage of the wrong denominator, computed without anything looking wrong.
+ */
+export interface GroupTarget {
+  /** The filter every build step of this group counts under (§3.3). */
+  filter: MarkedFilter;
+  /** Counted voxels in the target set — the §5.2 denominator; 0 before any run. */
+  total: number;
+  /** The volumes the mount filter tests against; empty ⇒ no mount filter (§4.1.1). */
+  mountVolumes: readonly SamplingVolume[];
+  /** Display labels of the resolved target zones, for §5.2's axis; empty ⇒ untargeted. */
+  zoneNames: string[];
+  /** What the target set is, for the §3.3.1 fingerprint. */
+  markedRevision: string | number;
+  /** What the mount filter is, for the §3.3.1 fingerprint. */
+  mountRevision: string;
+}
 
 /** One drawn position, and — once built — its reachable set (§3.3). */
 export interface PoolPosition {
@@ -73,8 +103,25 @@ export interface Pool {
   emptyConstraints: string[];
   /** `|⋃ every position's set|` — the ceiling any layout from this pool reaches. */
   poolCeiling: number;
-  /** Counted voxels in the marked set — the score's denominator (§5.2). */
+  /** Counted voxels in the group's target set — the score's denominator (§5.2). */
   markedTotal: number;
+  /**
+   * Every enabled constraint's §4.1.1 overlap with the group's target zones,
+   * in constraint order. Empty when the group has no mount filter.
+   *
+   * Kept on the pool because it is what the §5.1 card reports instead of a
+   * discard count: under effective-measure splitting a discard count is the
+   * sampler hitting its expected rate and says nothing, while `North wall 4%`
+   * names the constraint to move, widen, or stop listing.
+   */
+  overlaps: ConstraintOverlap[];
+}
+
+/** One constraint's share of its own draws that pass the mount filter (§4.1.1). */
+export interface ConstraintOverlap {
+  constraintId: string;
+  /** `hits / OVERLAP_SAMPLES`, in [0, 1]. Zero ⇒ the constraint is dropped. */
+  fraction: number;
 }
 
 /**
@@ -199,6 +246,231 @@ export function classifyBuildStep(ran: boolean, reachableCount: number): BuildSt
   return reachableCount === 0 ? 'rejected' : 'kept';
 }
 
+// --- The mount filter and the effective measure (§4.1.1) ---------------------
+
+/**
+ * Draws spent estimating one constraint's overlap with the target zones (§4.1.1).
+ *
+ * At 256 a constraint that estimates to zero had well under ~1% usable extent,
+ * which is the accuracy the §5.1 readout needs to be worth trusting; and the
+ * draws are not wasted, since they are the prefix the real draw consumes next.
+ */
+export const OVERLAP_SAMPLES = 256;
+
+/**
+ * CPU attempts a constraint may spend clearing the mount filter (§4.1.1).
+ *
+ * Far larger than {@link REJECT_ATTEMPT_FACTOR} because the two budgets buy
+ * different things: a §4.2 rejection costs ~1.2 s of GPU, while this test is a
+ * few dozen flops against a handful of OBBs. A constraint with a 1% overlap is
+ * genuinely usable and must not be starved by a cap sized for the expensive one.
+ */
+export const MOUNT_ATTEMPT_FACTOR = 200;
+
+/**
+ * The fraction of a constraint's own draws that land inside `volumes` (§4.1.1).
+ *
+ * **The estimator is the sampler**: it takes positions from the same
+ * five-dimensional sub-sequence {@link drawPosition} does, primitive point *plus*
+ * ball offset. That is what makes it honour `distance` — a rail 0.3 m outside a
+ * zone with `distance = 2` yields plenty of valid mounts, and an estimator that
+ * measured the bare primitive's overlap would call it zero and drop it — and it
+ * is why the number is directly the acceptance rate the rejection loop will see.
+ */
+export function overlapFraction(
+  c: CameraConstraint,
+  seed: number,
+  volumes: readonly SamplingVolume[],
+): number {
+  if (volumes.length === 0) return 0;
+  let hits = 0;
+  for (let k = 0; k < OVERLAP_SAMPLES; k++) {
+    if (inAnyVolume(drawPosition(c, seed, k), volumes)) hits++;
+  }
+  return hits / OVERLAP_SAMPLES;
+}
+
+/** What a draw actually runs over: which constraints, at what weight (§4.1, §4.1.1). */
+export interface DrawBasis {
+  /** The constraints that contribute positions, in scene order. */
+  constraints: CameraConstraint[];
+  /** `constraints[i]`'s weight for the §4.1 split. */
+  weights: number[];
+  /** Every **enabled** constraint's overlap — including the dropped ones (§5.1). */
+  overlaps: ConstraintOverlap[];
+  /** The volumes a drawn position must land in; empty ⇒ no mount filter. */
+  mountVolumes: readonly SamplingVolume[];
+}
+
+/**
+ * Resolve a group's draw inputs (§4.1.1).
+ *
+ * With no mount filter this is exactly the pre-feature behaviour: every enabled
+ * constraint, weighted by its primitive measure. With one, each constraint's
+ * weight becomes its **effective measure** — `measure × overlapFraction` — and a
+ * constraint that estimates to **zero** is dropped from the list entirely rather
+ * than kept at weight 0. Dropping it is what keeps §4.1's floor of 1 meaningful:
+ * a floor position on a constraint no draw can satisfy would burn its attempt cap
+ * and still leave the pool one short of `poolSize`.
+ */
+export function drawBasis(
+  group: ConstraintGroup,
+  constraints: readonly CameraConstraint[],
+  mountVolumes: readonly SamplingVolume[] = [],
+): DrawBasis {
+  const enabled = enabledConstraints(group, constraints);
+  if (mountVolumes.length === 0) {
+    return {
+      constraints: enabled,
+      weights: enabled.map(primitiveMeasure),
+      overlaps: [],
+      mountVolumes: [],
+    };
+  }
+  const overlaps = enabled.map((c) => ({
+    constraintId: c.id,
+    fraction: overlapFraction(c, group.seed, mountVolumes),
+  }));
+  const kept: CameraConstraint[] = [];
+  const weights: number[] = [];
+  enabled.forEach((c, i) => {
+    if (overlaps[i].fraction <= 0) return;
+    kept.push(c);
+    weights.push(primitiveMeasure(c) * overlaps[i].fraction);
+  });
+  return { constraints: kept, weights, overlaps, mountVolumes };
+}
+
+/**
+ * The basis for a draw over **one** constraint — §4.6's Reposition.
+ *
+ * It takes the constraint it was invoked on whatever its measure or its overlap:
+ * a Reposition is a user pointing at a constraint, not a search allocating a
+ * budget across several, so the §4.1.1 zero-hit drop has nothing to decide here.
+ * The mount filter still applies to the draw itself, because it is the same draw.
+ */
+export function soloBasis(
+  c: CameraConstraint,
+  mountVolumes: readonly SamplingVolume[] = [],
+): DrawBasis {
+  return { constraints: [c], weights: [primitiveMeasure(c)], overlaps: [], mountVolumes };
+}
+
+/**
+ * Every enabled constraint's §4.1.1 overlap with a group's target zones, or
+ * **empty** when the group has no mount filter to judge them by.
+ *
+ * Pure, and separate from {@link drawBasis}, because two things read it that
+ * never build a pool: §5's gizmo dimming and the readout beside it. Taking the
+ * group rather than a flag keeps "does this group have a mount filter" in one
+ * place — a caller that tested `restrictMounts` itself and forgot `zoneIds`
+ * would paint every constraint of an untargeted group as unmountable.
+ */
+export function constraintOverlaps(
+  group: ConstraintGroup | null,
+  constraints: readonly CameraConstraint[],
+  volumes: readonly SamplingVolume[],
+): ConstraintOverlap[] {
+  if (!group || !group.restrictMounts || group.zoneIds.length === 0) return [];
+  const mountVolumes = volumesOfZones(volumes, group.zoneIds);
+  if (mountVolumes.length === 0) return [];
+  return enabledConstraints(group, constraints).map((c) => ({
+    constraintId: c.id,
+    fraction: overlapFraction(c, group.seed, mountVolumes),
+  }));
+}
+
+/** The no-mount-filter case: nothing dims. Shared so the view cannot churn on it. */
+export const NO_UNMOUNTABLE: ReadonlySet<string> = new Set<string>();
+
+/** The constraints of {@link constraintOverlaps} no draw can land on (§4.1.1). */
+export function unmountableIds(overlaps: readonly ConstraintOverlap[]): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const o of overlaps) if (o.fraction <= 0) out.add(o.constraintId);
+  return out.size > 0 ? out : NO_UNMOUNTABLE;
+}
+
+/**
+ * The app's own marked set — what a group with no target zones scores against
+ * (§3.1.2). One value, so {@link resolveGroupTarget} cannot pair a filter with
+ * somebody else's denominator.
+ */
+export interface AppMarkedSet {
+  filter: MarkedFilter;
+  /** Counted voxels in it — 0 before any run has produced one. */
+  total: number;
+  /** What it is, for the §3.3.1 fingerprint. */
+  revision: string | number;
+}
+
+/**
+ * A constraint group's target (§3.1.2), resolved against the live scene.
+ *
+ * With no target zones this is exactly what placement did before the feature: the
+ * display descriptor's own filter and the denominator the stats panel quotes, so
+ * the two rates stay comparable. With target zones it is those zones instead —
+ * **regardless of `useZones` and of each zone's `enabled`** — because the group
+ * states its own target and a display toggle does not get to redefine what a
+ * search was run for. That is safe on the compute side: `setSampling` is fed
+ * every volume whatever its zone's `enabled` (`sampling_volumes.md` §7.1), so a
+ * listed zone's voxels are always there to be seen.
+ *
+ * `total` sums the listed zones' own `validVoxels`, which the per-zone
+ * aggregation already reports for every zone. It over-counts where two listed
+ * zones' volumes overlap, so the rate reads low rather than high — the safe
+ * direction for a number that is already an upper bound (§1.3).
+ *
+ * Each flag is honoured **separately**: `restrictScoring` off with
+ * `restrictMounts` on is "mount inside the bay, but score against the app's
+ * marked set", which is a sentence a user can mean.
+ */
+export function resolveGroupTarget(
+  group: ConstraintGroup,
+  scene: {
+    zones: readonly Zone[];
+    volumes: readonly SamplingVolume[];
+    /** A zone's counted voxels, from the per-zone aggregation; 0 before a run. */
+    validVoxels: (zoneId: string) => number;
+  },
+  app: AppMarkedSet,
+): GroupTarget {
+  const listed = group.zoneIds.length > 0 ? scene.zones.filter((z) => group.zoneIds.includes(z.id)) : [];
+  if (listed.length === 0) {
+    return {
+      filter: app.filter,
+      total: app.total,
+      mountVolumes: [],
+      zoneNames: [],
+      markedRevision: app.revision,
+      mountRevision: '',
+    };
+  }
+  const ids = listed.map((z) => z.id);
+  const revision = targetRevision(ids, scene.volumes);
+  return {
+    filter: group.restrictScoring ? markedFilterForZones(scene.volumes, ids) : app.filter,
+    total: group.restrictScoring ? ids.reduce((sum, id) => sum + scene.validVoxels(id), 0) : app.total,
+    mountVolumes: group.restrictMounts ? volumesOfZones(scene.volumes, ids) : [],
+    zoneNames: group.restrictScoring ? listed.map(zoneLabel) : [],
+    markedRevision: group.restrictScoring ? revision : app.revision,
+    mountRevision: group.restrictMounts ? revision : '',
+  };
+}
+
+/**
+ * §10's regenerate row: the status line naming how many groups lost a target
+ * when Generate replaced the zone set (`sampling_volumes.md` §3.4), or null when
+ * none held one.
+ *
+ * Counted from the groups **before** the dispatch, since the reducer clears the
+ * lists it is reporting on.
+ */
+export function regeneratedTargetsNotice(groups: readonly ConstraintGroup[]): string | null {
+  const n = groups.filter((g) => g.zoneIds.length > 0).length;
+  if (n === 0) return null;
+  return `Zones were regenerated; ${n} constraint group(s) lost their target zones.`;
+}
+
 /** The constraints an analysis draws from: this group's, enabled only (§4.1). */
 export function enabledConstraints(
   group: ConstraintGroup,
@@ -210,8 +482,12 @@ export function enabledConstraints(
 // --- The split (§4.1) --------------------------------------------------------
 
 /**
- * How many positions each constraint contributes, weighted by its primitive
- * measure with a **floor of 1** (§4.1).
+ * How many positions each constraint of a {@link DrawBasis} contributes,
+ * weighted by its measure with a **floor of 1** (§4.1).
+ *
+ * The basis is the parameter rather than a constraint list and a parallel weight
+ * array because the two are only ever correct together: a split over one group's
+ * constraints and another's weights is a wrong pool that looks like a pool.
  *
  * The floor exists so a single surveyed mount point in a group full of walls is
  * never starved — and it is also that point's correct share, since a
@@ -220,12 +496,12 @@ export function enabledConstraints(
  * back the same way — so the shares always sum to `poolSize` exactly (or to the
  * number of constraints, when there are more constraints than positions).
  */
-export function poolSplit(constraints: readonly CameraConstraint[], poolSize: number): number[] {
+export function poolSplit(basis: DrawBasis, poolSize: number): number[] {
+  const { constraints, weights } = basis;
   const n = constraints.length;
   if (n === 0) return [];
   if (poolSize <= n) return constraints.map(() => 1);
 
-  const weights = constraints.map(primitiveMeasure);
   const total = weights.reduce((a, b) => a + b, 0);
   // With no measure anywhere (every constraint a point), share out evenly.
   const shares = weights.map((w) =>
@@ -305,18 +581,26 @@ export interface HeldDraws {
  */
 export function planDraws(
   group: ConstraintGroup,
-  constraints: readonly CameraConstraint[],
+  basis: DrawBasis,
   opts: { held?: ReadonlyMap<string, HeldDraws> } = {},
 ): PlannedDraw[] {
-  const shares = poolSplit(constraints, group.poolSize);
+  const shares = poolSplit(basis, group.poolSize);
+  const mount = basis.mountVolumes;
   const draws: PlannedDraw[] = [];
-  constraints.forEach((c, i) => {
+  basis.constraints.forEach((c, i) => {
     const held = opts.held?.get(c.id);
     const want = shares[i] - (held?.kept ?? 0);
-    const start = held?.nextSeq ?? 0;
-    for (let n = 0; n < want; n++) {
-      const k = start + n;
-      draws.push({ constraintId: c.id, seqIndex: k, position: drawPosition(c, group.seed, k) });
+    let k = held?.nextSeq ?? 0;
+    // With a mount filter the sequence is walked rather than sliced: a draw that
+    // lands outside the target zones is skipped here, on the CPU, before it can
+    // cost a build step (§4.1.1). The cap is what makes a constraint whose
+    // estimate over-stated its overlap terminate.
+    const cap = k + Math.max(want, 0) * (mount.length > 0 ? MOUNT_ATTEMPT_FACTOR : 1);
+    for (let n = 0; n < want && k < cap; k++) {
+      const position = drawPosition(c, group.seed, k);
+      if (mount.length > 0 && !inAnyVolume(position, mount)) continue;
+      draws.push({ constraintId: c.id, seqIndex: k, position });
+      n++;
     }
   });
   return draws;
@@ -330,10 +614,10 @@ export function planDraws(
  */
 export function truncatedShares(
   group: ConstraintGroup,
-  constraints: readonly CameraConstraint[],
+  basis: DrawBasis,
 ): ReadonlyMap<string, number> {
-  const shares = poolSplit(constraints, group.poolSize);
-  return new Map(constraints.map((c, i) => [c.id, shares[i]]));
+  const shares = poolSplit(basis, group.poolSize);
+  return new Map(basis.constraints.map((c, i) => [c.id, shares[i]]));
 }
 
 /**
@@ -346,9 +630,19 @@ export function replacementDraw(
   c: CameraConstraint,
   spent: number,
   share: number,
+  basis: DrawBasis,
 ): PlannedDraw | null {
-  if (spent >= share * REJECT_ATTEMPT_FACTOR) return null;
-  return { constraintId: c.id, seqIndex: spent, position: drawPosition(c, group.seed, spent) };
+  const mountVolumes = basis.mountVolumes;
+  const gpuCap = share * REJECT_ATTEMPT_FACTOR;
+  // Out-of-zone draws are skipped rather than returned: they cost no build step,
+  // so they must not consume the GPU budget the cap is protecting (§4.1.1).
+  const cpuCap = spent + Math.max(share, 1) * MOUNT_ATTEMPT_FACTOR;
+  for (let k = spent; k < gpuCap && k < cpuCap; k++) {
+    const position = drawPosition(c, group.seed, k);
+    if (mountVolumes.length > 0 && !inAnyVolume(position, mountVolumes)) continue;
+    return { constraintId: c.id, seqIndex: k, position };
+  }
+  return null;
 }
 
 // --- The build step (§2.1, §4.3) ------------------------------------------------
@@ -421,9 +715,13 @@ export function buildStepSpec(sceneCameraCount: number, marked: MarkedFilter): A
 export function poolFingerprint(input: {
   geometryRevision: string | number;
   voxelSize: number;
+  /** The **target** set's revision: the listed zones' when the group has them,
+   * else the app's marked set (§3.1.2). */
   markedRevision: string | number;
   near: number;
   far: number;
+  /** The group's mount filter, or '' when it has none (§4.1.1). */
+  mountRevision?: string | number;
 }): string {
   return [
     input.geometryRevision,
@@ -431,22 +729,72 @@ export function poolFingerprint(input: {
     input.markedRevision,
     input.near,
     input.far,
+    input.mountRevision ?? '',
   ].join('|');
+}
+
+/**
+ * The part of a fingerprint that describes a group's target zones (§3.3.1).
+ *
+ * **Sorted**, because `zoneIds` is a set and its order carries no meaning — a
+ * reorder that discarded a pool would cost minutes of GPU for nothing. The
+ * volumes' own geometry rides along, since reshaping a listed volume changes the
+ * filter every cached set was built under.
+ */
+export function targetRevision(zoneIds: readonly string[], volumes: readonly SamplingVolume[]): string {
+  if (zoneIds.length === 0) return '';
+  const parts = volumesOfZones(volumes, zoneIds).map(
+    (v) => `${v.id}:${v.position.join(',')}:${v.rotation.join(',')}:${v.size.join(',')}`,
+  );
+  return [...zoneIds].sort().join(',') + '|' + parts.sort().join(';');
 }
 
 /** The §5.1 readout for a built pool. */
 export function poolSummary(pool: Pool, constraints: readonly CameraConstraint[]): string {
+  const name = labeller(constraints);
   const parts = [`${pool.positions.length} positions`];
   if (pool.rejected > 0) parts.push(`${pool.rejected} rejected (saw nothing)`);
   if (pool.markedTotal > 0) {
     parts.push(`ceiling ${((100 * pool.poolCeiling) / pool.markedTotal).toFixed(1)}%`);
   }
   let text = parts.join(' · ');
+  // The §10 row for a pool built under a mount filter no constraint could satisfy.
+  // The percentages themselves are {@link overlapSummary}'s, shown by the card
+  // whether or not a pool exists (§5.1); this line is about *this pool*, so it
+  // reads off what the pool was built under.
+  if (pool.overlaps.length > 0 && pool.overlaps.every((o) => o.fraction <= 0)) {
+    text += "\nNo constraint overlaps this group's target zones — the pool is empty.";
+  }
   for (const id of pool.emptyConstraints) {
-    const c = constraints.find((x) => x.id === id);
-    text += `\n${c ? constraintLabel(c) : id} saw nothing from any sampled position.`;
+    text += `\n${name(id)} saw nothing from any sampled position.`;
   }
   return text;
+}
+
+/** Constraint id → its display label, or the bare id for one already deleted. */
+function labeller(constraints: readonly CameraConstraint[]): (id: string) => string {
+  return (id) => {
+    const c = constraints.find((x) => x.id === id);
+    return c ? constraintLabel(c) : id;
+  };
+}
+
+/**
+ * The §4.1.1 overlap line — `Dock rail 100% · North wall 4% · Rail 2 0%` — or
+ * null when the group has no mount filter.
+ *
+ * Formatted here rather than in either panel because both show it: §5.1's Build
+ * card, where it precedes a build as well as follows one, and §5's group card,
+ * where it is the text cue beside the dimmed gizmos (`VISUAL_DESIGN.md` —
+ * never encode state in a visual channel alone).
+ */
+export function overlapSummary(
+  overlaps: readonly ConstraintOverlap[],
+  constraints: readonly CameraConstraint[],
+): string | null {
+  if (overlaps.length === 0) return null;
+  const name = labeller(constraints);
+  return overlaps.map((o) => `${name(o.constraintId)} ${Math.round(100 * o.fraction)}%`).join(' · ');
 }
 
 /** An empty pool for a group, before anything is built. */
@@ -461,6 +809,7 @@ export function emptyPool(groupId: string, fingerprint: string, size = 0, seed =
     emptyConstraints: [],
     poolCeiling: 0,
     markedTotal: 0,
+    overlaps: [],
   };
 }
 

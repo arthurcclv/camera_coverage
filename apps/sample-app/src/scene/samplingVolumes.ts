@@ -99,6 +99,29 @@ export function inZone(p: Vec3, zoneVolumes: SamplingVolume[]): boolean {
   return zoneVolumes.some((v) => inVolume(p, v));
 }
 
+/**
+ * The volumes belonging to any of `zoneIds` — a constraint group's **target
+ * volumes** (`camera_placement.md` §3.1.2).
+ *
+ * Ids naming no live zone simply match nothing, which is what lets the placement
+ * side treat a stale reference as absent rather than as an error; the reducer
+ * prunes them eagerly anyway (`camera_placement.md` §7).
+ */
+export function volumesOfZones(
+  volumes: readonly SamplingVolume[],
+  zoneIds: readonly string[],
+): SamplingVolume[] {
+  if (zoneIds.length === 0) return [];
+  const wanted = new Set(zoneIds);
+  return volumes.filter((v) => wanted.has(v.zoneId));
+}
+
+/** World point `p` inside any of these volumes? The §4.1.1 mount test. */
+export function inAnyVolume(p: Vec3, volumes: readonly SamplingVolume[]): boolean {
+  for (const v of volumes) if (inVolume(p, v)) return true;
+  return false;
+}
+
 /** The world AABB of an oriented box: transform its 8 corners, take min/max (§7.1). */
 export function obbWorldAabb(v: SamplingVolume): { min: Vec3; max: Vec3 } {
   const hx = v.size[0] / 2;

@@ -1403,6 +1403,7 @@ panel is exactly as above (the SDK summary).
 | Placement tool cannot start (engine still loading, slots, a session already open, pending sampling, no enabled constraint) | the entry point is disabled with the reason (`camera_placement.md` §10). The engine-readiness check is the tool's own: a build step does not pass the Run gate of §8 |
 | `CAMERA_INSIDE_GEOMETRY` for a **capture slot** during a session | **suppressed** for the session's duration; the pool position is rejected instead (`camera_placement.md` §4.2) |
 | A pool build `compute()` rejects | build steps stop, the session closes, the partial pool is discarded, the SDK message goes to the status area (`camera_placement.md` §10) |
+| Zones regenerated while a constraint group held target zones (§7) | **warning**, not an error: the lists are cleared and the status area names the groups — `Zones were regenerated; N constraint group(s) lost their target zones.` (`camera_placement.md` §3.1.2, §7) |
 | Worker/device errors | reported in a status area; engine re-init offered |
 
 ---
@@ -1991,7 +1992,14 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   — the camera **template**, the **pool size** and the analysis **strategy** all persist, so a
   seeded search is reproducible from the file that records its output. A group carries no
   `aspect`/`near` of its own (`camera_placement.md` §3.1.1); both keys are read and ignored
-  when an older file has them. A constraint is
+  when an older file has them. It may also carry **`zoneIds`** (ids of `zones`, the group's
+  **target zones**), **`restrictScoring`** and **`restrictMounts`**
+  (`camera_placement.md` §3.1.2) — all three **optional on read**, defaulting to `[]` /
+  `true` / `false`, and written always. They are **additive at `formatVersion` 3**, with no
+  bump: a v3 file without them reads as an untargeted group, and a file with them opens in an
+  older build as the same untargeted group. A `zoneIds` entry naming an unknown zone is
+  **dropped**, as a `volume` with a dangling `zoneId` already is — a scene that legitimately
+  lost a zone must still reload. A constraint is
   `{ id, groupId, name, enabled, kind, distance }` plus its per-kind geometry:
   `position` (point), `points` (polyline), or `position`/`rotation`/`size` (plane).
   The **pool, the search result, and the selected camera count are not persisted** —
@@ -2033,6 +2041,7 @@ Sketch:
   "constraintGroups": [
     { "id": "cg-1", "name": "Dock", "enabled": true,
       "fov": 60, "far": 30, "namePrefix": "Dock",
+      "zoneIds": ["zone-1"], "restrictScoring": true, "restrictMounts": false,
       "poolSize": 200, "maxCount": 10, "trials": 1000, "epsilon": 1.0, "seed": 1 }
   ],
   "constraints": [

@@ -122,5 +122,8 @@ export function duplicateConstraintGroup(
       const copy = { ...c, id: conId, groupId: newGroupId };
       return copy.kind === 'polyline' ? { ...copy, points: copy.points.map((p) => [...p] as typeof p) } : copy;
     });
-  return { group: { ...src, id: newGroupId }, constraints: copies };
+  // `zoneIds` is copied, not shared: the duplicate plans for the same place
+  // (`camera_placement.md` §7), but editing one group's list must not edit the
+  // other's.
+  return { group: { ...src, id: newGroupId, zoneIds: [...src.zoneIds] }, constraints: copies };
 }

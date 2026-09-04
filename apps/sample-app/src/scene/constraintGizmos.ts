@@ -33,6 +33,7 @@ import type { Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 import { RenderOrder } from './renderOrder.ts';
 import { PickableGizmoSet } from './gizmoSet.ts';
 import type { CameraConstraint } from '../placement/region.ts';
+import { NO_UNMOUNTABLE } from '../placement/pool.ts';
 import { segmentPairs } from './polylineDraw.ts';
 
 interface ConstraintEntry {
@@ -46,7 +47,10 @@ interface ConstraintEntry {
   dilation: THREE.Group;
   /** What `dilation` was built for. */
   signature: string;
+  /** False when the selected group's mount filter excludes this constraint (§4.1.1). */
+  mountable: boolean;
 }
+
 
 const EDGE_COLOR = 0xc08bd0; // violet — distinct from cameras / probes / volumes
 const SELECTED_COLOR = 0xffd23f;
@@ -108,8 +112,17 @@ function fillMaterial(): THREE.MeshBasicMaterial {
   return mat;
 }
 
-/** The opacity a constraint body draws at (§6.1) — one ramp for every fill. */
-export function fillOpacity(selected: boolean, enabled: boolean): number {
+/**
+ * The opacity a constraint body draws at (§6.1) — one ramp for every fill.
+ *
+ * `mountable` is false for a constraint that a selected group's mount filter
+ * excludes entirely (`camera_placement.md` §3.1.2, §4.1.1): it is *there*, and
+ * editable, but no draw can land on it. Dimming it to the disabled level is what
+ * makes a wall with no zone overlap look different from a good one **before**
+ * Build is pressed, rather than after minutes of GPU.
+ */
+export function fillOpacity(selected: boolean, enabled: boolean, mountable = true): number {
+  if (!mountable) return selected ? 0.06 : 0.03;
   if (selected) return 0.16;
   return enabled ? 0.1 : 0.04;
 }
@@ -126,9 +139,15 @@ export class ConstraintGizmoSet extends PickableGizmoSet<ConstraintEntry> {
     constraints: readonly CameraConstraint[],
     selectedId: string | null,
     selectedVertex: number | null,
+    /**
+     * Constraint ids the selected group's mount filter excludes (§4.1.1); they
+     * dim. Empty means no filter, which is the ordinary case.
+     */
+    unmountable: ReadonlySet<string> = NO_UNMOUNTABLE,
   ): void {
     this.reconcile([...constraints], (entry, c) => {
       const selected = c.id === selectedId;
+      entry.mountable = !unmountable.has(c.id);
       const signature = shapeSignature(c);
       if (entry.signature !== signature) {
         this.rebuild(entry, c);
@@ -192,7 +211,7 @@ export class ConstraintGizmoSet extends PickableGizmoSet<ConstraintEntry> {
     const dilation = new THREE.Group();
     root.add(dilation);
     this.group.add(root);
-    return { root, transformTarget: root, handles: [], dilation, signature: '', };
+    return { root, transformTarget: root, handles: [], dilation, signature: '', mountable: true };
   }
 
   protected disposeEntry(entry: ConstraintEntry): void {
@@ -333,11 +352,14 @@ export class ConstraintGizmoSet extends PickableGizmoSet<ConstraintEntry> {
       // primitive body like a plane's rectangle — a constraint should read as
       // see-through the way the point constraint's ball does. Handles and lines are
       // the crisp part and stay opaque.
-      if (mat.userData.fill === true) mat.opacity = fillOpacity(selected, c.enabled);
+      if (mat.userData.fill === true) mat.opacity = fillOpacity(selected, c.enabled, entry.mountable);
       else if ('color' in mat) {
         (mat as THREE.MeshBasicMaterial).color.setHex(color);
-        mat.opacity = c.enabled ? 1 : 0.35;
-        mat.transparent = !c.enabled;
+        // A constraint no draw can land on reads like a disabled one, because
+        // for a placement run that is exactly what it is (§4.1.1).
+        const live = c.enabled && entry.mountable;
+        mat.opacity = live ? 1 : 0.35;
+        mat.transparent = !live;
       }
     });
   }

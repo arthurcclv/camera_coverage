@@ -77,6 +77,7 @@ readout beside it is what carries absolute value.
 | Sampling-volume box (edges + faint fill) | `0x8bd0c0` (teal) | `scene/samplingVolumeGizmos.ts` |
 | Volume selected / disabled-zone volume | edges `0xffd23f` (yellow) / dimmed to opacity 0.25 | |
 | Camera-constraint handles + bodies | `0xc08bd0` (violet); handles opaque, every fill 0.16 selected / 0.10 / 0.04 disabled | `scene/constraintGizmos.ts` |
+| Constraint outside a group's mount zones | fill 0.06 selected / 0.03, edges at 0.35 — the disabled treatment, because for a placement run that is what it is. Never the only cue: the group panel spells out the overlap percentages (`camera_placement.md` §3.1.2, §4.1.1) | `scene/constraintGizmos.ts` |
 | Constraint / vertex selected, disabled constraint | `0xffd23f` (yellow) / opacity 0.35 | `camera_placement.md` §6.1 |
 | Placement pool scatter | violet ramped 0.35→1.0 by the position's own reachable count; chosen positions `0xffd23f`. **4 px screen-space dots** (`sizeAttenuation: false`) drawn as an instanced **sprite**, not `THREE.Points` — WebGPU point primitives are fixed at 1 px, and a world-space size small enough for a 6 m room is sub-pixel on the 1120 m site | `camera_placement.md` §5.2 |
 | Draft polyline (armed draw mode) | `0xffd23f`: a 7 px screen-space dot per clicked vertex plus a solid line between them, both `depthTest: false` at `RenderOrder.draftOverlay`. Solid rather than dashed because two dashed constructions rendered nothing under this WebGPU backend (`CONVENTIONS.md`) | `camera_placement.md` §6.2 |
@@ -130,6 +131,19 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   `row-resize` divider), center viewport (`flex: 1`, `min-width: 0`) with absolute
   top-left and top-right icon toolbars, right sidebar `340px`. Side columns
   scroll; the app shell never scrolls (`overflow: hidden`).
+- **Target-zone list** (`ConstraintGroupPanel`, `camera_placement.md` §3.1.2): a
+  `subhead` title, the two `.checkbox-row` flags, then a `.row` holding a `.select`
+  that lists only the **unlisted** zones — so it reads as an *action* ("add a
+  zone…"), never as a field, and a duplicate is impossible by construction — and
+  one `.row` per listed zone with its label and an `.icon-btn` `×`. No chip or tag
+  component: the app has none, and a list showing only what was picked stays short
+  on a site whose BVH cut produced dozens of zones. An empty list carries a `.hint`
+  saying the group scores against the whole marked set, so "no zones" reads as a
+  state rather than as an unfinished control. With `restrictMounts` on, a second
+  `.hint` carries the per-constraint overlap percentages
+  (`Dock rail 100% · North wall 4%`) — the same line the placement mode's Build
+  card shows, and the text cue that keeps the dimmed gizmos from being the only
+  signal.
 - **Placement mode** (`camera_placement.md` §5): the same three columns, with both
   side columns' *contents* replaced — nothing about the shell changes, because
   the mode's claim is exclusion, not screen space. The left column
@@ -248,7 +262,11 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   chrome (dark field, subtle border, 4 px radius) — the volume zone-reassign
   dropdown and the editable zone name.
 - **Checkbox row** (`.checkbox-row`): inline checkbox + 12 px label, for the
-  "Restrict coverage to zones" toggle.
+  "Restrict coverage to zones" toggle and the constraint group's two
+  "Restrict … to zones" flags. Both group flags render **disabled** while the
+  target-zone list is empty, carrying `Add a target zone to use these.` as their
+  `title` — the flags are genuinely inert then (`camera_placement.md` §3.1.2), and
+  a live checkbox that changed nothing would be the worse lie.
 - **Menu** (`.menu`): popover for the add-entity menu and the right-click
   Duplicate/Delete context menu — dark surface, shadow `0 6px 20px rgba(0,0,0,.45)`,
   blue hover. The three hierarchy popovers (add menu, its submenu, the context menu)
@@ -307,6 +325,10 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   ("inside geometry"), coverage carries a numeric % and count next to the dot,
   probe visibility uses a ✓/– `.mark` glyph alongside color, and the compute/render
   backend is a labeled badge. Keep the redundant text/glyph cue when you add color.
+  **The rule covers opacity too**: a constraint excluded by a group's mount filter
+  dims to the *same* ramp as a disabled one, so the group panel spells out its
+  overlap percentage in words rather than leaving the viewport to be interpreted
+  (`camera_placement.md` §5).
 - **Contrast:** primary text `#e6e8eb` on the dark surfaces is high-contrast;
   muted greys (`#7c8592`, `#7a828f`) are for secondary/hint text only, not primary
   reading content — don't push important text into them.

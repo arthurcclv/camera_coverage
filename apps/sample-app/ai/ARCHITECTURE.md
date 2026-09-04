@@ -181,7 +181,11 @@ default" — see DECISIONS.md).
   `AggregateIndex` that reads the results back. Kept whole rather than split
   across the four consumers because a zone's group index and the group its
   numbers are read from drifting apart produces a plausible wrong number, never
-  an error. Unit-tested in `test/aggregateSpec.test.ts`.
+  an error. Unit-tested in `test/aggregateSpec.test.ts`. It also exports
+  `markedFilterForZones(volumes, zoneIds)` — the same `MarkedFilter` over a
+  **chosen** set of zones, which is how a constraint group's target zones reach a
+  build step (`camera_placement.md` §3.1.2). One construction of a filter, not
+  two, so a targeted build and the display run cannot disagree about "counted".
 - `coverageRun.ts` — the merged store of a run's `AggregateResult`s plus the
   §14.4 generation guard. Merges on **read**, not on arrival: an incremental run
   re-sends a few chunks and each must *replace* its predecessor, which a running
@@ -461,7 +465,9 @@ DECISIONS.md). Read it bottom-up:
   a rounded rim for free. Also owns `primitiveMeasure` (the pool-split weight),
   `projectIntoRegion` (the drag clamp), the entity defaults, and the
   `constraintProblem`/`groupProblem` validators the **scene-file reader and the panels
-  share**, so an imported constraint and a hand-edited one are rejected identically.
+  share**, so an imported constraint and a hand-edited one are rejected identically. A
+  group also carries its **target zones** — `zoneIds` plus `restrictScoring` /
+  `restrictMounts` (`camera_placement.md` §3.1.2).
 - `halton.ts` — the deterministic low-discrepancy sequence the pool is drawn from, its
   ball map, and the per-constraint offsets. Five dimensions per position **always**, so
   the index→position mapping is independent of kind and tolerance; that is what makes the
@@ -484,7 +490,21 @@ DECISIONS.md). Read it bottom-up:
 - `pool.ts` — the SDK-shaped half: the measure-weighted split, the draw plan, the build-step
   camera list and descriptor, the rejection budget, the fingerprint, and the blockers. Its
   build-step descriptor carries the marked filter **handed over from
-  `scene/aggregateSpec.ts`**, for the identical reason `optimize/session.ts` does.
+  `scene/aggregateSpec.ts`**, for the identical reason `optimize/session.ts` does. It also
+  owns the **mount filter** (`camera_placement.md` §4.1.1): `overlapFraction` estimates a
+  constraint's overlap with the group's target zones by *running the constraint's own draw*
+  — the estimator is the sampler, so `distance` is honoured for free and the number is
+  directly the acceptance rate — and `drawBasis` turns that into the effective measures the
+  split uses, dropping a zero-overlap constraint rather than keeping it at weight 0. A
+  `DrawBasis` (constraints + weights + mount volumes) is what `poolSplit` / `planDraws` /
+  `truncatedShares` / `replacementDraw` all take, because those three are only ever correct
+  together. `GroupTarget` is the one value a group's zones resolve to (filter, denominator,
+  mount volumes, names, fingerprint parts) and `resolveGroupTarget` is the pure function
+  that produces it from the group, the scene and the app's own marked set — so a filter from
+  the listed zones can never be paired with a denominator from the enabled ones. The rest of
+  §3.1.2's rendering decisions live here for the same reason (App has no test):
+  `constraintOverlaps` / `unmountableIds` (which gizmos dim), `overlapSummary` (the line
+  both cards show), and `regeneratedTargetsNotice` (§10's status line).
 - `curvePlot.ts` — the score-vs-count plot's geometry: the value range and its headroom,
   the count→x and score→y maps the polyline is drawn with, and `countAtFraction`, the
   inverse a click uses. Pure, and separate from the panel because the drawing and the
@@ -555,12 +575,18 @@ the two sessions are mutually exclusive rather than each reserving its own.
   that dropdown was a second selection model beside the hierarchy's, and it only existed
   because a sidebar panel had no other way to know which group the user meant. Its axis says
   **reachable**, never coverage (see DECISIONS.md).
-- `ConstraintGroupPanel.tsx` — selected group: name, constraint count, and **Place
-  cameras**, the mode's only entry point, disabled with its reason when the group cannot be
-  searched. The camera **template** is *not* here — it is the mode's third card, because it
-  is an input to a placement run rather than a description of the group, and out here it
-  cost this panel a heading and a second thought. The **strategy** is persisted on the group
-  and shown only in the mode for the same reason.
+- `ConstraintGroupPanel.tsx` — selected group: name, constraint count, the **target zone**
+  list, and **Place cameras**, the mode's only entry point, disabled with its reason when
+  the group cannot be searched. The camera **template** is *not* here — it is the mode's
+  third card, because it is an input to a placement run rather than a description of the
+  group, and out here it cost this panel a heading and a second thought. The **strategy** is
+  persisted on the group and shown only in the mode for the same reason. The **target
+  zones** are the one placement input that stays, because they are a *reference to other
+  entities* rather than a number: they give the group its identity, they must outlive zone
+  deletion and regeneration, and through `restrictMounts` they change what every constraint
+  in the group geometrically means (see DECISIONS.md). With `restrictMounts` on it also
+  carries the §4.1.1 overlap percentages in words — the text cue beside the dimmed gizmos,
+  since dimming alone cannot separate "no draw can land here" from "disabled".
 - `ConstraintPanel.tsx` — selected constraint: kind, group, tolerance, geometry, and for a
   polyline **only the selected vertex** — its coordinates plus Insert / Delete / Extend
   (`PolylineVertex`, in the same file). The panel half of the draw mode; a rail's dozens of

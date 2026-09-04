@@ -96,6 +96,12 @@ every coverage number in the app depends on it — while a camera constraint
 cameras. A volume is also a plain box; a constraint is a point, polyline, or plane dilated
 by a tolerance.
 
+**A constraint group may nevertheless *reference* zones**, by id, as its **target zones**
+(`camera_placement.md` §3.1.2) — the zones a group of cameras is being planned for. The
+dependence is strictly one-way: placement reads zones, zones never read placement. So nothing
+in this document has to know about groups, with the single exception of §3.4's replacement
+rule, which invalidates those references by construction.
+
 A volume is an OBB: a unit cube scaled by `size`, rotated by `rotation`, translated
 to `position` (axis-aligned when `rotation` is identity). `{position, rotation,
 size}` maps 1:1 to a Three.js object's `position`/`quaternion`/`scale`, so
@@ -226,6 +232,12 @@ overlap — fine, the marked set is a union.
   set** with the freshly extracted result. Hand-edits since the last Generate are
   discarded — the tool is an explicit re-seed. Generating auto-selects the first
   new zone.
+- **It also clears every constraint group's target zones** (`camera_placement.md` §3.1.2,
+  §7), and the status area names the groups that lost one. The replacement re-numbers from
+  `zone-1`, so `zone-3` still exists after a regenerate and names a *different* box: a
+  reference kept across it would point at unrelated geometry, and the group would rebuild its
+  pool against a target nobody chose. Deleting a single zone is different — there the id
+  genuinely goes away, so it is pruned from the lists instead (`camera_placement.md` §7).
 - Skip the **empty-scene sentinel** root (inverted AABB `min = 1e30`,
   `max = -1e30`; `bvh.ts` flatten) — it yields no zone.
 
@@ -394,6 +406,12 @@ denominator):
 ## 7. Effect on the coverage calculation (`spec.md` §7, §9, §10, §13)
 
 ### 7.1 What the SDK computes (`setSampling`)
+
+> **`setSampling` is fed every volume, regardless of its zone's `enabled`.** Activation and
+> the marked set are §2.2's business — `enabled` decides what is *counted*, never what is
+> *computed*. This is what lets a constraint group target a globally-disabled zone
+> (`camera_placement.md` §3.1.2): the voxels are there to be seen, and only the counting
+> filter ever looked at the flag.
 
 The run path (§8) derives the SDK regions from **all** volumes across **all** zones:
 

@@ -108,6 +108,11 @@ export function PlacementReviewPanel({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [confirming, onKeepOpen, onRequestClose]);
 
+  // Two names in full, a count past that: the axis has to stay one line.
+  const names = session.target?.zoneNames ?? [];
+  const targetLabel =
+    names.length === 0 ? null : names.length <= 2 ? names.join(', ') : `${names.length} zones`;
+
   return (
     <div className="panel placement-review">
       <p className="panel-title">
@@ -118,7 +123,15 @@ export function PlacementReviewPanel({
       <div className="panel-body">
         {hasCurve && pool && selected !== null ? (
           <>
-            <p className="panel-title subhead">Reachable by camera count</p>
+            {/* The axis names the target zones when the group has them (§5.2):
+                §3.3 borrowed the display descriptor's filter precisely so the two
+                panels could not disagree about "counted", and a target set breaks
+                that on purpose — so the axis says what it is a percentage *of*. */}
+            <p className="panel-title subhead">
+              {targetLabel === null
+                ? 'Reachable by camera count'
+                : `Reachable by camera count — ${targetLabel}`}
+            </p>
             <ReachableCurve
               curve={curve}
               markedTotal={pool.markedTotal}
@@ -161,7 +174,7 @@ export function PlacementReviewPanel({
               <b>{selected}</b>
             </div>
             <div className="stat-line">
-              <span>Reachable</span>
+              <span>{targetLabel === null ? 'Reachable' : `Reachable — ${targetLabel}`}</span>
               <b>{pct(layout?.score ?? 0, pool.markedTotal)}</b>
             </div>
             <div className="stat-line">

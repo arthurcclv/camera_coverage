@@ -32,6 +32,12 @@ export interface CandidatePositionsPanelProps {
   session: PlacementSession;
   group: ConstraintGroup;
   constraints: readonly CameraConstraint[];
+  /**
+   * The §4.1.1 overlap line, or null with no mount filter — resolved outside the
+   * panel because it costs 256 draws per constraint and is shown in two places
+   * (§5, §5.1).
+   */
+  overlapText: string | null;
   /** The last placement error, shown here because the sidebar is hidden (§10). */
   error: string | null;
   onChangeGroup(id: string, patch: Partial<ConstraintGroup>): void;
@@ -41,6 +47,7 @@ export function CandidatePositionsPanel({
   session,
   group,
   constraints,
+  overlapText,
   error,
   onChangeGroup,
 }: CandidatePositionsPanelProps) {
@@ -52,9 +59,25 @@ export function CandidatePositionsPanel({
       <p className="panel-title">Candidate position pool</p>
 
       <div className="panel-body">
-        {/* The pool in hand, directly under the title: it is what the card is
-            *about* once one exists, and reading it above `Size` is what tells
-            the user whether the number below is worth changing (§5.1). */}
+        {/* The denominator §5.2's percentages are of — stated here because with
+            target zones it is no longer the figure the stats panel divides by
+            (§3.3, §5.1). */}
+        {session.target && session.target.zoneNames.length > 0 && (
+          <p className="hint readout">
+            {`target ${session.target.zoneNames.length === 1 ? session.target.zoneNames[0] : `${session.target.zoneNames.length} zones`}`}
+            {session.target.total > 0 ? ` · ${session.target.total.toLocaleString()} voxels` : ''}
+          </p>
+        )}
+
+        {/* The per-constraint overlaps (§5.1). They come from the §4.1.1 estimate
+            rather than from the pool, so they are on screen **before** Build as
+            well as after — which is the whole point of a number that costs no
+            GPU: `North wall 4%` is worth seeing before minutes are spent on it. */}
+        {overlapText && <p className="hint readout">{overlapText}</p>}
+
+        {/* The pool in hand: it is what the card is *about* once one exists, and
+            reading it above `Size` is what tells the user whether the number
+            below is worth changing (§5.1). */}
         {pool && !session.running && (
           <p className="hint readout">
             {poolSummary(pool, constraints)

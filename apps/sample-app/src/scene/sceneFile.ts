@@ -346,13 +346,18 @@ const CONSTRAINT_KINDS: ConstraintKind[] = ['point', 'polyline', 'plane'];
 
 /**
  * Parses `constraintGroups` (§14.3, `camera_placement.md` §9): each carries the
- * camera template, the pool size and the strategy, ids unique, blank name → default.
+ * camera template, the pool size, the strategy and its **target zones**, ids
+ * unique, blank name → default.
+ *
+ * Takes the parsed `zones` so a `zoneIds` entry naming no live zone can be
+ * dropped, as `parseVolumes` already drops an orphan volume.
  *
  * All three are validated by `groupProblem` — the same predicate
  * the panels use — so an imported group and a hand-edited one are rejected for
  * the same reasons, in the same words.
  */
-function parseConstraintGroups(raw: unknown): ConstraintGroup[] | string {
+function parseConstraintGroups(raw: unknown, zones: Zone[]): ConstraintGroup[] | string {
+  const liveZones = new Set(zones.map((z) => z.id));
   if (raw === undefined) return []; // v1/v2 file (§14.8)
   if (!Array.isArray(raw)) return 'constraintGroups must be an array';
   const groups: ConstraintGroup[] = [];
@@ -374,6 +379,25 @@ function parseConstraintGroups(raw: unknown): ConstraintGroup[] | string {
     for (const key of numbers) {
       if (!isFiniteNumber(item[key])) return `constraintGroups[${i}]: ${key} must be a number`;
     }
+    // Target zones (`camera_placement.md` §3.1.2, §9) are **optional on read**:
+    // a v3 file written before the feature has none, and the defaults reproduce
+    // its behaviour exactly. Additive, so no version bump.
+    if (item.zoneIds !== undefined && !Array.isArray(item.zoneIds)) {
+      return `constraintGroups[${i}]: zoneIds must be an array`;
+    }
+    for (const flag of ['restrictScoring', 'restrictMounts'] as const) {
+      if (item[flag] !== undefined && typeof item[flag] !== 'boolean') {
+        return `constraintGroups[${i}]: ${flag} must be a boolean`;
+      }
+    }
+    // An id naming no live zone is **dropped**, not rejected — the same
+    // treatment `parseVolumes` gives a dangling `zoneId`. A scene that
+    // legitimately lost a zone through editing must still reload.
+    const zoneIds = Array.isArray(item.zoneIds)
+      ? [...new Set((item.zoneIds as unknown[]).filter((z): z is string => typeof z === 'string'))].filter(
+          (z) => liveZones.has(z),
+        )
+      : [];
     const rawName = typeof item.name === 'string' ? item.name.trim() : '';
     const group: ConstraintGroup = {
       id: item.id,
@@ -382,6 +406,9 @@ function parseConstraintGroups(raw: unknown): ConstraintGroup[] | string {
       fov: item.fov as number,
       far: item.far as number,
       namePrefix: typeof item.namePrefix === 'string' ? item.namePrefix : '',
+      zoneIds,
+      restrictScoring: item.restrictScoring !== false,
+      restrictMounts: item.restrictMounts === true,
       poolSize: item.poolSize as number,
       maxCount: item.maxCount as number,
       trials: item.trials as number,
@@ -504,7 +531,7 @@ export function parseSceneFile(json: unknown): ParseResult {
   if (json.useZones !== undefined && typeof json.useZones !== 'boolean') return fail('useZones must be a boolean');
   const useZones = json.useZones === true;
 
-  const constraintGroups = parseConstraintGroups(json.constraintGroups);
+  const constraintGroups = parseConstraintGroups(json.constraintGroups, zones);
   if (typeof constraintGroups === 'string') return fail(constraintGroups);
 
   const constraints = parseConstraints(json.constraints, constraintGroups);

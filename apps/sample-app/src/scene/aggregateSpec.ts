@@ -31,7 +31,7 @@ import {
   MAX_AGGREGATE_SLABS,
   WorkspaceGrid,
 } from '@linkervision/camera-coverage-sdk';
-import type { SamplingVolume, Zone } from './samplingVolumes.ts';
+import { volumesOfZones, type SamplingVolume, type Zone } from './samplingVolumes.ts';
 import type { Section } from './sectionHeatmap.ts';
 import { axisIndexRange, axisMapping } from './sectionHeatmap.ts';
 import type { Probe } from './probeVisibility.ts';
@@ -153,11 +153,13 @@ export function buildAggregateSpec(input: AggregateInputs): AggregateDescriptor 
   // edit — on the drag path, per frame.
   const zoneById = new Map(keptZones.map((z) => [z.id, z]));
 
+  const keptVolumes = capped('volumes', volumes);
+
   // Volume order is the descriptor's region order and never changes within a
   // build, so `maskRegions` can name regions by position.
   const regions: AggregateRegion[] = [];
   const markedRegions: number[] = [];
-  for (const v of capped('volumes', volumes)) {
+  for (const v of keptVolumes) {
     const group = zoneGroup.get(v.zoneId);
     if (group === undefined) continue; // orphan volume, or a zone past the cap
     const zone = zoneById.get(v.zoneId)!;
@@ -178,6 +180,14 @@ export function buildAggregateSpec(input: AggregateInputs): AggregateDescriptor 
   // empty, which the SDK reads as "no filter" — the same full-volume fallback
   // the app had before (`sampling_volumes.md` §7.3).
   const maskRegions = markedRegions;
+
+  // The **handed-over** filter (§3.3) is built by `markedFilterForZones`, from
+  // the enabled zones' ids — the same call a targeted build step makes, so there
+  // is one construction of a `MarkedFilter` in the app rather than two that could
+  // disagree. It is deliberately *not* this descriptor's own `regions`: those
+  // carry per-zone groups a build step never reads, and reusing them would tie a
+  // consumer's region indices to the display descriptor's layout.
+  const markedZoneIds = samplingActive ? keptZones.filter((z) => z.enabled).map((z) => z.id) : [];
 
   const sectionSlab = new Map<string, number>();
   const columns: AggregateSlab[] = [];
@@ -211,10 +221,50 @@ export function buildAggregateSpec(input: AggregateInputs): AggregateDescriptor 
       sectionSlab,
       probeIndex,
       marked: maskRegions.length > 0,
-      markedFilter: { regions, maskRegions },
+      markedFilter: markedFilterForZones(keptVolumes, markedZoneIds),
     },
     warnings,
   };
+}
+
+/**
+ * The exact counted set over a **chosen** set of zones — a constraint group's
+ * target zones (`camera_placement.md` §3.1.2, §3.3).
+ *
+ * The same `MarkedFilter` shape {@link buildAggregateSpec} hands out, built by
+ * the same rule (the listed zones' volumes as exact OBBs, every one of them
+ * named in `maskRegions`), so a targeted build step and the display descriptor
+ * cannot disagree about what an OBB filter *is*. It differs only in which zones
+ * it reads: the display path takes the **enabled** ones, a group takes the ones
+ * it lists — deliberately ignoring `enabled`, since a display toggle does not
+ * get to redefine what a search was run for.
+ *
+ * The regions declare **no group**: a build step reads `leafCounts` only, so the
+ * per-group accumulators the display descriptor needs would be computed and
+ * never read.
+ *
+ * An empty result (no ids, or none of them live) reads as "no filter" at every
+ * call site, which is the same full-volume fallback an unzoned scene already has.
+ */
+export function markedFilterForZones(
+  volumes: readonly SamplingVolume[],
+  zoneIds: readonly string[],
+): MarkedFilter {
+  const regions: AggregateRegion[] = [];
+  const maskRegions: number[] = [];
+  // Over-cap volumes are dropped rather than clamped, exactly as §3.3 drops them
+  // from the display descriptor: a filter that silently used a neighbour's box is
+  // the plausible wrong number this module exists to avoid.
+  for (const v of volumesOfZones(volumes, zoneIds).slice(0, MAX_AGGREGATE_REGIONS)) {
+    maskRegions.push(regions.length);
+    regions.push({
+      center: v.position,
+      rotation: v.rotation,
+      halfSize: [v.size[0] / 2, v.size[1] / 2, v.size[2] / 2],
+      groups: [],
+    });
+  }
+  return { regions, maskRegions };
 }
 
 /**

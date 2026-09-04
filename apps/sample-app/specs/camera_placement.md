@@ -54,6 +54,12 @@ nothing about what is computed or counted: it does not restrict the marked set, 
 appear in the aggregation descriptor, and cannot move a single coverage number. It only
 generates cameras. This is what makes the tool safe to leave in a scene.
 
+**A group may nevertheless *point at* sampling zones** (§3.1.2). Its `zoneIds` list names
+the zones the group plans for, and the invariant above survives intact: the list is read by
+the pool build and by nothing else, so it changes which cameras the tool proposes and still
+moves no number any panel displays. The direction of dependence is one-way — placement
+reads the zone tool's output; the zone tool never reads placement's.
+
 ### 1.2 The objective
 
 A camera's **reachable set** `R(p)` is the set of counted voxels a camera mounted at `p`
@@ -70,6 +76,12 @@ score(L) = | ⋃_{p ∈ L} R(p) |
 
 — the number of counted voxels reachable from *any* of its positions, every voxel worth
 **1**, counted **once**.
+
+**"Counted" is the group's own target set** (§3.1.2). By default it is the app's marked set
+— the enabled zones' union, or the whole valid volume when zones are off — which is what
+makes this percentage comparable with the stats panel's. A group that lists **target zones**
+replaces it with those zones' volumes; §5.2 then names the target on the axis, because the
+two panels' percentages are no longer percentages of the same thing.
 
 **Every voxel is worth the same, and other cameras are ignored.** There is no redundancy
 weight here and no `n_others`: the score does not care whether the scene's existing
@@ -209,6 +221,12 @@ export interface ConstraintGroup {
                          // (§4.1) and picks each trial's subset (§4.4). A draw
                          // input first, so it lives beside `poolSize` (§5.1).
 
+  // Target zones (§3.1.2) — which sampling zones this group plans for, and what the
+  // list is for. Empty ⇒ the app's own marked set, and both flags are inert.
+  zoneIds: string[];         // ids of `Zone`s (`sampling_volumes.md` §2.1); order not significant
+  restrictScoring: boolean;  // the target set is these zones' volumes; default true
+  restrictMounts: boolean;   // mounts must lie inside these zones' volumes; default false
+
   // Analysis strategy (§4.4) — persisted, so a run is reproducible from the file (§9).
   maxCount: number;      // the largest layout the analysis considers
   trials: number;        // T, layouts drawn
@@ -277,6 +295,54 @@ constants a manually added camera gets — for two different reasons:
 Both stay real fields on the placed `Camera`, which is where they are still editable
 (`spec.md` §5.2.1). What is gone is a per-group copy of them.
 
+#### 3.1.2 Target zones: what a group plans for, and where it may mount
+
+A group's `zoneIds` names sampling zones (`sampling_volumes.md` §2.1). Two independent flags
+say what the list is *for*:
+
+- **`restrictScoring`** (default **true**) — the group's **target set** is the listed zones'
+  volumes, replacing the app's marked set as the "counted voxels" of §1.2. This is the
+  expressive half: *these cameras are for the loading dock* is a sentence about a group, and
+  before this list there was nowhere in the model to write it.
+- **`restrictMounts`** (default **false**) — a pool position is kept only when it lies inside
+  one of the listed zones' volumes (§4.1.1). This narrows the *mount* region, not the target:
+  *on this wall, but only the stretch inside the maintenance bay*.
+
+**One list with two flags, rather than two lists.** The two uses want different sets in
+general — mount here, cover there — and a single always-on list would force
+mount-region ⊆ target-region, which is frequently wrong on real geometry: zones hug the
+surfaces they were seeded from, so the wall bounding a bay often sits just *outside* that
+bay's box, and a group targeting the bay would then admit no mount at all. Two checkboxes buy
+that expressiveness back without a second list to keep in sync, and a case that genuinely
+needs independent sets is served by two groups — which is what groups are for.
+
+**An empty list makes both flags inert**, and the panel disables them (§5). The alternatives
+are an empty target set (every position scores 0) and an unsatisfiable mount test (every
+position discarded): two different spellings of "empty pool", neither of them a thing anyone
+asked for. So an empty list is exactly today's behavior, and the feature costs a scene that
+does not use it nothing.
+
+**A non-empty list overrides `useZones` *and* each zone's `enabled`.** The group states its
+own target; a display toggle does not get to redefine what a search was run for. Three
+consequences, all wanted:
+
+- **Targeting a globally-disabled zone works.** `setSampling` is fed **every** volume
+  regardless of `enabled` (`sampling_volumes.md` §7.1), so those voxels are computed and a
+  build step can see them. Only the *counting* filter ever read `enabled`, and the group now
+  supplies its own.
+- **The pool becomes more stable, not less.** The fingerprint (§3.3.1) then covers only the
+  **listed** zones' volumes, so toggling an unrelated zone to look at something no longer
+  discards minutes of GPU — an improvement on the global coupling it replaces.
+- **The group's denominator is no longer the app's**, which §5.2 discloses on the axis
+  rather than leaving to be discovered.
+
+**The list lives in `ConstraintGroupPanel`, not in the mode** — the one placement input that
+does (§5). It is a **reference to other scene entities** rather than a number: it gives the
+group its identity in the hierarchy, it has to survive zone deletion and regeneration (§7,
+`sampling_volumes.md` §3.4), and through `restrictMounts` it changes what every constraint in
+the group geometrically *means*, which is visible in the viewport whether or not the mode is
+open. None of that is true of `fov`, `poolSize`, or `seed`.
+
 ### 3.2 The region: membership, measure, projection
 
 For a constraint `c`, let `dist(p, c)` be the distance from `p` to its primitive:
@@ -338,14 +404,21 @@ interface Pool {
   rejected: number;
   /** |⋃ all positions' reachable sets| — the ceiling any layout from this pool can reach. */
   poolCeiling: number;
-  /** Counted voxels in the marked set — the score's denominator (§5.2). */
+  /** Counted voxels in the group's target set — the score's denominator (§5.2). */
   markedTotal: number;
-  // Taken from the app's **own display numbers** (the enabled zones' union when
-  // zones are in use, else the run's valid volume), not measured during a
-  // build step: a build step is `incremental`, so its `onAggregate` fires only for the
-  // chunks that rig reaches and any total assembled there is a partial. Sharing
-  // the panels' denominator is also what makes the two rates comparable — and
-  // before any run has produced one, it falls back to `poolCeiling` so a
+  // Taken from the app's **own display numbers**, never measured during a build
+  // step: a build step is `incremental`, so its `onAggregate` fires only for the
+  // chunks that rig reaches, and any total assembled there is a partial.
+  //   • no target zones — the figure the panels divide by (the enabled zones'
+  //     union when zones are in use, else the run's valid volume), which is what
+  //     makes the two rates comparable;
+  //   • target zones (§3.1.2) — the **sum of the listed zones' own `validVoxels`**,
+  //     which the per-zone aggregation already reports for every zone, enabled or
+  //     not (`sampling_volumes.md` §7.2). No extra group slot, no extra run. It
+  //     over-counts where two listed zones' volumes overlap, so the rate reads
+  //     *low* rather than high — the safe direction for a number §1.3 already
+  //     calls an upper bound.
+  // Before any run has produced one it falls back to `poolCeiling`, so a
   // percentage is never divided by zero.
 }
 ```
@@ -359,15 +432,30 @@ disabled zone — and then place cameras to see voxels no panel counts. Taking t
 from the display descriptor rather than rebuilding it is what makes the two unable to
 disagree about the word "counted".
 
+**A group with target zones builds its filter the same way, from the same function.**
+`aggregateSpec.ts` exports `markedFilterForZones(volumes, zoneIds)`, returning that
+same `MarkedFilter` shape over the listed zones' volumes; the no-target path is the identical
+function called with the enabled zones' ids, so there is one construction of a filter in the
+app rather than two that could disagree. The build-step descriptor carries its **own**
+`regions`, unrelated to the display descriptor's, so a target costs no aggregation group and
+no zone slot — it is a *smaller* region list, not an extra one.
+
 **A build step never calls `setSampling`** — it inherits whatever validity mask the engine
 holds. So the search is blocked while a sampling edit still awaits a run
 (`spec.md` §8's `samplingDirty`), with the message of §10.
 
 #### 3.3.1 What invalidates a pool
 
-The pool's `fingerprint` covers the scene geometry, `voxelSize`, the marked set (the
-enabled zones and their volumes), and the group's `far`. A change to any of them
-discards the pool; the panel says so and offers to rebuild.
+The pool's `fingerprint` covers the scene geometry, `voxelSize`, the group's **target set**,
+its **mount filter**, and its `far`. A change to any of them discards the pool; the panel
+says so and offers to rebuild.
+
+The target set is the listed zones and their volumes when `zoneIds` is non-empty, and the
+enabled zones and their volumes otherwise (§3.1.2) — so a group with a target is invalidated
+only by *its own* zones, and an unrelated zone's `enabled` toggle or geometry edit costs it
+nothing. `restrictMounts` and those same volumes enter the fingerprint whenever that flag is
+on, because either changes which positions are admissible. `zoneIds` **order** does not: the
+set is what matters, so the fingerprint sorts before hashing.
 
 **Camera edits never invalidate a pool** — not adding, deleting, moving, aiming, enabling,
 or disabling. This falls straight out of §1.2 and is the property that makes the tool
@@ -450,11 +538,15 @@ interface PlacementResult {
 
 ### 4.1 Drawing the pool
 
-**Split.** Each enabled constraint of the group is weighted by its §3.2 measure and
-receives `round(poolSize × wᵢ / Σw)` positions, with a **floor of 1** for every enabled
-constraint and the remainder settled against the largest weights. The floor exists so a
-single surveyed mount point in a group full of walls is never starved — and it is also
-that point's correct share, since a `distance = 0` point admits exactly one position.
+**Split.** Each enabled constraint of the group is weighted by `wᵢ`, its **effective
+measure** — the §3.2 primitive measure when the group has no mount filter, and the
+zone-filtered value of §4.1.1 when it has one — and receives `round(poolSize × wᵢ / Σw)`
+positions, with a **floor of 1** for every contributing constraint and the remainder settled
+against the largest weights. The floor exists so a single surveyed mount point in a group
+full of walls is never starved — and it is also that point's correct share, since a
+`distance = 0` point admits exactly one position. A constraint whose effective measure is
+**zero** contributes nothing and takes no floor (§4.1.1), so the shares still sum to
+`poolSize`.
 
 The remainder is **signed**, and settled the same way in both directions: a shortfall is
 handed to the largest weights, and the overshoot the floor creates is taken back from them.
@@ -493,6 +585,57 @@ uniform-in-volume draw would pile samples into the outer shell, where the volume
 would be the wrong reading of `distance`: it is a tolerance around a rail, not a
 suggestion to mount as far off the rail as allowed.
 
+#### 4.1.1 The mount filter, and the effective measure it implies
+
+With `restrictMounts` on (§3.1.2), a drawn position is kept only when it lies inside one of
+the group's listed zones' volumes — the ordinary `inVolume` OBB test of
+`sampling_volumes.md` §2.3, on the CPU, before any build step. A discarded position advances
+the constraint's sequence and is redrawn, as §4.2's rejection does, but under a separate and
+far larger attempt cap: this test costs a few dozen flops where §4.2's costs ~1.2 s of GPU,
+so there is no reason to be stingy with it.
+
+**Rejection alone is not enough, because it does not fix the split.** The shares above are
+proportional to primitive measure, so a 60 × 40 m wall with 5% of its area inside the target
+zones still claims 194 of 200 positions and delivers ten, while the rail beside it — wholly
+inside the zone — keeps its five. The pool comes up short *and* misallocated, and the readout
+blames the wrong constraint.
+
+**So the split is by effective measure, estimated by running the draw.** For each enabled
+constraint take `K` positions from its own five-dimensional Halton sub-sequence exactly as
+the draw above produces them — primitive point *plus* ball offset — and count how many pass
+the OBB test:
+
+```
+effMeasure(c) = measure(c) × hits / K            K = 256
+```
+
+The estimator **is** the sampler, which is the whole point:
+
+- **it honours `distance` for free.** A rail 0.3 m outside a zone with `distance = 2` yields
+  plenty of valid mounts; an estimator that measured the bare primitive's overlap would call
+  it zero and drop it. Clipping each primitive against the OBBs would be exact — segment-slab
+  for a polyline, convex-polygon for a plane rect — and it is the obvious alternative, but it
+  measures the wrong object.
+- **it is the acceptance rate the rejection loop will actually see**, so the attempt cap is
+  sized from a measurement rather than a guess;
+- **it is one geometry path, not two**, so what is estimated and what is drawn cannot drift;
+- **it is deterministic under `seed`**, so a group's shares are reproducible from the file (§9);
+- and the `K` draws are **not wasted** — they are the sequence's own prefix, which the draw
+  consumes next.
+
+**A zero-hit constraint is dropped, and named.** `effMeasure = 0` ⇒ the constraint
+contributes nothing and its floor is redistributed. At `K = 256` a dropped constraint had
+well under ~1% usable extent, and the residual risk of a false zero is answered by the
+readout rather than by a second, adaptive estimate: §5.1's Build card lists **every**
+constraint's overlap percentage, so a `0%` beside a `4%` is a visible fact with two obvious
+remedies — widen `distance`, or list the neighbouring zone.
+
+**When every constraint reads zero, Build still runs.** The estimate is an estimate, and a
+user who knows something it does not should not be stopped by it; the pool comes back empty,
+the readout says exactly why (§10), and nothing was spent but CPU. §4.4's trial loop already
+analyses an empty pool to nothing, so the empty case needs no new guard — only an
+explanation.
+
 ### 4.2 Rejecting unusable positions
 
 A drawn position can be buried inside a building. Such a rig sees nothing, so it scores 0
@@ -522,8 +665,12 @@ So the authority is the **build step itself**:
   attempt cap of `3 × share` is hit (a constraint buried entirely inside geometry must
   terminate).
 - One rule covers every cause — inside a wall, outside the workspace, sealed in a closet,
-  or beyond every marked zone. All four make the position useless as a mount, so none of
-  them needs to be distinguished.
+  or beyond every voxel of the group's target set. All four make the position useless as a
+  mount, so none of them needs to be distinguished. **The mount filter is not among them**:
+  its discards happen before the build step, cost no GPU, and are already priced into the
+  effective measure that sized the share (§4.1.1). Counting them here would put a
+  minutes-of-GPU signal and a free one under one number, and `rejected: 190` would read as a
+  broken scene when it meant the sampler resampled.
 - The count of rejections is reported (§5.1); a constraint that filled nothing is named.
 - `CAMERA_INSIDE_GEOMETRY` is **suppressed for the capture slots** for the duration of a
   session (§10). A rig somewhere unusable is this tool's normal operation, not a scene
@@ -656,15 +803,68 @@ panel that shared the column with everything else had no other way to know which
 user meant.
 
 What lives in the left column when the mode is **closed** is what belongs to a selected
-entity: the group's name, its constraint count, and the **Place cameras** button that opens
-the mode, in a **`ConstraintGroupPanel`**; and a constraint's kind, `distance`, geometry,
-and vertex list in a **`ConstraintPanel`** (§6).
+entity: the group's name, its constraint count, its **target zones** (§3.1.2), and the
+**Place cameras** button that opens the mode, in a **`ConstraintGroupPanel`**; and a
+constraint's kind, `distance`, geometry, and vertex list in a **`ConstraintPanel`** (§6).
 
 **The camera template is not in that panel** — it is in the mode, as §5.1's third card. It
 is an input to a placement run, not a description of the group, and none of its fields is
 read until the mode is open. Outside, it cost the panel a heading and a second thought, in a
 panel whose one job is to get you into the tool; and it forced the mode to restate the
 template read-only (§5.2), because the panel that owned it was hidden.
+
+**The target zones are the one placement input that stays**, for the reasons §3.1.2 gives:
+they are a reference to other entities rather than a number, they must outlive zone deletion
+and regeneration (§7, `sampling_volumes.md` §3.4), and with `restrictMounts` on they change
+what the constraint gizmos in the viewport *mean*. The card is:
+
+```
+┌─ CONSTRAINT GROUP — Dock ─────────┐
+│  Name          [Dock          ]   │
+│  Constraints                  3   │
+│  ─────────────────────────────    │
+│  Target zones                     │
+│   ☑ Restrict scoring to zones     │
+│   ☑ Restrict mounts to zones      │
+│   Add zone  [ add a zone…    ▾ ]  │
+│   Loading dock                ×   │
+│   Bay 2                       ×   │
+│   Dock rail 100% · N wall 4%      │
+│  ─────────────────────────────    │
+│  [ Place cameras ]                │
+└───────────────────────────────────┘
+```
+
+With an empty list the two rows below the flags are replaced by a single `.hint` —
+`No target zones — this group scores against the whole marked set.` — so "no zones" reads
+as a state rather than as an unfinished control.
+
+- **The `<select>` lists only the zones not already listed**, so it *is* the add control and
+  a duplicate is impossible by construction. It is the app's standard `.select` — the same
+  control `VolumePanel` uses to reparent a volume — so this card needs no new component and
+  no chip or tag styling the app does not already have.
+- **One `.row` per listed zone**, showing its `zoneLabel` (`sampling_volumes.md` §6.2) and an
+  `.icon-btn` `×`. The list shows only what was picked, so it stays short on a site whose BVH
+  cut produced dozens of zones — which a checkbox list of all of them could not.
+- **Both checkboxes are disabled while the list is empty** (§3.1.2), with the tooltip
+  `Add a target zone to use these.`
+- **The `<select>` carries the app's standard `.row` label** (`Add zone`), like every other
+  labelled control in the inspector. The label names the control; the option text
+  `add a zone…` says the control is an action — the two are not redundant, and dropping the
+  label would make this the one control in the column with no name beside it.
+- **`restrictMounts` dims the group's constraint gizmos outside the listed volumes** while
+  the group is selected (§6.1). A wall with no overlap then looks different from a good one
+  *before* Build is pressed, rather than after minutes of GPU.
+- **The dimming is never the only cue.** A dimmed gizmo and a *disabled* constraint's gizmo
+  take the same ramp deliberately — for a placement run they mean the same thing — so the
+  card carries the §4.1.1 overlap percentages as a `.hint` under the list whenever
+  `restrictMounts` is on: `Dock rail 100% · North wall 4% · Rail 2 0%`. That is the
+  redundant text cue `VISUAL_DESIGN.md` requires beside any state carried in a visual
+  channel, it is the same line §5.1's Build card shows, and it names which wall to move,
+  widen, or stop listing rather than leaving the viewport to be interpreted.
+- **Nothing here is a coverage input** (§1.1): no edit marks the coverage result stale. Every
+  edit does move the pool's fingerprint (§3.3.1), so Build's label flips to **Rebuild** the
+  next time the mode is opened.
 
 ### 5.1 The flow
 
@@ -754,6 +954,20 @@ so the fields and the result they no longer describe cannot be read apart.
    reads `building 43/200 · Dock rail`, with **Cancel**. On completion the readout names
    the pool: `200 positions · 37 rejected (saw nothing) · ceiling 96.2%`.
 
+   **With a mount filter on (§3.1.2) the card also lists each constraint's overlap** with the
+   target zones — `Dock rail 100% · North wall 4% · Rail 2 0%` — from the §4.1.1 estimate,
+   which costs no GPU and so is on screen *before* Build as well as after. It is a percentage
+   per constraint rather than a count of discards because that is the number with a remedy
+   attached: under effective-measure splitting a discard count is only the sampler hitting its
+   expected rate and means nothing on its own, while `North wall 4%` says which wall to move,
+   widen, or stop listing.
+
+   **With target zones the card also states the denominator** — `target 2 zones ·
+   41,300,000 voxels` — because §5.2's percentages are of that number and not of the one
+   the stats panel divides by (§3.3). The count is written the way every other voxel total
+   in the app is (`toLocaleString`), so two figures on screen never differ in format when
+   they agree in kind.
+
    The button states the *work*, not the noun — the card's own heading already says what is
    being built, and what the user needs from the label is which of §3.3.1's three cases the
    press will cost: **Build** with no pool, **Extend to 260** or **Truncate to 120** against
@@ -836,6 +1050,16 @@ screen is a thing to keep in sync, not a thing to read.
   stats panel's measured rate, which is the one misreading this feature can cause. It is
   **drawn**, not merely named: a value axis with three ticks, labelled as the same
   percentage the stats below quote, so a curve cannot be read as a shape without a scale.
+  **With target zones (§3.1.2) the axis names them** — `reachable — Loading dock, Bay 2`, or
+  `reachable — 3 zones` past two. §3.3 borrowed the display descriptor's filter precisely so
+  that placement and the stats panel could not disagree about the word "counted"; a target
+  set breaks that on purpose, so the axis says what it is a percentage *of* rather than
+  leaving a user to discover that `94.1%` here and `94.1%` there are percentages of different
+  denominators. **The `Reachable` stat line below the plot names it too** — the stat and
+  the axis are the same percentage of the same set, so labelling one and leaving the other
+  bare is the drift this rule exists to prevent; both take the same one-line treatment,
+  two names in full and a count past that. The resolved voxel total sits in the Build card
+  beside it (§5.1).
   The plot keeps **at least a tenth of its height empty above the highest value** — the
   ceiling is an asymptote at or near the top of the range, and drawn flush to the frame it
   reads as a border rather than as the bound the curve is approaching. The headroom is taken
@@ -1191,6 +1415,13 @@ reviewed and approved cannot silently drift into positions where no mount exists
 camera panel shows the binding and the clamp is visible in the numeric fields, so a snapped
 value is never a mystery.
 
+**The clamp never honours the mount filter** (§3.1.2), even for a camera bound to a group
+that has one. Target zones govern the *draw*; a user dragging a camera by hand is expressing
+an intent the sampler could not. The implementation agrees: `projectIntoRegion` was chosen in
+§3.2 for being closed-form, continuous, and idempotent, and a projection into
+(dilated primitive ∩ union of OBBs) has none of those properties — that set is not even
+connected in general, so the clamp would jump discontinuously mid-drag.
+
 Deleting a constraint **unbinds** every camera bound to it (the cameras stay, their
 positions stay); deleting a group deletes its constraints and unbinds theirs.
 
@@ -1231,7 +1462,24 @@ sub-group, not an auto-derived type group.
 - **Reordering** by drag works within the group and constraint lists, exactly as §5.5.1
   specifies; **reparenting** is not offered — a constraint changes group from its panel.
 - **Context menu** offers Duplicate and Delete on both kinds. Duplicating a group deep-copies
-  its constraints; duplicating a constraint keeps it in the same group.
+  its constraints **and copies `zoneIds`/`restrictScoring`/`restrictMounts` verbatim** — the
+  copy plans for the same place, which is the only reading of "duplicate" that is useful;
+  duplicating a constraint keeps it in the same group.
+- **Deleting a zone prunes it from every group's `zoneIds`** (`sampling_volumes.md` §3.4),
+  the same eager pruning `clipSectionId` and a camera's `constraintId` already get in the
+  reducer's `deleteEntity`. A group left with an empty list falls back to the app's marked
+  set (§3.1.2) rather than becoming unusable, and its pool reads **Rebuild** because its
+  fingerprint moved (§3.3.1) — correct, since the cached sets were filtered by the old
+  target. Deleting an **unlisted** zone costs a targeted group nothing.
+- **Regenerating zones clears every group's list** (`sampling_volumes.md` §3.4). Generation
+  replaces the whole zone set with freshly-numbered entities, so `zone-3` still exists and
+  names a different box: eager pruning would never fire, and the group would silently
+  retarget to unrelated geometry and rebuild against a target nobody chose — exactly the
+  plausible-wrong-number failure §3.3 exists to prevent. The lists are emptied and §10's
+  status line names the groups, so the failure is loud instead of silent. A stable per-zone
+  uuid would preserve the references and is the better long-term answer; it changes the id
+  scheme the zone spec calls "stable identity, never renamed", the file format, and every
+  id-based lookup, so it is §15's business and not this feature's.
 - **Staleness.** No hierarchy action on a group or a constraint marks the coverage result
   stale, because constraints are not analysis inputs (§1.1). This is the one place the new
   entities differ sharply from zones and volumes, and it is worth stating explicitly so
@@ -1265,6 +1513,17 @@ Both rules are `aim_optimization.md` §3.1's, unchanged.
   became constants (§3.1.1); the writer omits them and the reader accepts any value, or
   none, without validating it. No version bump, because a file written by either build
   loads in both to the same scene — the two keys never fed anything a reader needs.
+- **The target zones persist** — `zoneIds`, `restrictScoring`, `restrictMounts` — and all
+  three are **optional on read**, defaulting to `[]` / `true` / `false`. **No version bump:**
+  the change is purely additive, a v3 file still reads, and a file written by this build still
+  opens in one that predates it as a group with no target — the same treatment `enabled` and
+  `namePrefix` already get. Bumping to 4 would lock a file out of older builds for a key they
+  would have ignored anyway.
+- **A `zoneIds` entry naming an unknown zone is dropped, not rejected**, exactly as
+  `parseVolumes` drops a volume whose `zoneId` is dangling. The reader therefore takes the
+  parsed `zones` as a second argument. A scene that legitimately lost a zone through editing
+  must still reload; a hand-edited typo silently losing a target is the lesser harm, and §5's
+  panel shows the resolved list.
 - **The draw inputs and the whole strategy persist** — `poolSize` and `seed`, `maxCount`,
   `trials`, `epsilon` — beside the template. A seeded search that cannot be reproduced from the file is a seeded
   search for nothing: the file would record the cameras without the inputs that chose them.
@@ -1279,6 +1538,7 @@ Both rules are `aim_optimization.md` §3.1's, unchanged.
   "constraintGroups": [
     { "id": "cg-1", "name": "Dock", "enabled": true,
       "fov": 60, "far": 50, "namePrefix": "Dock",
+      "zoneIds": ["zone-3", "zone-7"], "restrictScoring": true, "restrictMounts": false,
       "poolSize": 200, "maxCount": 10, "trials": 1000, "epsilon": 1.0, "seed": 1 }
   ],
   "constraints": [
@@ -1299,7 +1559,9 @@ Both rules are `aim_optimization.md` §3.1's, unchanged.
 rejected); `kind` one of the three; `distance ≥ 0` and finite; a polyline's `points` length
 ≥ 2 with finite components; a plane's `size` components > 0; `fov ∈ (0, 180)`,
 `far > 0`; `poolSize ≥ 1`, `maxCount ≥ 1`, `trials ≥ 1`,
-`epsilon ≥ 0`, `seed` an integer; `enabled` a boolean when present; a missing or blank
+`epsilon ≥ 0`, `seed` an integer; `enabled` a boolean when present; `zoneIds` an array of
+strings when present, with unknown ids dropped and duplicates collapsed;
+`restrictScoring`/`restrictMounts` booleans when present; a missing or blank
 `name` reads as the default, never an error. Otherwise all-or-nothing import, as ever.
 
 ---
@@ -1315,6 +1577,9 @@ rejected); `kind` one of the three; `distance ≥ 0` and finite; a polyline's `p
 | the target group has no enabled constraint | Build candidate positions disabled, `This group has no enabled constraint to sample.` |
 | a build step `compute()` fails — rejects **or returns null** | build steps stop, the session closes and releases its slots, the partial pool is discarded, and the status area carries `The engine could not run the build step — see the status area.` beside the engine's own message (§4.2) |
 | every drawn position of a constraint was rejected (§4.2) | the pool proceeds without it; the readout names it: `Rail 2 saw nothing from any sampled position.` |
+| `restrictMounts` on and a constraint has **zero** overlap with the target zones (§4.1.1) | the constraint is dropped from the draw and its floor redistributed; the Build card shows its `0%` beside the others' percentages. Not an error, and Build is **not** disabled |
+| `restrictMounts` on and **no** constraint overlaps any target zone | Build still runs (§4.1.1) and returns an empty pool; the readout carries `No constraint overlaps this group's target zones — the pool is empty.` The estimate is an estimate, and only CPU was spent, so it warns rather than blocks |
+| zones were regenerated while some group held target zones (`sampling_volumes.md` §3.4) | the lists are cleared and the status area names them: `Zones were regenerated; N constraint group(s) lost their target zones.` |
 | `CAMERA_INSIDE_GEOMETRY` for a **capture slot** | **suppressed** for the session's duration (§4.2); the position is dropped instead |
 | the pool is invalidated mid-review (§3.3.1) | the result is dimmed, Apply disabled, `The scene changed; rebuild the pool.` |
 | the plan would exceed `MAX_CAMERAS` after its creates (§5.3.4) | Apply disabled, `Placing N cameras would exceed the 128-camera limit; the scene uses M.` Only a create consumes a slot, so a plan of moves and disables cannot fire this |
@@ -1336,6 +1601,10 @@ rejected); `kind` one of the three; `distance ≥ 0` and finite; a polyline's `p
 | **analysis** | the trial loop over a built pool, run by **Analyze**; produces the prefix curve, and measures no coverage — §4.4 |
 | **reachable set** | the counted voxels a mount point could see at *some* orientation — §1.2, `aim_optimization.md` §2 |
 | **layout** | a set of mount positions; the unit a trial scores — §1.2 |
+| **target zones** | a group's `zoneIds`: the sampling zones it plans for. With `restrictScoring` they define its **target set** (what §1.2 counts); with `restrictMounts` they also bound where it may mount — §3.1.2 |
+| **target set** | the voxels a group's score counts: its target zones' volumes when it has them, else the app's marked set — §1.2, §3.1.2 |
+| **mount filter** | the `restrictMounts` test — a drawn position is kept only inside a target zone's volume. A *draw* rule, never a clamp (§6.3) — §4.1.1 |
+| **effective measure** | a constraint's §3.2 measure scaled by the fraction of its own draws that pass the mount filter; what §4.1 splits the pool by — §4.1.1 |
 | **pool** | the `poolSize` built positions an analysis draws its layouts from — §3.3 |
 | **pool ceiling** | `|⋃ all pool positions' reachable sets|`; the most any layout from this pool can reach — §5.2 |
 | **trial** | one random layout of `maxCount` positions, scored at every prefix count — §4.4 |
@@ -1355,7 +1624,13 @@ src/placement/
                    reader and the panels share
   halton.ts        §4.1 the sequence, the ball map, the per-constraint offsets
   pool.ts          §4.1–§4.3 the split, the draw, the build cameras and descriptor,
-                   the rejection budget, the §3.3.1 fingerprint, §10's blockers
+                   the rejection budget, the §3.3.1 fingerprint, §10's blockers, and
+                   §4.1.1's mount filter — the effective-measure estimate, the
+                   zero-hit drop, and the CPU rejection loop. Also §3.1.2 as pure
+                   decisions App renders through: `resolveGroupTarget` (a group's
+                   zone list + the app's marked set → one `GroupTarget`),
+                   `constraintOverlaps` / `unmountableIds` (the §5 gizmo dimming and
+                   its readout), `overlapSummary`, and §10's regenerate notice
   leafSet.ts       §2.1 LeafChunk/LeafSet from an AggregateResult, and the
                    `VoxelBitset` a trial rasterizes into (§4.4)
   analyze.ts       §4.4, §4.5 the trial loop, the prefix curve, the knee — engine-free
@@ -1370,17 +1645,24 @@ src/placement/
                    calls the engine
 src/ui/
   CandidatePositionsPanel.tsx  §5.1 left column, card 1: `Size`, the Build button and its
-                            own progress, readout, blocker, and Cancel
+                            own progress, readout, blocker, and Cancel; plus the §3.1.2
+                            denominator line and the §4.1.1 overlaps, both of which
+                            precede a build
   StrategyPanel.tsx         §5.1 left column, card 2: the two strategy fields, `Analyze`,
                             and its own progress and Cancel
   NewCameraDefaultsPanel.tsx §5.1 left column, card 3: the camera template — `Name prefix`,
                             `FOV`, `Range` — and no button of its own
   PlacementReviewPanel.tsx  §5.2, §5.3 right column: group name, curve,
                             slider, stats, and the pinned Apply / Close with the §5.1 guard
-  ConstraintGroupPanel.tsx  §5 selected group: name, constraint count, `Place cameras`
+  ConstraintGroupPanel.tsx  §5 selected group: name, constraint count, the §3.1.2 target
+                            zone list, its two flags, the §4.1.1 overlap readout, and
+                            `Place cameras`
   ConstraintPanel.tsx       §6 selected constraint: kind, distance, geometry, and the
                             selected vertex with Insert / Delete / Extend
 src/scene/
+  aggregateSpec.ts          §3.3 `markedFilterForZones(volumes, zoneIds)` — the one
+                            construction of a `MarkedFilter`, shared by the display
+                            descriptor, the aim capture, and a targeted build step
   constraintGizmos.ts       §6.1 primitive handles + the exact translucent dilation,
                             plus the `PlacementOverlay` that draws the §5.2 pool
                             scatter and the §6.2 draft polyline — both are the
@@ -1436,9 +1718,44 @@ reachable sets and the CPU union. Both are pinned by outcome.
   every drawn position satisfies `inRegion` across all three kinds, the five-dimension stride
   holds so changing `distance` keeps the primitive point, the rejection budget terminates,
   §10's blockers in priority order, and the build-step descriptor's mask and handed-over filter.
+  Then §4.1.1's **mount filter**, whose failure mode is a pool that is merely *smaller* and
+  therefore looks fine: the effective-measure split reproduces a worked example (a wall with
+  5% overlap loses its share to the rail beside it, which the unfiltered split gets wrong by
+  two orders of magnitude); every kept position satisfies both `inRegion` **and** `inVolume`
+  for some listed zone; a constraint whose primitive lies outside the zones but whose
+  `distance` reaches in is **not** dropped — the regression a primitive-only estimator would
+  cause; a genuinely-outside constraint estimates to 0, is dropped, and its floor is
+  redistributed so the shares still sum to `poolSize`; prefix-stability still holds under
+  rejection (positions 1..200 of a filtered 260-pool are the filtered 200-pool verbatim); the
+  estimate is deterministic under `seed` and moves with it; and the fingerprint covers the
+  **listed** zones only — toggling an unlisted zone's `enabled` leaves a targeted pool valid
+  while editing a listed zone's volume invalidates it.
   Then §4.6's two pure decisions: `bestSample` (highest count, ties to the earlier draw, a
   blind constraint yielding no move) and `repositionBlocker` (its own two rules first, then
   every §10 rule inherited whole), plus that a lone constraint takes the whole pool budget.
+- **`test/placementTargetZones.test.ts`** — the §3.1.2 semantics as pure functions, since
+  every one of them fails as a plausible number rather than a crash: a non-empty list
+  overrides `useZones` and each zone's `enabled` (a globally-disabled listed zone is still
+  counted); an empty list reproduces today's filter **exactly**, so a scene not using the
+  feature is bit-identical; `markedFilterForZones` over the enabled zones' ids returns the
+  same `MarkedFilter` the display descriptor builds, which is what lets one function serve
+  both; and `markedTotal` sums the listed zones' `validVoxels` and falls back to
+  `poolCeiling` at zero. Then the lifecycle in `sceneReducer`/`sceneFile`: deleting a listed
+  zone prunes it from every group, deleting an unlisted one changes no group, regenerating
+  zones clears every list, `duplicateConstraintGroup` copies all three fields, and the reader
+  round-trips them, defaults all three when absent (a v3 file), and drops a dangling id
+  without failing the import. Then §5's readouts as pure functions, since a panel cannot be
+  rendered in this suite: `resolveGroupTarget` pairs a filter and a denominator from the
+  same resolution and never crosses them, `constraintOverlaps`/`unmountableIds` name exactly
+  the zero-overlap constraints of the group they were asked about (and nothing at all
+  without a mount filter), `overlapSummary` labels every constraint including the zero,
+  and §10's regenerate notice counts only the groups that actually held a target.
+- **`test/constraintGizmos.test.ts`** — §6.1's fill ramp, and §5's mount-filter dimming on
+  top of it: a constraint the selected group's filter excludes takes a **weaker** fill than
+  the same constraint unfiltered and drops its edges to the disabled treatment, an excluded
+  *and* selected constraint still reads stronger than an excluded unselected one, and
+  clearing the set restores the ordinary ramp — the reconcile path, not just the pure
+  `fillOpacity`, since the entry flag is what the renderer actually reads.
 - **`test/placementCurvePlot.test.ts`** — §5.2's plot geometry, whose failure mode is that
   the curve renders perfectly and selects the wrong count. The **round trip** is the
   property: a click at the fraction `curveX` draws a count at picks that same count back,
@@ -1562,14 +1879,16 @@ class it would have tested is never produced.
 - §2.4.2 — a note that the draw mode is a repeating variant, and its three differences; and
   that the tool's placeable kinds gain a **polyline vertex** (§6.2), the one target that is
   a sub-selection rather than an entity.
-- §3.3 — a line stating constraints are absent from the descriptor.
+- §3.3 — a line stating constraints are absent from the descriptor, and that
+  `markedFilterForZones` is the one place a `MarkedFilter` is built.
 - §5 — `Camera` gains `constraintId`; §5.2 / §5.2.1 gain the clamp; the panel gains the
   binding dropdown and **Reposition**.
 - §5.5 / §5.5.1 — the Constraints umbrella, the two node kinds, rows, the "+" menu, ordering,
   the context menu, and the no-stale rule.
 - §8.1 — auto-run suspension covers a placement session.
 - §11 — the §10 rows.
-- §14.1 / §14.3 / §14.8 — the `Scene` fields, `formatVersion` 3, the validation rules.
+- §14.1 / §14.3 / §14.8 — the `Scene` fields, `formatVersion` 3, the validation rules, and
+  the group's three **optional** target-zone keys (additive, no version bump — §9).
 - §15 — camera placement leaves "out of scope" and points here.
 - §16 — the §11 terms.
 
@@ -1594,15 +1913,24 @@ class it would have tested is never produced.
 **`apps/sample-app/specs/sampling_volumes.md`**
 
 - §2.1 — a note distinguishing a sampling volume (an analysis input) from a camera
-  constraint (a generator), since the two look alike in the hierarchy.
+  constraint (a generator), since the two look alike in the hierarchy; plus the one-way
+  reference a constraint group may hold to a zone (§3.1.2).
+- §3.4 — **Generate replaces the zone set, so it clears every constraint group's target
+  zones** and says so in the status area; ids are reused for different boxes, so keeping the
+  references would silently retarget a group (§7).
+- §7.1 — a note that `setSampling` is fed *every* volume regardless of `enabled`, which is
+  what makes a group's override of `enabled` safe (§3.1.2).
 
 **`ai/` docs** (both packages, per `CLAUDE.md`): `ARCHITECTURE.md` (the new module set and
-the worker-side pool), `DECISIONS.md` (newest at top: placement is a mode; aim-free placement
-scoring; cached pool over per-trial runs; leaf cubes over bitsets; tolerance over standoff;
-the strategy in the file), `CONVENTIONS.md` (`LeafCubes` and the bitset-rasterize idiom, and
+the worker-side pool), `DECISIONS.md` (newest at top: per-group target zones override the global marked set;
+one zone list with two flags rather than two lists; the mount filter splits by an
+effective measure estimated with the sampler itself; regeneration clears target lists;
+placement is a mode; aim-free placement scoring; cached pool over per-trial runs; leaf
+cubes over bitsets; tolerance over standoff; the strategy in the file), `CONVENTIONS.md` (`LeafCubes` and the bitset-rasterize idiom, and
 the pure-reducer-for-a-mode idiom), `STACK.md` (no new dependency), and the app's
 `VISUAL_DESIGN.md` (the constraint palette, the dilation translucency, the curve and scatter
-styling, and the **placement mode**: which columns it replaces, its two input cards, and the
+styling, the target-zone list card and the dimmed-gizmo treatment of §5, and the
+**placement mode**: which columns it replaces, its two input cards, and the
 pinned action footer).
 
 ---
@@ -1626,5 +1954,10 @@ pinned action footer).
 - **Constraint kinds** beyond the three: circles/arcs, meshes as mountable surfaces, or
   "anywhere on this wall the BVH found" auto-generation (the analogue of
   `sampling_volumes.md` §3).
+- **A stable per-zone uuid**, so a constraint group's target zones survive a regenerate
+  instead of being cleared (§7). It is the right answer and it is not this feature's: it
+  changes the id scheme, the file format, and every id-based lookup in the zone tool.
+- **Per-zone coverage requirements** — "this zone must reach 80%" as a constraint the search
+  must satisfy, rather than a target set the objective maximises over.
 - **A `closed` polyline flag**, and vertex naming.
 - **Persisting a pool** across a reload, or a proposal history beyond the session's Close.

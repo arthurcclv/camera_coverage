@@ -1,6 +1,7 @@
 /**
  * Selected constraint-group panel (`camera_placement.md` §5): the group's name,
- * its constraint count, and the button that opens the placement mode.
+ * its constraint count, its **target zones**, and the button that opens the
+ * placement mode.
  *
  * These are the group's own fields, so they live in the left column's selection
  * inspector (`spec.md` §2.2). **The camera template is not here** — it is the
@@ -12,17 +13,42 @@
  * The **strategy** is persisted on the group too, and is shown in the mode for
  * the same reason: it is the analysis's parameters, not the group's description.
  *
+ * **The target zones are the one placement input that stays** (§3.1.2). They are
+ * a *reference to other scene entities* rather than a number: they give the group
+ * its identity, they must outlive zone deletion and regeneration (§7), and
+ * through `restrictMounts` they change what every constraint in the group
+ * geometrically *means* — which is visible in the viewport whether or not the
+ * mode is open. None of that is true of `fov`, `poolSize`, or `seed`.
+ *
  * Nothing here is a coverage input (§1.1), so no edit marks the result stale.
  */
 import { groupLabel, type ConstraintGroup } from '../placement/region.ts';
+import { zoneLabel, type Zone } from '../scene/samplingVolumes.ts';
+
+/** The tooltip on both flags while the list is empty (§3.1.2). */
+const EMPTY_LIST_HINT = 'Add a target zone to use these.';
 
 export interface ConstraintGroupPanelProps {
   group: ConstraintGroup | null;
   /** Constraints belonging to this group. */
   memberCount: number;
+  /** Every zone in the scene — the add control offers the ones not yet listed. */
+  zones: readonly Zone[];
+  /**
+   * The §4.1.1 overlap line — `Dock rail 100% · North wall 4%` — or null when the
+   * group has no mount filter.
+   *
+   * It is the **text cue beside the dimmed gizmos** (§5): dimming alone cannot
+   * distinguish "no draw can land here" from "disabled", and `VISUAL_DESIGN.md`
+   * requires a redundant text cue for state carried in a visual channel. Resolved
+   * outside the panel because it costs 256 draws per constraint.
+   */
+  overlapText: string | null;
   /** Why the placement mode cannot be opened on this group, or null (§5.1, §10). */
   placementBlocker: string | null;
   onRename(id: string, name: string): void;
+  /** Patch the group's target zones or either flag (§3.1.2). */
+  onChange(id: string, patch: Partial<ConstraintGroup>): void;
   /** Open the placement mode on this group (§5). */
   onPlaceCameras(id: string): void;
 }
@@ -30,11 +56,27 @@ export interface ConstraintGroupPanelProps {
 export function ConstraintGroupPanel({
   group,
   memberCount,
+  zones,
+  overlapText,
   placementBlocker,
   onRename,
+  onChange,
   onPlaceCameras,
 }: ConstraintGroupPanelProps) {
   if (!group) return null;
+
+  // A zone id naming no live zone is not rendered: the reducer prunes eagerly
+  // (§7), so this only ever covers the frame between a load and its first edit.
+  const listed = group.zoneIds
+    .map((id) => zones.find((z) => z.id === id))
+    .filter((z): z is Zone => z !== undefined);
+  // The add control offers only what is *not* listed, which is what makes a
+  // duplicate impossible by construction rather than by a guard (§5).
+  const addable = zones.filter((z) => !group.zoneIds.includes(z.id));
+  // Both flags are inert with an empty list (§3.1.2): the alternatives are an
+  // empty target set and an unsatisfiable mount test, two spellings of "empty
+  // pool". So they render disabled rather than lying about what they do.
+  const empty = listed.length === 0;
 
   return (
     <div className="panel">
@@ -57,6 +99,83 @@ export function ConstraintGroupPanel({
           <span>Constraints</span>
           <b>{memberCount}</b>
         </div>
+
+        {/* Target zones (§3.1.2) — the zones this group plans for. The two flags
+            sit above the list because they say what the list is *for*, and a
+            list whose meaning is read below it is read twice. */}
+        <p className="panel-title subhead">Target zones</p>
+
+        <label className="checkbox-row" title={empty ? EMPTY_LIST_HINT : undefined}>
+          <input
+            type="checkbox"
+            checked={group.restrictScoring}
+            disabled={empty}
+            onChange={(e) => onChange(group.id, { restrictScoring: e.target.checked })}
+          />
+          <span>Restrict scoring to zones</span>
+        </label>
+
+        <label className="checkbox-row" title={empty ? EMPTY_LIST_HINT : undefined}>
+          <input
+            type="checkbox"
+            checked={group.restrictMounts}
+            disabled={empty}
+            onChange={(e) => onChange(group.id, { restrictMounts: e.target.checked })}
+          />
+          <span>Restrict mounts to zones</span>
+        </label>
+
+        <div className="row">
+          <label htmlFor="cg-add-zone">Add zone</label>
+          <select
+            id="cg-add-zone"
+            className="select"
+            // Never holds a selection: it is an *action*, not a field. Binding it
+            // to a listed zone would make the control claim the group has one
+            // "current" target, which is exactly what a list is not.
+            value=""
+            disabled={addable.length === 0}
+            onChange={(e) => {
+              if (e.target.value === '') return;
+              onChange(group.id, { zoneIds: [...group.zoneIds, e.target.value] });
+            }}
+          >
+            <option value="">{addable.length === 0 ? 'no zones to add' : 'add a zone…'}</option>
+            {addable.map((z) => (
+              <option key={z.id} value={z.id}>
+                {zoneLabel(z)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {listed.map((z) => (
+          <div className="row" key={z.id}>
+            <span>{zoneLabel(z)}</span>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={`Remove ${zoneLabel(z)} from the target zones`}
+              onClick={() =>
+                onChange(group.id, { zoneIds: group.zoneIds.filter((id) => id !== z.id) })
+              }
+            >
+              ×
+            </button>
+          </div>
+        ))}
+
+        {empty && (
+          <p className="hint">
+            No target zones — this group scores against the whole marked set.
+          </p>
+        )}
+
+        {/* Which constraints the mount filter can actually draw on, in words
+            (§5). The viewport dims the ones at 0%, and a dimmed gizmo reads the
+            same as a disabled one — so the percentages, not the dimming, are
+            what say which wall to move, widen, or stop listing. */}
+        {overlapText && <p className="hint">{overlapText}</p>}
 
         {/* Placement is a mode, not a panel (§5): this is its only entry point,
             and the group it is pressed on is the group the mode targets for its

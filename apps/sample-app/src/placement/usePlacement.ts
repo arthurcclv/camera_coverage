@@ -15,7 +15,7 @@ import type { Vec3, WorkspaceGrid } from '@linkervision/camera-coverage-sdk';
 
 import { toCameraConfig, type SceneCamera } from '../cameras/camera.ts';
 import type { EngineApi } from '../engine/useEngine.ts';
-import type { MarkedFilter } from '../scene/aggregateSpec.ts';
+import type { GroupTarget } from './pool.ts';
 import { nextFreeId } from '../scene/entityDuplication.ts';
 import { VoxelBitset, leafChunkFrom, leafSetOf, type LeafChunk } from './leafSet.ts';
 import {
@@ -24,7 +24,8 @@ import {
   buildStepSpec,
   classifyBuildStep,
   emptyPool,
-  enabledConstraints,
+  drawBasis,
+  soloBasis,
   planDraws,
   poolBlocker,
   poolFingerprint,
@@ -97,6 +98,16 @@ export interface PlacementSession {
   progress: PlacementProgress | null;
   /** Why the entry points are unavailable, or null (§10). */
   blocker: string | null;
+  /**
+   * The resolved target zones of the group the panel acts on (§3.1.2), or null
+   * with no group.
+   *
+   * Exposed rather than derived in the panels because the *filter* and the
+   * *total* have to come from one resolution: a percentage of the listed zones'
+   * score over the enabled zones' denominator is wrong in a way nothing on
+   * screen would look wrong about.
+   */
+  target: GroupTarget | null;
   /** True while the display descriptor must still hide the slots (§3.4). */
   maskSlots: boolean;
   /** True while the app must not start a display run of its own (§3.4, §8.1). */
@@ -145,26 +156,22 @@ export interface UsePlacementArgs {
   /** The workspace grid a run is computed on — maps a chunkId to its place. */
   grid: () => WorkspaceGrid;
   /**
-   * The display descriptor's marked filter, live (§3.3).
+   * What one group counts, where it may mount, and what it divides by (§3.1.2).
    *
    * A build step must count the **counted** set, and only this says what that is:
-   * `setSampling` bounds what is *computed* with conservative AABBs, so a
-   * build step without the filter would count the slop and the disabled zones.
+   * `setSampling` bounds what is *computed* with conservative AABBs, so a build
+   * step without the filter would count the slop and the disabled zones. With the
+   * group's target zones it is those zones' volumes instead, overriding both
+   * `useZones` and each zone's `enabled` — the group states its own target.
+   *
+   * `total` is read from the app's **own display numbers** rather than measured
+   * during a build step: a build step is `incremental`, so its `onAggregate`
+   * fires only for the chunks that rig reaches, and any total assembled there
+   * would be a partial.
    */
-  marked: () => MarkedFilter;
+  groupTarget: (group: ConstraintGroup) => GroupTarget;
   /** Whether a sampling edit still awaits a run (§3.3). */
   samplingPending: () => boolean;
-  /**
-   * Counted voxels in the marked set — the score's denominator (§5.2), or 0
-   * before any run.
-   *
-   * Read from the app's **own display numbers** rather than measured during a
-   * build step: a build step is `incremental`, so its `onAggregate` fires only for the
-   * chunks that rig reaches, and any total assembled there would be a partial.
-   * Taking the app's figure also makes the panel's percentage comparable with
-   * the one the stats panel shows, which is the whole point of quoting a rate.
-   */
-  markedTotal: () => number;
   /** Whether an aim-optimize session holds the shared capture slots (§3.4). */
   aimSessionOpen: () => boolean;
   /**
@@ -237,9 +244,8 @@ export function usePlacement({
   constraintGroups,
   constraints,
   grid,
-  marked,
+  groupTarget,
   samplingPending,
-  markedTotal,
   aimSessionOpen,
   engineReady,
   fingerprint,
@@ -267,9 +273,19 @@ export function usePlacement({
   }, [constraintGroups, groupOf, state.targetGroupId]);
 
   const currentFingerprint = useCallback(
-    (group: ConstraintGroup) =>
-      poolFingerprint({ ...fingerprint(), near: DEFAULT_TEMPLATE.near, far: group.far }),
-    [fingerprint],
+    (group: ConstraintGroup) => {
+      const t = groupTarget(group);
+      return poolFingerprint({
+        ...fingerprint(),
+        // A targeted group is invalidated by *its own* zones only, so toggling an
+        // unrelated zone to look at something no longer discards a pool (§3.3.1).
+        markedRevision: t.zoneNames.length > 0 ? t.markedRevision : fingerprint().markedRevision,
+        mountRevision: t.mountRevision,
+        near: DEFAULT_TEMPLATE.near,
+        far: group.far,
+      });
+    },
+    [fingerprint, groupTarget],
   );
 
   const closeSession = useCallback(
@@ -297,7 +313,7 @@ export function usePlacement({
   const buildStep = useCallback(
     async (group: ConstraintGroup, position: Vec3): Promise<{ chunks: LeafChunk[]; ran: boolean }> => {
       const list = cameras();
-      const spec = buildStepSpec(list.length, marked());
+      const spec = buildStepSpec(list.length, groupTarget(group).filter);
       if (!engine.setCameras(buildStepCameras(list, group, position))) {
         throw new Error('The engine rejected the capture rig.');
       }
@@ -317,7 +333,7 @@ export function usePlacement({
       // `classifyBuildStep` is where they meet (§4.2).
       return { chunks, ran: summary !== null };
     },
-    [cameras, engine, grid, marked],
+    [cameras, engine, grid, groupTarget],
   );
 
   /**
@@ -344,8 +360,13 @@ export function usePlacement({
       return;
     }
     const target = group!;
-    const active = enabledConstraints(target, constraints());
-    const shares = poolSplit(active, target.poolSize);
+    const resolved = groupTarget(target);
+    // §4.1.1: with a mount filter the split is by effective measure and a
+    // zero-overlap constraint drops out entirely, so the basis — not the raw
+    // enabled list — is what everything downstream plans against.
+    const basis = drawBasis(target, constraints(), resolved.mountVolumes);
+    const active = basis.constraints;
+    const shares = poolSplit(basis, target.poolSize);
     const fingerprint = currentFingerprint(target);
 
     // What of the pool in hand survives this press (§3.3.1). A `rebuild` keeps
@@ -354,7 +375,7 @@ export function usePlacement({
     // nothing at all.
     const action = buildAction(state.pool, fingerprint, target.poolSize, target.seed);
     const held = action === 'rebuild' ? null : state.pool;
-    const keep = action === 'truncate' ? truncatedShares(target, active) : null;
+    const keep = action === 'truncate' ? truncatedShares(target, basis) : null;
     const carried: PoolPosition[] = [];
     if (held) {
       const taken = new Map<string, number>();
@@ -390,7 +411,7 @@ export function usePlacement({
         heldDraws.set(id, { kept, nextSeq: d.nextSeq });
       }
     }
-    const draws = planDraws(target, active, heldDraws.size > 0 ? { held: heldDraws } : {});
+    const draws = planDraws(target, basis, heldDraws.size > 0 ? { held: heldDraws } : {});
     const spent = new Map(
       active.map((c, i) => [c.id, Math.max(shares[i], heldDraws.get(c.id)?.nextSeq ?? 0)]),
     );
@@ -441,7 +462,7 @@ export function usePlacement({
           // rule covers them and the sequence advances (§4.2).
           rejected++;
           const share = shares[active.indexOf(constraint)];
-          const next = replacementDraw(target, constraint, spent.get(constraint.id) ?? share, share);
+          const next = replacementDraw(target, constraint, spent.get(constraint.id) ?? share, share, basis);
           if (next) {
             spent.set(constraint.id, next.seqIndex + 1);
             queue.push(next);
@@ -475,7 +496,8 @@ export function usePlacement({
         // The app's counted-set size, falling back to the pool's own ceiling
         // before any run has produced one — so a percentage is never divided by
         // zero, and never by a partial.
-        markedTotal: markedTotal() > 0 ? markedTotal() : ceiling,
+        markedTotal: resolved.total > 0 ? resolved.total : ceiling,
+        overlaps: basis.overlaps,
       };
       setState((s) => ({ ...s, pool, running: false, progress: null }));
     } catch (err) {
@@ -490,7 +512,7 @@ export function usePlacement({
     constraints,
     currentFingerprint,
     grid,
-    markedTotal,
+    groupTarget,
     onError,
     resolveTarget,
     state.pool,
@@ -639,8 +661,9 @@ export function usePlacement({
       const group = constraintGroups().find((g) => g.id === constraint.groupId)!;
       // One constraint, so `poolSplit` hands it the whole pool budget — and no
       // trials at all: with one camera the layout score *is* the position's own
-      // count (§4.6).
-      const draws = planDraws(group, [constraint]);
+      // count (§4.6). A reposition honours the group's mount filter for the same
+      // reason a build does — it is the same draw (§4.1.1).
+      const draws = planDraws(group, soloBasis(constraint, groupTarget(group).mountVolumes));
 
       abortRef.current = false;
       setMaskSlots(true);
@@ -683,7 +706,16 @@ export function usePlacement({
       // The camera edit marks the result stale itself, so no second request.
       closeSession(false);
     },
-    [buildStep, closeSession, constraintGroups, constraints, onError, onReposition, repositionBlocker],
+    [
+      buildStep,
+      closeSession,
+      constraintGroups,
+      constraints,
+      groupTarget,
+      onError,
+      onReposition,
+      repositionBlocker,
+    ],
   );
 
   const group = resolveTarget();
@@ -745,6 +777,7 @@ export function usePlacement({
     buildAction: group
       ? buildAction(state.pool, currentFingerprint(group), group.poolSize, group.seed)
       : 'build',
+    target: group ? groupTarget(group) : null,
     maskSlots,
     busy: state.running || state.slotsActive,
     setTargetGroup,

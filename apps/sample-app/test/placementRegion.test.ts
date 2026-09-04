@@ -56,6 +56,9 @@ function group(over: Partial<ConstraintGroup> = {}): ConstraintGroup {
     fov: 60,
     far: 30,
     namePrefix: '',
+    zoneIds: [],
+    restrictScoring: true,
+    restrictMounts: false,
     poolSize: 200,
     maxCount: 10,
     trials: 1000,
@@ -253,4 +256,8 @@ test('groupProblem rejects an unusable template or strategy', () => {
   assert.match(groupProblem(group({ trials: 0 }))!, /trials/);
   assert.match(groupProblem(group({ epsilon: -1 }))!, /epsilon/);
   assert.match(groupProblem(group({ seed: 1.5 }))!, /seed/);
+  // Target zones are validated by the same predicate the file reader uses (§9).
+  assert.match(groupProblem(group({ zoneIds: ['zone-1', 3 as unknown as string] }))!, /zoneIds/);
+  assert.match(groupProblem(group({ zoneIds: undefined as unknown as string[] }))!, /zoneIds/);
+  assert.equal(groupProblem(group({ zoneIds: ['zone-1'], restrictMounts: true })), null);
 });

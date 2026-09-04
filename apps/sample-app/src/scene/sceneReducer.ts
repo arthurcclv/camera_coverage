@@ -55,6 +55,25 @@ import type { TransformChange } from './sceneView/types.ts';
 const NEW_CAMERA = { fov: 60, aspect: 16 / 9, near: 0.1, far: 30 } as const;
 const IDENTITY_QUAT: Quat = [0, 0, 0, 1];
 
+/**
+ * Drop every target-zone id a group holds that `keep` rejects
+ * (`camera_placement.md` §3.1.2, §7).
+ *
+ * Returns the **same array** when nothing changed, so a delete that touched no
+ * group cannot invalidate a pool: the fingerprint reads `zoneIds`, and a fresh
+ * array of identical strings would still hash the same, but identity-stable
+ * state keeps React's memoized derivations from re-running for nothing.
+ */
+function pruneTargetZones(
+  groups: ConstraintGroup[],
+  keep: (zoneId: string) => boolean,
+): ConstraintGroup[] {
+  if (!groups.some((g) => g.zoneIds.some((z) => !keep(z)))) return groups;
+  return groups.map((g) =>
+    g.zoneIds.every((z) => keep(z)) ? g : { ...g, zoneIds: g.zoneIds.filter(keep) },
+  );
+}
+
 /** Entities addressable by a delete/duplicate action. */
 export type EntityKind = 'camera' | 'probe' | 'section' | 'zone' | 'volume' | 'constraintGroup' | 'constraint';
 
@@ -422,6 +441,12 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
             ...state,
             volumes: state.volumes.filter((v) => v.zoneId !== id),
             zones: state.zones.filter((z) => z.id !== id),
+            // A deleted zone is pruned from every group that targeted it
+            // (`camera_placement.md` §3.1.2, §7) — the same eager unbinding
+            // `clipSectionId` and a camera's `constraintId` already get. A group
+            // left with an empty list falls back to the app's marked set rather
+            // than becoming unusable.
+            constraintGroups: pruneTargetZones(state.constraintGroups, (z) => z !== id),
             selection,
             ...(hadVolumes ? samplingInput(state) : null),
           };
@@ -799,10 +824,18 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
     case 'generated':
       // Generate replaces the whole zone+volume set from the BVH (§3.4),
       // discarding hand-edits, and auto-selects the first new zone.
+      //
+      // It also **clears every constraint group's target zones**
+      // (`camera_placement.md` §3.1.2, §7): the replacement re-numbers from
+      // `zone-1`, so `zone-3` still exists afterwards and names a *different*
+      // box. Pruning by liveness would never fire, and the group would silently
+      // retarget to unrelated geometry — so the references are treated as
+      // destroyed, which is what they are.
       return {
         ...state,
         zones: action.zones,
         volumes: action.volumes,
+        constraintGroups: pruneTargetZones(state.constraintGroups, () => false),
         selection: action.zones[0] ? { kind: 'zone', id: action.zones[0].id } : null,
         ...samplingInput(state),
       };

@@ -107,6 +107,13 @@ import { CAPTURE_SLOTS } from './optimize/cubeRig.ts';
 import { displayCameraMask } from './optimize/session.ts';
 import type { MarkedFilter } from './scene/aggregateSpec.ts';
 import {
+  constraintOverlaps,
+  overlapSummary,
+  regeneratedTargetsNotice,
+  resolveGroupTarget,
+  unmountableIds,
+} from './placement/pool.ts';
+import {
   compareCoverage,
   snapshotCoverage,
   type CoverageSnapshot,
@@ -384,6 +391,10 @@ export function App() {
    * session — the panel that would carry the line unmounts in the same commit.
    * The status area sits directly above **Optimize all aims**, which is where
    * the line sends the user next.
+   *
+   * It also carries §10's regenerate row (`camera_placement.md` §7): Generate
+   * clears every group's target zones, and the loss is a *warning* the user has
+   * to see, in the one place placement writes to outside its own mode.
    */
   const [placementNotice, setPlacementNotice] = useState<string | null>(null);
 
@@ -463,18 +474,42 @@ export function App() {
   const constraintGroupsRef = useRef(constraintGroups);
   constraintGroupsRef.current = constraintGroups;
   const [placementError, setPlacementError] = useState<string | null>(null);
+  /**
+   * The scene half of `resolveGroupTarget` (`camera_placement.md` §3.1.2), in a
+   * ref so the `groupTarget` callback below keeps one identity for the session's
+   * life — it feeds `usePlacement`'s own `useCallback` deps, and a new function
+   * every render would rebuild the build step and the fingerprint with it.
+   *
+   * Filled in during render, below, once `zoneCoverage` exists. The initial value
+   * is not a placeholder standing in for a real one: an empty scene resolves
+   * through the pure function's own no-target path, which is the truthful answer
+   * before anything has been loaded or run.
+   */
+  const targetSceneRef = useRef<Parameters<typeof resolveGroupTarget>[1]>({
+    zones: [],
+    volumes: [],
+    validVoxels: () => 0,
+  });
   const placement = usePlacement({
     engine,
     cameras: useCallback(() => camerasRef.current, []),
     constraintGroups: useCallback(() => constraintGroupsRef.current, []),
     constraints: useCallback(() => constraintsRef.current, []),
     grid: useCallback(() => runGridRef.current, []),
-    marked: useCallback(() => markedFilterRef.current, []),
+    // What one group counts, where it may mount, and what it divides by
+    // (`camera_placement.md` §3.1.2). Resolved from the live scene on every read,
+    // as one value, so a filter from the listed zones can never be paired with a
+    // total from the enabled ones.
+    groupTarget: useCallback(
+      (group: ConstraintGroup) =>
+        resolveGroupTarget(group, targetSceneRef.current, {
+          filter: markedFilterRef.current,
+          total: markedTotalRef.current,
+          revision: markedRevisionRef.current,
+        }),
+      [],
+    ),
     samplingPending: useCallback(() => samplingPendingRef.current, []),
-    // The counted set's size, from the app's own display numbers — the same
-    // denominator the stats panel quotes, so the two rates are comparable
-    // (`camera_placement.md` §5.2).
-    markedTotal: useCallback(() => markedTotalRef.current, []),
     aimSessionOpen: useCallback(() => optimizerBusyRef.current, []),
     // A build step does not go through the Run gate, so it needs its own readiness
     // check: the engine holds no scene until `initAndLoad` resolves (§10).
@@ -798,6 +833,15 @@ export function App() {
     ? enabledUnionSummary?.validVoxels ?? 0
     : summary?.validVoxels ?? 0;
 
+  // The live scene a group's target zones resolve against (§3.1.2). App supplies
+  // this half and the app's own marked set; `resolveGroupTarget` decides what the
+  // group's zone list does with them.
+  targetSceneRef.current = {
+    zones,
+    volumes,
+    validVoxels: (id) => zoneCoverage?.perZone.get(id)?.validVoxels ?? 0,
+  };
+
   // Apply a resolved transform edit emitted by SceneView after a drag (spec
   // §12.4, §13.8). Mirrors the old per-kind `onObjectChange` setters; whether an
   // edit marks the result stale is governed by which state it touches (a probe or
@@ -1057,6 +1101,31 @@ export function App() {
     }));
   }, [constraintGroups, placementPlan, placement.targetGroupId]);
 
+  /**
+   * The selected group's §4.1.1 overlaps — what dims its constraint gizmos, and
+   * the text cue beside them in `ConstraintGroupPanel` (§5).
+   *
+   * Only for the **selected** group: the dimming answers "can this group mount
+   * here", which is a question about one group, and a scene whose groups had
+   * different filters would otherwise paint a constraint by whichever group
+   * happened to be checked last. Memoized because `constraintOverlaps` is 256
+   * draws per constraint — cheap, but not free on every render.
+   */
+  const selectedGroupOverlaps = useMemo(
+    () => constraintOverlaps(constraintGroups.find((g) => g.id === selectedConstraintGroupId) ?? null, constraints, volumes),
+    [constraintGroups, constraints, selectedConstraintGroupId, volumes],
+  );
+  const unmountableConstraints = useMemo(
+    () => unmountableIds(selectedGroupOverlaps),
+    [selectedGroupOverlaps],
+  );
+
+  /** The same estimate for the group the mode is open on — §5.1's Build card. */
+  const placementOverlaps = useMemo(
+    () => constraintOverlaps(placementGroup, constraints, volumes),
+    [constraints, placementGroup, volumes],
+  );
+
   const poolPositions = useMemo(
     () => placement.pool?.positions.map((p) => ({ position: p.position, count: p.count })) ?? [],
     [placement.pool],
@@ -1120,6 +1189,7 @@ export function App() {
       placing,
       constraints,
       selectedVertex: activeVertex,
+      unmountableConstraints,
       constraintsVisible,
       poolPositions,
       chosenPoolIndices,
@@ -1480,6 +1550,11 @@ export function App() {
       boxLevel,
       voxelSize,
     );
+    // Generate re-numbers the zones from `zone-1`, so every group's target list
+    // is cleared rather than pruned (`camera_placement.md` §3.1.2, §7). The
+    // status area says so — read off the groups *before* the dispatch, since the
+    // reducer clears the lists this line reports on (§10).
+    setPlacementNotice(regeneratedTargetsNotice(constraintGroupsRef.current));
     dispatch({ type: 'generated', zones: nextZones, volumes: nextVolumes });
   }, [room, zoneLevel, boxLevel, voxelSize]);
 
@@ -2148,6 +2223,7 @@ export function App() {
             session={placement}
             group={placementGroup}
             constraints={constraints}
+            overlapText={overlapSummary(placementOverlaps, constraints)}
             error={placementError}
             onChangeGroup={handleConstraintGroupChange}
           />
@@ -2242,8 +2318,11 @@ export function App() {
               <ConstraintGroupPanel
                 group={selectedConstraintGroup}
                 memberCount={selectedGroupMemberCount}
+                zones={zones}
+                overlapText={overlapSummary(selectedGroupOverlaps, constraints)}
                 placementBlocker={placement.entryBlocker(selectedConstraintGroup)}
                 onRename={handleRenameConstraintGroup}
+                onChange={handleConstraintGroupChange}
                 onPlaceCameras={handlePlaceCameras}
               />
             ) : selectedVolume ? (

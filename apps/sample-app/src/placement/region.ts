@@ -49,6 +49,18 @@ export interface ConstraintGroup {
   poolSize: number; // P, positions built
   seed: number; // integer; offsets every constraint's sub-sequence, and picks each trial's subset
 
+  // Target zones (§3.1.2) — the sampling zones this group plans for, and what
+  // the list is for. Empty ⇒ the app's own marked set and both flags inert,
+  // which is the pre-feature behaviour exactly.
+  /** Ids of `Zone`s (`sampling_volumes.md` §2.1). Order is not significant. */
+  zoneIds: string[];
+  /** The group's target set is these zones' volumes, overriding `useZones` and
+   * each zone's `enabled` (§3.1.2). Default true. */
+  restrictScoring: boolean;
+  /** A drawn position is kept only inside these zones' volumes (§4.1.1). A
+   * *draw* rule, never a clamp (§6.3). Default false. */
+  restrictMounts: boolean;
+
   // Analysis strategy (§4.4) — persisted, so a seeded analysis is reproducible (§9).
   maxCount: number; // the largest layout the analysis considers
   trials: number; // T, layouts drawn
@@ -331,6 +343,9 @@ export function constraintProblem(c: CameraConstraint): string | null {
 
 /** Why this group's template, pool size or strategy cannot be used, or `null` (§9). */
 export function groupProblem(g: ConstraintGroup): string | null {
+  if (!Array.isArray(g.zoneIds) || g.zoneIds.some((id) => typeof id !== 'string')) {
+    return 'zoneIds must be an array of strings';
+  }
   if (!(g.fov > 0 && g.fov < 180)) return 'fov must be in (0, 180)';
   if (!(g.far > 0) || !Number.isFinite(g.far)) return 'far must be > 0';
   if (!Number.isInteger(g.poolSize) || g.poolSize < 1) return 'poolSize must be an integer ≥ 1';
@@ -351,6 +366,23 @@ export function groupProblem(g: ConstraintGroup): string | null {
  * which is the whole reason the pool is cached (§2.2). `epsilon` is in
  * percentage points of the reachable rate (§4.5).
  */
+/**
+ * The target a new group starts with (§3.1.2): no zones, so both flags are inert
+ * and the group scores against the app's own marked set exactly as it did before
+ * the feature existed.
+ *
+ * `restrictScoring` defaults **true** and `restrictMounts` **false** because the
+ * two differ in what they can cost. Adding a zone means "this group is for this
+ * area", and restricting the score can never empty a pool — a position that
+ * reaches nothing was already rejected by §4.2. Restricting *mounts* can starve
+ * every constraint at once, so it is the one the user opts into.
+ */
+export const DEFAULT_TARGET = {
+  zoneIds: [] as string[],
+  restrictScoring: true,
+  restrictMounts: false,
+} as const;
+
 export const DEFAULT_RECIPE = {
   poolSize: 200,
   maxCount: 10,
@@ -384,6 +416,8 @@ export function defaultConstraintGroup(id: string): ConstraintGroup {
     enabled: true,
     ...DEFAULT_GROUP_TEMPLATE,
     namePrefix: '',
+    ...DEFAULT_TARGET,
+    zoneIds: [],
     ...DEFAULT_RECIPE,
   };
 }

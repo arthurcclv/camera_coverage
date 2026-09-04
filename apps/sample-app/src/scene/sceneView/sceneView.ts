@@ -107,6 +107,13 @@ export interface SceneViewState {
   constraints: readonly CameraConstraint[];
   /** The selected polyline's vertex sub-selection, or null (§6.1). */
   selectedVertex: number | null;
+  /**
+   * Constraint ids the selected group's mount filter excludes entirely
+   * (`camera_placement.md` §3.1.2, §4.1.1) — they dim, so a wall with no zone
+   * overlap looks different from a good one before Build is pressed. Empty
+   * whenever no group is selected or the group has no mount filter.
+   */
+  unmountableConstraints: ReadonlySet<string>;
   /** Constraints layer visibility — gizmos and the pool scatter (`spec.md` §2.4). */
   constraintsVisible: boolean;
   /** The built pool's positions, shaded by their own reachable count (§5.2). */
@@ -440,9 +447,15 @@ export class SceneView {
       !prev ||
       prev.constraints !== next.constraints ||
       constraintId(prev.selection) !== constraintId(next.selection) ||
-      prev.selectedVertex !== next.selectedVertex
+      prev.selectedVertex !== next.selectedVertex ||
+      prev.unmountableConstraints !== next.unmountableConstraints
     ) {
-      this.constraintGizmos.update(next.constraints, constraintId(next.selection), next.selectedVertex);
+      this.constraintGizmos.update(
+        next.constraints,
+        constraintId(next.selection),
+        next.selectedVertex,
+        next.unmountableConstraints,
+      );
     }
 
     // --- pool scatter + draft polyline (`camera_placement.md` §5.2, §6.2) ------

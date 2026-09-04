@@ -127,6 +127,9 @@ const dupGroup = (id: string): ConstraintGroup => ({
   near: 0.2,
   far: 45,
   namePrefix: 'Dock',
+  zoneIds: ['zone-3', 'zone-7'],
+  restrictScoring: true,
+  restrictMounts: true,
   poolSize: 120,
   maxCount: 6,
   trials: 500,
@@ -177,6 +180,13 @@ test('duplicateConstraintGroup deep-copies the group, its strategy, and its cons
   assert.equal(copy.group.seed, 7);
   assert.equal(copy.group.poolSize, 120);
   assert.equal(copy.group.enabled, false);
+  // The target zones ride along — the copy plans for the same place (§7) — but
+  // as a fresh array, so editing one group's list does not edit the other's.
+  assert.deepEqual(copy.group.zoneIds, ['zone-3', 'zone-7']);
+  assert.equal(copy.group.restrictMounts, true);
+  assert.notEqual(copy.group.zoneIds, groups[0].zoneIds);
+  copy.group.zoneIds.push('zone-9');
+  assert.deepEqual(groups[0].zoneIds, ['zone-3', 'zone-7']);
   // Only this group's constraints, each renumbered and repointed at the copy.
   assert.equal(copy.constraints.length, 1);
   assert.equal(copy.constraints[0].id, 'con-3');
