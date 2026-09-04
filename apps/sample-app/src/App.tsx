@@ -1140,14 +1140,21 @@ export function App() {
    * grown to the cursor, since the polyline itself is already drawn as a
    * constraint.
    */
+  /**
+   * The vertex an armed Extend grows from (§6.2) — the rubber band's fixed end,
+   * and the seed for the viewport's hover plane, which is why it is its own memo
+   * rather than a local inside `draftPoints`: the plane must be seeded when
+   * Extend arms, before any hover has produced a cursor to build a draft from.
+   */
+  const drawAnchor = useMemo<Vec3 | null>(() => {
+    if (!extending || !selectedPolyline) return null;
+    const points = selectedPolyline.points;
+    return (extending.end === 'start' ? points[0] : points[points.length - 1]) ?? null;
+  }, [extending, selectedPolyline]);
   const draftPoints = useMemo(() => {
-    if (extending && selectedPolyline) {
-      const points = selectedPolyline.points;
-      const anchor = extending.end === 'start' ? points[0] : points[points.length - 1];
-      return anchor && draft.cursor ? [anchor, draft.cursor] : [];
-    }
+    if (extending) return drawAnchor && draft.cursor ? [drawAnchor, draft.cursor] : [];
     return drawing ? draftPolyline(draft) : [];
-  }, [drawing, draft, extending, selectedPolyline]);
+  }, [drawing, draft, extending, drawAnchor]);
   /**
    * The vertices the draft draws as dots (§6.2): the ones actually clicked, so
    * the first click is visible before there is a second to draw a line to.
@@ -1196,6 +1203,7 @@ export function App() {
       // Extend is the same armed tool as far as the viewport is concerned: the
       // crosshair, the detached gizmo, and the draw-click routing (§6.2).
       drawing: drawing || extending !== null,
+      drawAnchor,
       draftPolyline: draftPoints,
       draftVertices,
       placementMoves: placementMoveLines,
@@ -1207,7 +1215,7 @@ export function App() {
       transformSpace, activeView, gizmosVisible, zonesVisible, sectionsVisible, stale,
       voxelSize, clipBand, sightlines, placing,
       constraints, activeVertex, constraintsVisible, poolPositions, chosenPoolIndices,
-      drawing, extending, draftPoints, draftVertices, placementMoveLines,
+      drawing, extending, drawAnchor, draftPoints, draftVertices, placementMoveLines,
     ],
   );
 

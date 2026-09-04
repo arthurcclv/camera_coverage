@@ -59,6 +59,7 @@ import type { ViewId } from '../viewCameras.ts';
 
 import { nearestHit, type PickCandidate } from './pick.ts';
 import { surfaceHit } from './surfaceHit.ts';
+import { planeFromHit, planeHit, seedPlane, type HoverPlane } from './hoverPlane.ts';
 import { floorVolumeSize, sectionBoundsFromCenters } from './transformReadback.ts';
 import type { GizmoAttachable, GizmoPicker } from '../gizmoSet.ts';
 import type { TransformChange } from './types.ts';
@@ -127,6 +128,12 @@ export interface SceneViewState {
    */
   drawing: boolean;
   /**
+   * The vertex an armed **Extend** grows from (§6.2), or null while drawing a
+   * fresh polyline. It seeds the hover plane, so Extend has a rubber band before
+   * its first click — a fresh draft has no band to seed until one exists.
+   */
+  drawAnchor: Vec3 | null;
+  /**
    * The draft's **committed** vertices, drawn as dots (§6.2). Separate from
    * `draftPolyline` because that one ends at the cursor, which is not a vertex.
    */
@@ -180,6 +187,17 @@ export class SceneView {
   private drawHoverHandler: ((point: Vec3 | null) => void) | null = null;
   /** A draw-mode double-click: commit what is drawn (§6.2). */
   private drawCommitHandler: (() => void) | null = null;
+
+  /**
+   * The plane the armed draw mode's rubber band runs on (§6.2, `hoverPlane.ts`).
+   *
+   * A hover intersects **this** rather than the scene mesh, which is what keeps a
+   * pointer move off the `O(triangles)` raycast. Re-seeded by every committed
+   * draw click from the surface that click landed on, so it tracks the wall or
+   * floor being drawn along; seeded from `drawAnchor` when Extend arms, and null
+   * for a fresh draft, which has no band until its first click anyway.
+   */
+  private hoverPlane: HoverPlane | null = null;
 
   /**
    * In-flight aim drag in the Selected view (spec §2.4.1, §5.2). The orientation
@@ -462,6 +480,14 @@ export class SceneView {
     if (!prev || prev.poolPositions !== next.poolPositions || prev.chosenPoolIndices !== next.chosenPoolIndices) {
       this.placementOverlay.setPool(next.poolPositions, next.chosenPoolIndices);
     }
+    // --- the hover plane, re-seeded on arm (§6.2, `hoverPlane.ts`) -------------
+    // Only on the arm edge: a committed draw click re-seeds it from the surface it
+    // hit, and Extend's anchor moves with every such click — re-seeding on that
+    // would throw the real surface plane away and put the band back on world-up.
+    if (!prev || prev.drawing !== next.drawing) {
+      this.hoverPlane = next.drawing && next.drawAnchor ? seedPlane(next.drawAnchor) : null;
+    }
+
     if (!prev || prev.draftPolyline !== next.draftPolyline) {
       this.placementOverlay.setDraft(next.draftPolyline);
     }
@@ -593,17 +619,28 @@ export class SceneView {
     const room = this.prev?.room;
     if (!room) return;
     this.setRayFromEvent(ev);
-    const point = surfaceHit(this.raycaster.intersectObject(room.group, true), this.prev?.clipBand ?? null);
-    if (point) this.drawHandler?.(point);
+    const hit = surfaceHit(this.raycaster.intersectObject(room.group, true), this.prev?.clipBand ?? null);
+    if (!hit) return;
+    // The click is the one hover-plane update there is: the band that follows now
+    // runs along the surface this vertex landed on (§6.2).
+    this.hoverPlane = planeFromHit(hit);
+    this.drawHandler?.(hit.point);
   }
 
-  /** Track the hovered surface point so the rubber band follows the cursor (§6.2). */
+  /**
+   * Track the hovered point so the rubber band follows the cursor (§6.2).
+   *
+   * Against the **hover plane**, not the scene geometry: this runs on every
+   * pointer move, and a mesh raycast there costs `O(triangles)` per move on an
+   * imported site. The clip band does not enter into it — there is no
+   * intersection list to filter, and only clicks discard clipped hits.
+   */
   private hoverDraw(ev: PointerEvent): void {
-    const room = this.prev?.room;
-    if (!room) return;
+    if (!this.prev?.room) return;
     this.setRayFromEvent(ev as unknown as MouseEvent);
+    const { origin, direction } = this.raycaster.ray;
     this.drawHoverHandler?.(
-      surfaceHit(this.raycaster.intersectObject(room.group, true), this.prev?.clipBand ?? null),
+      planeHit([origin.x, origin.y, origin.z], [direction.x, direction.y, direction.z], this.hoverPlane),
     );
   }
 
@@ -612,8 +649,8 @@ export class SceneView {
     const room = this.prev?.room;
     if (!room) return;
     this.setRayFromEvent(ev);
-    const point = surfaceHit(this.raycaster.intersectObject(room.group, true), this.prev?.clipBand ?? null);
-    if (point) this.placeHandler?.(point);
+    const hit = surfaceHit(this.raycaster.intersectObject(room.group, true), this.prev?.clipBand ?? null);
+    if (hit) this.placeHandler?.(hit.point);
   }
 
   /** The camera the Selected view is rendering through, or null (spec §2.4.1). */

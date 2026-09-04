@@ -1304,8 +1304,9 @@ polyline with no vertices is not a thing the user wants, so the menu row that wo
 one arms this instead. It is a repeating variant of **Place on surface** and behaves exactly
 as `spec.md` §2.4.2 specifies: the `TransformControls` gizmo detaches, the pointer is a
 crosshair, viewport clicks neither select nor deselect, orbit/pan/zoom keep working, the
-click-vs-drag threshold applies, and the hit test is against **scene geometry only** with
-gizmos and the overlay transparent to the ray and clip-band intersections discarded.
+click-vs-drag threshold applies, and **the click's** hit test is against **scene geometry
+only** with gizmos and the overlay transparent to the ray and clip-band intersections
+discarded. **The hover is the one rule it does not inherit** — see the rubber band below.
 
 **It has no viewport-toolbar button**, and so it is the one armed tool with no highlighted
 button: the crosshair is its armed signal. A button there would be a second way to make the
@@ -1327,7 +1328,29 @@ It differs in three ways, all of them because a polyline has many vertices:
   drawn on and z-fights itself away. **Solid, not dashed** — two dashed constructions were
   drawn and could not be seen under this app's WebGPU backend, and a draft the user cannot
   see is worth less than one that does not distinguish itself by dashing
-  (`CONVENTIONS.md`);
+  (`CONVENTIONS.md`).
+
+  **The rubber band's far end is resolved against a plane, not the scene mesh.** A click
+  raycasts the geometry as §2.4.2 says; a *hover* intersects the pointer ray with a single
+  **hover plane** and nothing else. The plane passes through the last committed click's hit
+  point, with that hit's **geometric face normal** in world space. **Why:** the geometry
+  raycast is `O(triangles)` with no acceleration structure, and on an imported site glTF it
+  is the most expensive thing in the frame — paid on every pointer move, at pointer rate,
+  for a preview. The next vertex is nearly always on the same surface as the last one (a
+  rail along a wall, a line across a floor), so the plane *through that surface* is where
+  the band belongs anyway, and the arithmetic is a dot product. **The click stays exact**,
+  so no vertex is ever placed on the approximation.
+
+  **Where the approximation shows: turning a corner.** Between the last click on wall A and
+  the next click on wall B, the band tracks A's plane, not B's. Accepted — the band previews
+  *direction*, the click decides the *point*, and it re-seeds onto B the moment that click
+  lands.
+
+  **A degenerate ray draws no band.** If the ray is parallel or near-parallel to the plane,
+  or meets it behind the camera, the hover resolves to nothing and the band is simply not
+  drawn; the clicked vertices still are. A band whose far end sits at effectively infinite
+  distance is worse than no band. **The clip band does not filter the hover** — there is no
+  intersection list to filter, and only clicks discard clipped hits;
 - it is **not one-shot**: **Enter** or a **double-click** commits, **Escape** cancels the
   whole in-progress polyline, and **Backspace** removes the last vertex. **A double-click
   contributes no vertex of its own**: its first click appends one like any other click, and
@@ -1362,13 +1385,17 @@ on a wall or a rail, so the tool that answers "put this *there*, on the geometry
 is the same one, and it beats teaching a second gesture for a vertex.
 
 **Extend** is the draw mode again, bound to an existing polyline instead of a draft: same
-crosshair, same geometry-only hit test, same rubber band, and each click **appends a vertex
+crosshair, same geometry-only **click** hit test, same rubber band, and each click **appends a vertex
 to the polyline and selects it** — so the next click continues from where the last one
 landed. Which end grows is the selected vertex's: **vertex 1 prepends** (the polyline grows
 backward from its start), **any other vertex appends** past the end. That is what lets a
 rail be grown at either end without reversing it, and pairing it with §6.1's
 select-the-last-vertex default means the common case — keep drawing the polyline I just
-finished — needs no selection at all.
+finished — needs no selection at all. **Extend wants a band before its first click**, and
+has no click to take a plane from, so it seeds one through **the vertex being grown from**
+with a **world-up** normal, replaced by the real surface plane on the first click. Drawing
+needs no such seed: there is no band until a first vertex exists, and that first click
+seeds the plane.
 
 Extend differs from drawing in one way, and it follows from editing a committed entity
 rather than a draft: **every click is a committed edit**. **Enter** and **Escape** just
@@ -1668,6 +1695,14 @@ src/scene/
                             scatter and the §6.2 draft polyline — both are the
                             placement tool's picture, so they share a layer toggle
   polylineDraw.ts           §6.2 the armed draw mode's pure state, over §2.4.2's hit test
+                            for clicks and hoverPlane.ts for hovers
+src/scene/sceneView/
+  hoverPlane.ts             §6.2 the hover plane and the ray/plane intersection, with the
+                            near-parallel and behind-the-camera guards — pure, the hover
+                            counterpart of surfaceHit.ts's click
+  surfaceHit.ts             §2.4.2 the click's nearest eligible hit — now the hit **point
+                            and its world-space geometric face normal**, since §6.2's
+                            hover plane is seeded from the normal
 ```
 
 **`analyze.ts` is engine-free.** It takes the pool as data — an array of `{ count,
@@ -1836,6 +1871,18 @@ reachable sets and the CPU union. Both are pinned by outcome.
   does, the two sessions are mutually exclusive and claim the same ids, the `samplingDirty`
   block, a build step never mutates a scene entity, the scene cameras keep their ids and order
   so a build step stays incremental, and the display mask hides the slots.
+- **`test/sceneView/hoverPlane.test.ts`** — the §6.2 hover, pure: a ray meeting the plane
+  square returns the exact intersection; a ray **parallel** to the plane and one
+  **near-parallel** within the guard both return nothing; a plane **behind** the camera
+  returns nothing rather than the negative-`t` point; the plane is honoured in its own
+  orientation (a vertical wall plane, not just the horizontal case that a naive
+  `y = const` implementation would pass); and the seed rule — a click's hit replaces the
+  plane, while Extend's pre-click plane is world-up through the anchor. Plus, in
+  **`test/sceneView/surfaceHit.test.ts`**, that the returned normal is the **geometric
+  face** normal transformed into world space by the hit object's matrix — not the
+  interpolated shading normal (which `computeVertexNormals` averages across a box corner
+  into something that is no face's plane) and not the untransformed local one (which a
+  glTF object carrying a transform would make wrong).
 - **`test/sceneReducer.test.ts`** — the constraint half of the reducer: no constraint edit
   marks the result stale, **except** reshaping one a camera is bound to, which moves that
   camera and therefore does (and a reshape that moves nothing marks nothing); the clamp

@@ -169,7 +169,10 @@ default" — see DECISIONS.md).
   as resolved `onTransform` events, clicks as resolved `onSelect`, and an armed
   "Place on surface" hit as an `onPlace` world point. The decision logic it owns
   is pure and unit-tested: `pick.ts` (`nearestHit`), `surfaceHit.ts` (`surfaceHit`
-  — the placement ray's clip-band-aware nearest hit), `transformReadback.ts`
+  — the placement ray's clip-band-aware nearest hit, plus that hit's world-space
+  geometric face normal), `hoverPlane.ts` (`planeHit`/`planeFromHit`/`seedPlane` —
+  the polyline draw mode's rubber band, resolved against a plane rather than the
+  scene mesh so a pointer move costs no raycast), `transformReadback.ts`
   (`floorVolumeSize`, `sectionBoundsFromCenters`), plus `types.ts`
   (`SceneViewState`, `TransformChange`). The gizmo/overlay/viewport modules below
   are its internal parts — App never touches them directly.
@@ -693,3 +696,15 @@ click is consumed for placement instead of selection: it raycasts only
 `onPlace(point)` that App applies with the ordinary
 `changeCamera`/`changeProbe`/`moveConstraintVertex` action — so the tool inherits
 each target's existing clamp and stale semantics rather than restating them.
+
+The **polyline draw mode** (`camera_placement.md` §6.2) is the same tool repeating,
+and splits the two gestures apart on cost. A *click* is exactly the above — a
+`room.group` raycast through `surfaceHit`. A *hover*, which fires on every pointer
+move, is not: it intersects the ray with a single **hover plane** (`hoverPlane.ts`)
+and touches no geometry, because three's `Mesh.raycast` is `O(triangles)` with no
+BVH and an imported site glTF makes that the frame's dominant cost. `SceneView`
+holds the plane, re-seeding it from the surface each committed click landed on, so
+the band runs along the wall or floor being drawn; `SceneViewState.drawAnchor`
+seeds it when **Extend** arms, which needs a band before it has a click. A fresh
+draft starts with no plane, and needs none — there is no rubber band until a first
+vertex exists.

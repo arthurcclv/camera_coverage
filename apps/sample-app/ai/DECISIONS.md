@@ -6,6 +6,49 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The polyline rubber band tracks a plane, not the scene mesh
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §6.2.
+
+**Why.** The draw mode resolved its rubber band the same way it resolves a click: a
+`raycaster.intersectObject(room.group, true)` against the scene geometry. That is fine for
+the default five-box room and untenable on the real site. Three's `Mesh.raycast` is
+`O(triangles)` with no acceleration structure — the app has no `three-mesh-bvh` — and it
+collects *every* intersection and sorts them, though `surfaceHit` reads only the first
+eligible one. Running that on `pointermove`, unthrottled, meant an imported site glTF paid
+its full triangle count several times per frame to draw a preview line.
+
+**Decision.** Clicks still raycast the mesh; hovers intersect the pointer ray with one
+**hover plane**. The plane passes through the last committed click's hit point along that
+hit's geometric face normal, so it *is* the surface being drawn on. Extend, which wants a
+band before it has a click of its own, seeds a world-up plane through the vertex it grows
+from. Cost per pointer move goes from a triangle sweep to a dot product.
+
+**Trade-off: turning a corner.** Between a click on wall A and the next click on wall B the
+band tracks A's plane, so its far end floats off B. Accepted — the band previews *direction*
+and the click decides the *point*, so nothing is ever placed on the approximation, and the
+plane re-seeds onto B the moment that click lands. Two guards keep the failure visible
+rather than silly: a ray within ~0.06° of parallel to the plane, or meeting it behind the
+camera, draws no band at all instead of one running to the horizon.
+
+**Why not a rAF throttle.** It was the smaller change and it bounds the burst on a 120 Hz
+pointer, but it leaves the per-frame cost on a large glTF exactly where it was. The plane
+removes the cost rather than rationing it.
+
+**Still outstanding.** The hover writes `draft.cursor` into React state, so every pointer
+move re-renders `App`. The raycast was the larger cost, but if the mode still feels heavy
+that is the next thing to move — pushing the cursor straight into `PlacementOverlay` and
+leaving only committed vertices in React.
+
+**Cost paid elsewhere.** `surfaceHit` now returns `{ point, normal }` rather than a bare
+`Vec3`, since the plane is seeded from the normal. It reads `face.normal` (the geometric
+face) and not `Intersection.normal` (the interpolated shading normal, which
+`computeVertexNormals` averages across a box corner into the plane of no face), and pushes
+it through the hit object's normal matrix — identity for the room/box primitives, but not
+for a `gltf` object carrying a transform.
+
+---
+
 ## A constraint group's target zones override the app's marked set
 
 Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §3.1.2, §3.3.1.
