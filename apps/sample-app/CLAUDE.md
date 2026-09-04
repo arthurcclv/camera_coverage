@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working in the sample app. See the repo-root `CLAUDE.md` for monorepo layout and workflow rules that apply to both packages.
 
-Vite/React/Three.js browser demo of the SDK, implemented from `specs/spec.md` — that spec is the source of truth for intended behavior. Three feature docs sit beside it and own their features outright: [`specs/volumetric_rendering.md`](specs/volumetric_rendering.md) (the overlay renderer), [`specs/sampling_volumes.md`](specs/sampling_volumes.md) (zones), and [`specs/aim_optimization.md`](specs/aim_optimization.md) (the camera aim optimizer). It consumes the SDK by package name (`"@linkervision/camera-coverage-sdk": "*"`) via workspace symlink.
+Vite/React/Three.js browser demo of the SDK, implemented from `specs/spec.md` — that spec is the source of truth for intended behavior. Four feature docs sit beside it and own their features outright: [`specs/volumetric_rendering.md`](specs/volumetric_rendering.md) (the overlay renderer), [`specs/sampling_volumes.md`](specs/sampling_volumes.md) (zones), [`specs/aim_optimization.md`](specs/aim_optimization.md) (the camera aim optimizer), and [`specs/camera_placement.md`](specs/camera_placement.md) (constraint-driven camera placement). It consumes the SDK by package name (`"@linkervision/camera-coverage-sdk": "*"`) via workspace symlink.
 
 ## Documentation
 

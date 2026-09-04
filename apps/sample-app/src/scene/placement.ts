@@ -1,11 +1,11 @@
 /**
  * "Place on surface" tool logic for the viewport toolbar (spec §2.4.2).
  *
- * The tool sets a selected entity's position from a click on the scene geometry.
- * This module is the single source of truth for **which selection kinds it
- * supports** and for the button's tooltip, kept pure so it can be unit-tested
- * without a React/DOM harness (test/placement.test.ts) — the same split the
- * transform-space toggle uses (`transformSpace.ts`).
+ * The tool sets a **target's** position from a click on the scene geometry. This
+ * module is the single source of truth for **what it can target** and for the
+ * button's tooltip, kept pure so it can be unit-tested without a React/DOM
+ * harness (test/placement.test.ts) — the same split the transform-space toggle
+ * uses (`transformSpace.ts`).
  *
  * The geometry side of the tool (resolving a ray's intersections to one world
  * point) lives in `sceneView/surfaceHit.ts`.
@@ -13,12 +13,11 @@
 import type { Selection } from './viewportSelection.ts';
 
 /**
- * A selection kind the tool can place — i.e. one whose entity carries a
- * `position: Vec3` (spec §2.4.2). Derived from {@link Selection} rather than
- * spelled out independently, so renaming a kind fails the build here instead of
- * silently narrowing the supported set.
+ * A selection kind the tool can act on (spec §2.4.2). Derived from
+ * {@link Selection} rather than spelled out independently, so renaming a kind
+ * fails the build here instead of silently narrowing the supported set.
  */
-export type PlaceableKind = Extract<NonNullable<Selection>['kind'], 'camera' | 'probe'>;
+export type PlaceableKind = Extract<NonNullable<Selection>['kind'], 'camera' | 'probe' | 'constraint'>;
 
 /**
  * The supported kinds, in one place (spec §2.4.2). A section is a set of bounds
@@ -26,25 +25,57 @@ export type PlaceableKind = Extract<NonNullable<Selection>['kind'], 'camera' | '
  * box *centre* — placing one on a surface would bury half the box — so none of
  * the three is here.
  *
+ * `constraint` is here for **one** case: a polyline's selected vertex
+ * (`camera_placement.md` §6.2). A constraint selection alone is not placeable —
+ * a polyline has no `position` of its own — which is why the predicate below
+ * takes the vertex sub-selection as well as the selection.
+ *
  * Widening this list is deliberate: every consumer switches exhaustively over
- * {@link PlaceableKind}, so adding a kind fails to compile until it is handled.
+ * {@link PlaceTarget}, so adding a kind fails to compile until it is handled.
  */
-export const PLACEABLE_KINDS: readonly PlaceableKind[] = ['camera', 'probe'];
-
-/** A selection the tool can act on — narrowed, so callers get exhaustiveness. */
-export type PlaceableSelection = { kind: PlaceableKind; id: string };
+export const PLACEABLE_KINDS: readonly PlaceableKind[] = ['camera', 'probe', 'constraint'];
 
 /**
- * Whether the tool is available for `selection` (spec §2.4.2) — the button's
- * enablement rule. Narrows on success so the caller can switch over the
- * supported kinds without re-testing.
+ * What an armed click writes. A vertex is the one target that is a
+ * **sub-selection** rather than an entity, so it carries its index alongside the
+ * constraint's id (`camera_placement.md` §6.1).
  */
-export function canPlace(selection: Selection): selection is PlaceableSelection {
-  return selection !== null && PLACEABLE_KINDS.some((kind) => kind === selection.kind);
+export type PlaceTarget =
+  | { kind: 'camera'; id: string }
+  | { kind: 'probe'; id: string }
+  | { kind: 'vertex'; id: string; vertex: number };
+
+/**
+ * The target of an armed click, or `null` when the tool is unavailable — the
+ * button's enablement rule and the click's dispatch, resolved once (spec §2.4.2).
+ *
+ * `vertex` is the caller's polyline sub-selection: non-null **only** when the
+ * selected constraint is a polyline (`camera_placement.md` §6.1, which resolves
+ * it). Taking it as a number rather than the constraint keeps this module out of
+ * the constraint model, exactly as it stays out of the camera and probe models.
+ */
+export function placeTarget(selection: Selection, vertex: number | null): PlaceTarget | null {
+  if (selection === null) return null;
+  switch (selection.kind) {
+    case 'camera':
+    case 'probe':
+      return { kind: selection.kind, id: selection.id };
+    case 'constraint':
+      return vertex === null ? null : { kind: 'vertex', id: selection.id, vertex };
+    default:
+      return null;
+  }
+}
+
+/** Whether the tool is available (spec §2.4.2) — the button's enablement rule. */
+export function canPlace(selection: Selection, vertex: number | null): boolean {
+  return placeTarget(selection, vertex) !== null;
 }
 
 /** Tooltip/`aria-label` for the button, naming why it is disabled when it is. */
-export function placeTooltip(selection: Selection, armed: boolean): string {
-  if (!canPlace(selection)) return 'Place on surface — select a camera or probe';
-  return armed ? 'Place on surface — click the geometry' : 'Place on surface';
+export function placeTooltip(selection: Selection, vertex: number | null, armed: boolean): string {
+  const target = placeTarget(selection, vertex);
+  if (!target) return 'Place on surface — select a camera, a probe, or a polyline vertex';
+  const what = target.kind === 'vertex' ? 'Place vertex on surface' : 'Place on surface';
+  return armed ? `${what} — click the geometry` : what;
 }

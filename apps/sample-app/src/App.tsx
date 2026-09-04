@@ -42,7 +42,7 @@ import {
   toggleSpace,
   type TransformSpace,
 } from './scene/transformSpace.ts';
-import { canPlace, placeTooltip } from './scene/placement.ts';
+import { canPlace, placeTarget, placeTooltip } from './scene/placement.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
@@ -77,7 +77,7 @@ import {
 import { SceneView, type SceneViewState, type TransformChange } from './scene/sceneView/sceneView.ts';
 import { initSceneState, sceneReducer, type EntityKind } from './scene/sceneReducer.ts';
 import { displayCoverageSummary, hierarchyPerCamera } from './scene/statsDisplay.ts';
-import { useEngine } from './engine/useEngine.ts';
+import { engineLoadAction, useEngine } from './engine/useEngine.ts';
 
 import {
   clampDetailHeight,
@@ -102,7 +102,7 @@ import { SceneFileControls } from './ui/SceneFileControls.tsx';
 import { VolumePanel } from './ui/VolumePanel.tsx';
 import { ZonePanel } from './ui/ZonePanel.tsx';
 import { SamplingVolumeControls } from './ui/SamplingVolumeControls.tsx';
-import type { Bvh, Quat } from '@linkervision/camera-coverage-sdk';
+import { MAX_CAMERAS, type Bvh, type Quat } from '@linkervision/camera-coverage-sdk';
 import { CAPTURE_SLOTS } from './optimize/cubeRig.ts';
 import { displayCameraMask } from './optimize/session.ts';
 import type { MarkedFilter } from './scene/aggregateSpec.ts';
@@ -114,6 +114,38 @@ import {
 } from './optimize/comparison.ts';
 import { useAimOptimizer } from './optimize/useAimOptimizer.ts';
 import { OptimizePanel } from './ui/OptimizePanel.tsx';
+import { CandidatePositionsPanel } from './ui/CandidatePositionsPanel.tsx';
+import { StrategyPanel } from './ui/StrategyPanel.tsx';
+import { NewCameraDefaultsPanel } from './ui/NewCameraDefaultsPanel.tsx';
+import { PlacementReviewPanel } from './ui/PlacementReviewPanel.tsx';
+import { ConstraintGroupPanel } from './ui/ConstraintGroupPanel.tsx';
+import { ConstraintPanel } from './ui/ConstraintPanel.tsx';
+import { usePlacement } from './placement/usePlacement.ts';
+import { stepMode, type ModeState } from './placement/mode.ts';
+import { EMPTY_PLAN, appliedLabel, boundCameras, planApply } from './placement/assign.ts';
+import { DEFAULT_TEMPLATE, type CameraConstraint, type ConstraintGroup } from './placement/region.ts';
+import type { ConstraintKind } from './placement/region.ts';
+import {
+  EMPTY_DRAFT,
+  appendVertex,
+  commitDraft,
+  draftAfterDoubleClick,
+  draftPolyline,
+  effectiveVertex,
+  extendEnd,
+  extendInsertAt,
+  moveCursor,
+  removeLastVertex,
+  type PolylineDraft,
+  type PolylineEnd,
+} from './scene/polylineDraw.ts';
+
+/**
+ * One shared empty vertex list, so "no draft vertices" keeps a stable reference
+ * and `SceneView`'s per-field diff (which compares by reference) skips the
+ * overlay rewrite it would otherwise do on every pointer move.
+ */
+const EMPTY_VERTICES: readonly Vec3[] = [];
 
 /**
  * Chunk footprint, derived per workspace rather than pinned (SDK spec §3).
@@ -303,6 +335,7 @@ export function App() {
   // of the document.
   const [sceneState, dispatch] = useReducer(sceneReducer, initialScene, initSceneState);
   const { cameras, probes, sections, clipSectionId, zones, volumes, useZones, selection, collapsedIds, stale, hasRunOnce } = sceneState;
+  const { constraintGroups, constraints } = sceneState;
   const [zoneLevel, setZoneLevel] = useState(DEFAULT_ZONE_LEVEL);
   const [boxLevel, setBoxLevel] = useState(DEFAULT_BOX_LEVEL);
 
@@ -322,6 +355,10 @@ export function App() {
   const [voxelSize, setVoxelSize] = useState(DEFAULT_VOXEL_SIZE);
   const debouncedVoxelSize = useDebounced(voxelSize, DEBOUNCE_MS);
   const [initializedVoxelSize, setInitializedVoxelSize] = useState<number | null>(null);
+  // Read by the scene-load effect (spec §8), which keys on `room` alone so that a
+  // resolution change doesn't re-voxelize the workspace outside a run (§6).
+  const debouncedVoxelSizeRef = useRef(debouncedVoxelSize);
+  debouncedVoxelSizeRef.current = debouncedVoxelSize;
 
   // The workspace grid a run is computed on (spec §4.2). Also what maps a
   // chunkId back to its origin/dims when feeding the overlay, since an
@@ -339,6 +376,16 @@ export function App() {
 
   /** §10: an optimizer failure reads as a status-area message, never a crash. */
   const [optimizeError, setOptimizeError] = useState<string | null>(null);
+
+  /**
+   * `camera_placement.md` §5.3.3: what Apply placed, and that nothing is aimed.
+   *
+   * It lives here rather than in the review panel because Apply closes the
+   * session — the panel that would carry the line unmounts in the same commit.
+   * The status area sits directly above **Optimize all aims**, which is where
+   * the line sends the user next.
+   */
+  const [placementNotice, setPlacementNotice] = useState<string | null>(null);
 
   // --- aim optimization (`aim_optimization.md` §3.1, §5, §6) ------------------
   // The optimizer drives its own `compute()` calls against a camera list that
@@ -371,6 +418,8 @@ export function App() {
       // one — so the store still holds the pre-session numbers either way, and
       // apply time is the moment that cannot be reached without an apply.
       pendingBeforeRef.current = snapshotCoverage(coverageRun.zoneCoverage(stateRef.current.zones));
+      // The §5.3.3 line asked for exactly this; it has stopped being true.
+      setPlacementNotice(null);
       dispatch({ type: 'applyAims', rotations });
     }, [coverageRun]),
     onError: useCallback((message: string) => setOptimizeError(message), []),
@@ -381,6 +430,137 @@ export function App() {
   const noteFullRunRef = useRef(optimizer.noteFullRun);
   noteFullRunRef.current = optimizer.noteFullRun;
   const [hoveredAim, setHoveredAim] = useState<Quat | null>(null);
+
+  // What a built pool is only valid for (`camera_placement.md` §3.3.1). Two
+  // monotonic revisions stand in for "the geometry changed" and "the counted set
+  // changed": both are identity comparisons on values App already holds, and a
+  // counter is what lets the pool's fingerprint be a plain string.
+  const runGridRef = useRef(runGrid);
+  runGridRef.current = runGrid;
+  const geometryRevisionRef = useRef(0);
+  const lastRoomRef = useRef(room);
+  if (lastRoomRef.current !== room) {
+    lastRoomRef.current = room;
+    geometryRevisionRef.current += 1;
+  }
+  const markedRevisionRef = useRef(0);
+  const lastMarkedRef = useRef<unknown>(null);
+  /** Counted voxels in the marked set, as the panels report it (0 before a run). */
+  const markedTotalRef = useRef(0);
+  /**
+   * Whether the engine holds a loaded scene. `computing` counts: the placement
+   * tool's own build steps put the engine there, and a readiness check that went
+   * false mid-session would disable the session's own controls.
+   */
+  const engineReadyRef = useRef(false);
+  engineReadyRef.current = engine.state.status === 'ready' || engine.state.status === 'computing';
+
+  // --- camera placement (`camera_placement.md` §3.4, §5) ----------------------
+  // Shares the aim optimizer's six capture slots, so the two sessions are
+  // mutually exclusive (§3.4) — each blocks the other's entry points.
+  const constraintsRef = useRef(constraints);
+  constraintsRef.current = constraints;
+  const constraintGroupsRef = useRef(constraintGroups);
+  constraintGroupsRef.current = constraintGroups;
+  const [placementError, setPlacementError] = useState<string | null>(null);
+  const placement = usePlacement({
+    engine,
+    cameras: useCallback(() => camerasRef.current, []),
+    constraintGroups: useCallback(() => constraintGroupsRef.current, []),
+    constraints: useCallback(() => constraintsRef.current, []),
+    grid: useCallback(() => runGridRef.current, []),
+    marked: useCallback(() => markedFilterRef.current, []),
+    samplingPending: useCallback(() => samplingPendingRef.current, []),
+    // The counted set's size, from the app's own display numbers — the same
+    // denominator the stats panel quotes, so the two rates are comparable
+    // (`camera_placement.md` §5.2).
+    markedTotal: useCallback(() => markedTotalRef.current, []),
+    aimSessionOpen: useCallback(() => optimizerBusyRef.current, []),
+    // A build step does not go through the Run gate, so it needs its own readiness
+    // check: the engine holds no scene until `initAndLoad` resolves (§10).
+    engineReady: useCallback(() => engineReadyRef.current, []),
+    // Camera edits are deliberately absent: they cannot change a reachable set,
+    // which is what makes place → aim → measure → re-search cheap (§3.3.1).
+    fingerprint: useCallback(
+      () => ({
+        geometryRevision: geometryRevisionRef.current,
+        voxelSize: runGridRef.current.voxelSize,
+        markedRevision: markedRevisionRef.current,
+      }),
+      [],
+    ),
+    onApply: useCallback(
+      (plan: {
+        moves: { cameraId: string; position: Vec3; constraintId: string; near: number; far: number }[];
+        creates: SceneCamera[];
+        disables: string[];
+      }) => {
+        dispatch({ type: 'applyPlacement', ...plan });
+      },
+      [],
+    ),
+    onReposition: useCallback((cameraId: string, position: Vec3) => {
+      // A plain camera position edit, so the reducer's clamp and its stale rule
+      // both apply exactly as they would to a gizmo drag (§4.6, §6.3).
+      dispatch({ type: 'changeCamera', id: cameraId, patch: { position } });
+    }, []),
+    onError: useCallback((message: string) => setPlacementError(message), []),
+    onNeedsRecompute: useCallback(() => dispatch({ type: 'markStale' }), []),
+  });
+  const placementBusyRef = useRef(placement.busy);
+  placementBusyRef.current = placement.busy;
+
+  /**
+   * The placement **mode** (`camera_placement.md` §5): open on one group, with
+   * the tool's inputs replacing the left column and its review the right.
+   *
+   * The transitions are pure (`placement/mode.ts`) so the close guard and the
+   * "a running build step is not closeable" rule are testable without React; this
+   * holds the state and carries out the one effect the reducer can ask for.
+   */
+  const [placementMode, setPlacementMode] = useState<ModeState>(null);
+  const placementModeRef = useRef<ModeState>(null);
+  placementModeRef.current = placementMode;
+  const placementDiscardRef = useRef(placement.discard);
+  placementDiscardRef.current = placement.discard;
+  const dispatchMode = useCallback(
+    (event: Parameters<typeof stepMode>[1]) => {
+      const step = stepMode(placementModeRef.current, event);
+      if (step.effect === 'closeSession') placementDiscardRef.current();
+      placementModeRef.current = step.state;
+      setPlacementMode(step.state);
+    },
+    [],
+  );
+  const placementNoteFullRunRef = useRef(placement.noteFullRun);
+  placementNoteFullRunRef.current = placement.noteFullRun;
+
+  /**
+   * The polyline vertex sub-selection (`camera_placement.md` §6.1), carrying the
+   * constraint it belongs to.
+   *
+   * Pairing the index with its polyline is what makes "a sub-selection belongs to
+   * one constraint" a property of the data rather than an effect that clears it:
+   * an index held from another polyline is simply not this polyline's, so it
+   * resolves to the default (its last vertex) with nothing to fire in between.
+   * An effect could not do this job — a click that picks a handle on an
+   * unselected polyline sets both in one batch, and a clear-on-selection-change
+   * effect would run afterwards and undo the half the user aimed at.
+   */
+  const [vertexSelection, setVertexSelection] = useState<{ id: string; vertex: number } | null>(null);
+  /**
+   * The armed **Extend** (§6.2): which polyline each click grows, and at which
+   * end. Separate from `drawing` because there is no draft — every click is a
+   * committed edit on an existing constraint.
+   */
+  const [extending, setExtending] = useState<{ id: string; end: PolylineEnd } | null>(null);
+  /** The armed polyline draw mode and its in-progress draft (§6.2). */
+  const [drawing, setDrawing] = useState(false);
+  const [draft, setDraft] = useState<PolylineDraft>(EMPTY_DRAFT);
+  // Read by the double-click end, which fires before an effect could hand it the
+  // newest draft (see `endDrawing`).
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   // Everything the UI derives from a run, as one SDK aggregation descriptor
   // (spec §3.3) plus the index that reads its results back. Zones, volumes,
@@ -396,16 +576,23 @@ export function App() {
   // §3.1). Applied to a *copy*: `aggregate` is memoized on the scene, and the
   // mask changes with the session, not with the scene.
   const maskedAggregate = useMemo(() => {
-    const cameraMask = displayCameraMask(cameras, optimizer.maskSlots);
+    // Either session's slots must be masked out of every display number: they
+    // are the same six bits (`aim_optimization.md` §3.1, `camera_placement.md`
+    // §3.4), and a retained chunk carries them until a full run replaces it.
+    const cameraMask = displayCameraMask(cameras, optimizer.maskSlots || placement.maskSlots);
     if (!cameraMask) return aggregate;
     return { ...aggregate, spec: { ...aggregate.spec, cameras: cameraMask } };
-  }, [aggregate, cameras, optimizer.maskSlots]);
+  }, [aggregate, cameras, optimizer.maskSlots, placement.maskSlots]);
   // `handleRun` reads the descriptor through a ref so it is not re-created on
   // every descriptor edit — it is deliberately non-reentrant, and a new identity
   // per edit would re-arm the auto-run effect that calls it.
   const aggregateRef = useRef(maskedAggregate);
   aggregateRef.current = maskedAggregate;
   markedFilterRef.current = aggregate.index.markedFilter;
+  if (lastMarkedRef.current !== aggregate.index.markedFilter) {
+    lastMarkedRef.current = aggregate.index.markedFilter;
+    markedRevisionRef.current += 1;
+  }
 
   // §3.3 over-cap drops. A warning, never an error (§11): the descriptor is
   // still valid and every other panel still reads, so the run proceeds and the
@@ -426,6 +613,10 @@ export function App() {
   // Master show/hide-all for the sampling-volume gizmos (viewport toolbar, spec
   // §2.4). Purely visual — independent of `useZones` and per-zone enabled state.
   const [zonesVisible, setZonesVisible] = useState(true);
+  // Master show/hide-all for the constraint gizmos and the pool scatter
+  // (`camera_placement.md` §5.2, §6.1). Purely visual: constraints are not
+  // analysis inputs, so hiding them cannot change a number.
+  const [constraintsVisible, setConstraintsVisible] = useState(true);
   // Per-probe visibility queries against the retained run (spec §12.2), keyed by
   // probe id. Recomputed when probes move or a new run's masks arrive.
   const [probeQueries, setProbeQueries] = useState<Map<string, ProbeVisibilityResult>>(new Map());
@@ -460,6 +651,29 @@ export function App() {
   const selectedSectionId = selection?.kind === 'section' ? selection.id : null;
   const selectedZoneId = selection?.kind === 'zone' ? selection.id : null;
   const selectedVolumeId = selection?.kind === 'volume' ? selection.id : null;
+  const selectedConstraintGroupId = selection?.kind === 'constraintGroup' ? selection.id : null;
+  const selectedConstraintId = selection?.kind === 'constraint' ? selection.id : null;
+
+  /**
+   * The selected polyline and the vertex every editor acts on (§6.1).
+   *
+   * A polyline **always has one vertex selected**, so the raw sub-selection is
+   * *resolved* here: unset, another polyline's, or out of range all mean its last
+   * vertex. One clamp then covers a freshly selected polyline, a deleted vertex
+   * (the index falls on whichever vertex took its place, or on the new last), and
+   * a scene load that shortened the polyline under a held index — and the panel,
+   * the Move gizmo, and Place on surface cannot disagree about which vertex they
+   * are on, because there is only this one answer.
+   */
+  const selectedPolyline = useMemo(() => {
+    const c = selectedConstraintId ? constraints.find((x) => x.id === selectedConstraintId) : undefined;
+    return c?.kind === 'polyline' ? c : null;
+  }, [constraints, selectedConstraintId]);
+  const activeVertex = useMemo(() => {
+    if (!selectedPolyline) return null;
+    const held = vertexSelection?.id === selectedPolyline.id ? vertexSelection.vertex : null;
+    return effectiveVertex(selectedPolyline.points.length, held);
+  }, [selectedPolyline, vertexSelection]);
 
   // Left-column hierarchy/detail split (spec §2.2): null = detail at natural
   // height until first dragged; a number pins its height (hierarchy takes the
@@ -515,6 +729,24 @@ export function App() {
   // a re-init when this no longer matches, so a geometry swap (import/reset)
   // isn't masked by voxel size staying the same (spec §14.4).
   const initializedRoomRef = useRef<GeometryBuild | null>(null);
+  // `initializedVoxelSize` as a ref: `ensureLoaded` runs outside render and must
+  // see the value its own last call committed, not the one React has re-rendered
+  // with — otherwise a run firing in the same tick as the scene-load effect reads
+  // `null` and issues a second `init`.
+  const initializedVoxelSizeRef = useRef<number | null>(null);
+  /**
+   * The `initAndLoad` currently in flight, keyed by what it is loading (spec §8).
+   *
+   * The engine is loaded from two places — the scene-load effect below and
+   * `handleRun` — so this is what makes the load single-flight: a second request
+   * for the same `(room, voxelSize)` pair awaits the first instead of starting a
+   * concurrent `init`.
+   */
+  const engineLoadRef = useRef<{ epoch: number; room: GeometryBuild; voxelSize: number; promise: Promise<boolean> } | null>(
+    null,
+  );
+  /** The worker instance the two refs above describe (`useEngine`'s epoch, spec §8). */
+  const initializedEpochRef = useRef(0);
   // The run-generation guard now lives on `coverageRun`: `applyScene` bumps it via
   // `coverageRun.clear()` and `handleRun` snapshots `coverageRun.generation`,
   // discarding a run whose token is no longer current — the in-scope stand-in for
@@ -559,6 +791,12 @@ export function App() {
     [zones, volumes, masksVersion, coverageRun],
   );
   const enabledUnionSummary = zoneCoverage?.enabledUnion ?? null;
+  // The placement panel's denominator (`camera_placement.md` §5.2): the enabled
+  // zones' union when zones are in use, else the whole run's valid volume — the
+  // same figure the stats panel divides by, so the two rates are comparable.
+  markedTotalRef.current = samplingActive
+    ? enabledUnionSummary?.validVoxels ?? 0
+    : summary?.validVoxels ?? 0;
 
   // Apply a resolved transform edit emitted by SceneView after a drag (spec
   // §12.4, §13.8). Mirrors the old per-kind `onObjectChange` setters; whether an
@@ -576,24 +814,31 @@ export function App() {
   // leaves it armed.
   const applyPlacement = useCallback(
     (point: Vec3) => {
-      if (!canPlace(selection)) return;
-      switch (selection.kind) {
+      const target = placeTarget(selection, activeVertex);
+      if (!target) return;
+      switch (target.kind) {
         case 'camera':
-          dispatch({ type: 'changeCamera', id: selection.id, patch: { position: point } });
+          dispatch({ type: 'changeCamera', id: target.id, patch: { position: point } });
           break;
         case 'probe':
-          dispatch({ type: 'changeProbe', id: selection.id, position: point });
+          dispatch({ type: 'changeProbe', id: target.id, position: point });
+          break;
+        // A polyline vertex, the one target that is a sub-selection rather than
+        // an entity (`camera_placement.md` §6.2). The same action a handle drag
+        // and a numeric commit use, so the §6.3 clamp applies identically.
+        case 'vertex':
+          dispatch({ type: 'moveConstraintVertex', id: target.id, vertex: target.vertex, position: point });
           break;
         default: {
-          // Exhaustive over PLACEABLE_KINDS: widening that list fails to compile
-          // here until the new kind is given its own action (spec §2.4.2).
-          const unhandled: never = selection.kind;
-          throw new Error(`unhandled placeable kind: ${String(unhandled)}`);
+          // Exhaustive over PlaceTarget: widening that union fails to compile
+          // here until the new target is given its own action (spec §2.4.2).
+          const unhandled: never = target;
+          throw new Error(`unhandled place target: ${JSON.stringify(unhandled)}`);
         }
       }
       setPlacing(false);
     },
-    [selection],
+    [selection, activeVertex],
   );
 
   // --- SceneView: the imperative Three.js bridge, created once (spec §2.3).
@@ -612,7 +857,18 @@ export function App() {
         view.dispose();
         return;
       }
-      view.onSelect((next) => dispatch({ type: 'selectionChanged', selection: next }));
+      // Picking is inert in the placement mode (§5): the inspector that would
+      // show the picked entity is hidden, so a selection change there is a
+      // silent state edit the user cannot see.
+      view.onSelect((next, vertex) => {
+        if (placementModeRef.current) return;
+        dispatch({ type: 'selectionChanged', selection: next });
+        // One click decides both (`camera_placement.md` §6.1): a handle hit names
+        // the vertex, a body hit names none and falls back to the last.
+        setVertexSelection(
+          vertex === null || next?.kind !== 'constraint' ? null : { id: next.id, vertex },
+        );
+      });
       view.onTransform(applyTransformChange);
       viewRef.current = view;
       setRenderBackend(view.renderBackend);
@@ -713,14 +969,140 @@ export function App() {
     });
   }, [cameras, optimizer.overrides, optimizer.mountId, hoveredAim]);
 
+  /**
+   * The §5.3 plan the Apply button carries and the viewport previews.
+   *
+   * Derived here rather than inside the session hook because it is a function of
+   * the **live** camera list: the hook reads cameras through a ref, so a plan
+   * built there would label the button from a stale scene.
+   */
+  /** The group the mode is open on, or null (`camera_placement.md` §5). */
+  const placementGroup = useMemo(
+    () => (placementMode ? constraintGroups.find((g) => g.id === placementMode.groupId) ?? null : null),
+    [constraintGroups, placementMode],
+  );
+  const placementOpen = placementMode !== null && placementGroup !== null;
+
+  /**
+   * Open the mode on a group (§5.1).
+   *
+   * Every viewport tool is disarmed on the way in — Place, Draw, and Extend:
+   * their toolbar and panel are hidden in the mode, and an armed tool the user
+   * cannot see would still consume the first click in the viewport (spec §2.4.2,
+   * `camera_placement.md` §6.2).
+   */
+  const handlePlaceCameras = useCallback(
+    (groupId: string) => {
+      setPlacing(false);
+      setDrawing(false);
+      setExtending(null);
+      setDraft(EMPTY_DRAFT);
+      setPlacementError(null);
+      setPlacementNotice(null);
+      placement.setTargetGroup(groupId);
+      dispatchMode({ type: 'open', groupId });
+    },
+    [dispatchMode, placement.setTargetGroup],
+  );
+
+  // A group deleted or replaced under an open mode (a scene load) leaves nothing
+  // to place on, so the mode closes and the session with it.
+  useEffect(() => {
+    if (placementMode !== null && placementGroup === null) dispatchMode({ type: 'groupGone' });
+  }, [dispatchMode, placementGroup, placementMode]);
+
+  const placementPlan = useMemo(() => {
+    const group = constraintGroups.find((g) => g.id === placement.targetGroupId);
+    if (!group || placement.previewPositions.length === 0) return EMPTY_PLAN;
+    const groupConstraintIds = new Set(
+      constraints.filter((c) => c.groupId === group.id).map((c) => c.id),
+    );
+    return planApply(
+      boundCameras(cameras, groupConstraintIds).map((c) => ({ id: c.id, position: c.position })),
+      placement.previewPositions.map((p) => ({ position: p.position, constraintId: p.constraintId })),
+    );
+  }, [cameras, constraintGroups, constraints, placement.previewPositions, placement.targetGroupId]);
+
+  /** Where each moved camera stands today → where the plan sends it (§5.2). */
+  const placementMoveLines = useMemo(() => {
+    const byId = new Map(cameras.map((c) => [c.id, c.position]));
+    return placementPlan.moves
+      .map((m) => ({ from: byId.get(m.cameraId), to: m.position }))
+      .filter((l): l is { from: Vec3; to: Vec3 } => l.from !== undefined);
+  }, [cameras, placementPlan]);
+
+  /**
+   * The cameras a placement preview adds to the viewport (`camera_placement.md`
+   * §5.2): the previewed layout drawn at the group's template, with the app's
+   * default rotation — because placement does not aim (§1.3).
+   *
+   * Not written to the scene until Apply, which is what makes Discard exact.
+   */
+  const placementPreviewCameras = useMemo<SceneCamera[]>(() => {
+    const group = constraintGroups.find((g) => g.id === placement.targetGroupId);
+    if (!group || placementPlan.creates.length === 0) return [];
+    // Only the **created** cameras are new bodies. A moved camera is one the
+    // scene already draws, so it is previewed by moving it (below) rather than
+    // by a ghost beside it — at one mount point two bodies read as two cameras.
+    return placementPlan.creates.map((c) => ({
+      id: `placement-preview-${c.ordinal}`,
+      name: group.namePrefix.trim().length > 0 ? `${group.namePrefix.trim()} ${c.ordinal}` : `Proposed ${c.ordinal}`,
+      enabled: true,
+      position: c.position,
+      rotation: [0, 0, 0, 1] as Quat,
+      fov: group.fov,
+      aspect: DEFAULT_TEMPLATE.aspect,
+      near: DEFAULT_TEMPLATE.near,
+      far: group.far,
+    }));
+  }, [constraintGroups, placementPlan, placement.targetGroupId]);
+
+  const poolPositions = useMemo(
+    () => placement.pool?.positions.map((p) => ({ position: p.position, count: p.count })) ?? [],
+    [placement.pool],
+  );
+  const chosenPoolIndices = useMemo(
+    () => new Set(placement.previewPositions.map((p) => p.index)),
+    [placement.previewPositions],
+  );
+  /**
+   * The overlay the armed tool draws (§6.2): a draft polyline while
+   * drawing, and while extending the rubber band alone — from the end being
+   * grown to the cursor, since the polyline itself is already drawn as a
+   * constraint.
+   */
+  const draftPoints = useMemo(() => {
+    if (extending && selectedPolyline) {
+      const points = selectedPolyline.points;
+      const anchor = extending.end === 'start' ? points[0] : points[points.length - 1];
+      return anchor && draft.cursor ? [anchor, draft.cursor] : [];
+    }
+    return drawing ? draftPolyline(draft) : [];
+  }, [drawing, draft, extending, selectedPolyline]);
+  /**
+   * The vertices the draft draws as dots (§6.2): the ones actually clicked, so
+   * the first click is visible before there is a second to draw a line to.
+   * Empty while extending — those vertices are committed the moment they are
+   * clicked, so the constraint's own handles already draw them.
+   */
+  const draftVertices = useMemo(
+    () => (drawing && !extending ? draft.points : EMPTY_VERTICES),
+    [drawing, extending, draft],
+  );
+
   const sceneViewState = useMemo<SceneViewState>(
     () => ({
       room,
-      cameras: previewCameras,
+      // The proposed layout rides along as extra camera gizmos, so the user can
+      // judge it in the viewport before Apply (`camera_placement.md` §5.2).
+      cameras: placementPreviewCameras.length > 0 ? [...previewCameras, ...placementPreviewCameras] : previewCameras,
       probes,
       sections,
       volumes,
-      selection,
+      // Nothing in the scene is selectable in the placement mode (§5), so the
+      // transform gizmo detaches with it — and the selection the mode was
+      // entered from comes straight back on exit, unwritten.
+      selection: placementOpen ? null : selection,
       flaggedCameras: engine.state.flaggedCameras,
       sectionCellGrids,
       enabledZoneIds,
@@ -736,12 +1118,26 @@ export function App() {
       clipBand,
       sightlines,
       placing,
+      constraints,
+      selectedVertex: activeVertex,
+      constraintsVisible,
+      poolPositions,
+      chosenPoolIndices,
+      // Extend is the same armed tool as far as the viewport is concerned: the
+      // crosshair, the detached gizmo, and the draw-click routing (§6.2).
+      drawing: drawing || extending !== null,
+      draftPolyline: draftPoints,
+      draftVertices,
+      placementMoves: placementMoveLines,
     }),
     [
-      room, previewCameras, probes, sections, volumes, selection, engine.state.flaggedCameras,
+      room, previewCameras, placementPreviewCameras, probes, sections, volumes, selection, placementOpen,
+      engine.state.flaggedCameras,
       sectionCellGrids, enabledZoneIds, overlayOptions, transformMode,
       transformSpace, activeView, gizmosVisible, zonesVisible, sectionsVisible, stale,
       voxelSize, clipBand, sightlines, placing,
+      constraints, activeVertex, constraintsVisible, poolPositions, chosenPoolIndices,
+      drawing, extending, draftPoints, draftVertices, placementMoveLines,
     ],
   );
 
@@ -754,6 +1150,173 @@ export function App() {
   useEffect(() => {
     viewRef.current?.onPlace(applyPlacement);
   }, [applyPlacement, viewportReady]);
+
+  // --- polyline vertex edits (`camera_placement.md` §6.2) -------------------
+  const handleMoveVertex = useCallback((id: string, vertex: number, position: Vec3) => {
+    dispatch({ type: 'moveConstraintVertex', id, vertex, position });
+  }, []);
+
+  /**
+   * Insert a vertex and select it — the panel's "+", and every Extend click.
+   *
+   * `at` is the new vertex's own index, so selecting it is the whole rule: the
+   * panel lands on the vertex the user just made, and a run of Extend clicks
+   * keeps growing the same end (§6.2).
+   */
+  const handleInsertVertex = useCallback((id: string, at: number, position: Vec3) => {
+    dispatch({ type: 'insertConstraintVertex', id, at, position });
+    setVertexSelection({ id, vertex: at });
+  }, []);
+
+  /**
+   * Delete the selected vertex. The sub-selection is left alone deliberately: the
+   * held index now names whichever vertex took its place, and the §6.1 clamp
+   * turns a deleted *last* vertex into the new last — which is exactly the rule,
+   * with no follow-up write to get wrong.
+   */
+  const handleDeleteVertex = useCallback((id: string, vertex: number) => {
+    dispatch({ type: 'deleteConstraintVertex', id, vertex });
+  }, []);
+
+  /**
+   * Arm Extend on the selected polyline, growing the end its vertex names (§6.2).
+   * Re-clicking the button disarms it, as every armed tool's does (spec §2.4.2).
+   */
+  const handleExtendPolyline = useCallback((id: string, vertex: number) => {
+    setExtending((armed) => (armed?.id === id ? null : { id, end: extendEnd(vertex) }));
+    setDraft(EMPTY_DRAFT);
+  }, []);
+
+  // --- polyline draw mode (`camera_placement.md` §6.2) ----------------------
+  // A click appends a vertex; a hover moves the rubber band. Both register once:
+  // the draft is updated functionally, and the Extend branch reads its state
+  // through refs rather than closing over it.
+  const extendingRef = useRef(extending);
+  extendingRef.current = extending;
+  const vertexSelectionRef = useRef(vertexSelection);
+  vertexSelectionRef.current = vertexSelection;
+  useEffect(() => {
+    viewRef.current?.onDraw((point) => {
+      const extend = extendingRef.current;
+      if (!extend) {
+        setDraft((d) => appendVertex(d, point));
+        return;
+      }
+      // Extending a committed polyline: each click is an insert at the end being
+      // grown, and the new vertex becomes selected so the next click continues
+      // from it (§6.2). `at` is read from the constraint as of the last render —
+      // the reducer clamps it into range, so the worst a stale count could do is
+      // land the vertex at the end it was already headed for.
+      const c = constraintsRef.current.find((x) => x.id === extend.id);
+      if (c?.kind !== 'polyline') return;
+      handleInsertVertex(extend.id, extendInsertAt(extend.end, c.points.length), point);
+    });
+    viewRef.current?.onDrawHover((point) => setDraft((d) => moveCursor(d, point)));
+  }, [handleInsertVertex, viewportReady]);
+
+  /**
+   * End the armed tool (§6.2), by **Enter** or by a **double-click** — which is
+   * the whole difference between them: a double-click's own first click landed a
+   * vertex, and ending the line is the gesture, so that vertex is taken back out.
+   * Enter has no click to take back and commits what is drawn.
+   *
+   * One vertex commits as a **point** constraint — that is what the user drew,
+   * and it beats refusing the commit or creating a degenerate polyline.
+   *
+   * Everything is read through **refs** so this callback is stable: a
+   * double-click's end lands in the same event streak as the click that appended
+   * the last vertex, sooner than a re-registered viewport handler could close
+   * over it, and acting on a draft one vertex behind is exactly the bug that
+   * would cause.
+   */
+  const endDrawing = useCallback((source: 'key' | 'doubleClick') => {
+    const extend = extendingRef.current;
+    if (extend) {
+      // Extend edits a committed entity, so there is nothing to commit or cancel
+      // — but a double-click's first click already *inserted* a vertex, and the
+      // same rule says the pair contributes none. Every Extend click selects the
+      // vertex it inserted, so the one to take back out is the selected one; the
+      // 2-vertex floor cannot bite, since that click had just raised the count.
+      const held = vertexSelectionRef.current;
+      if (source === 'doubleClick' && held?.id === extend.id) {
+        dispatch({ type: 'deleteConstraintVertex', id: extend.id, vertex: held.vertex });
+      }
+      setExtending(null);
+      setDraft(EMPTY_DRAFT);
+      return;
+    }
+    const draw = draftRef.current;
+    const committed = commitDraft(source === 'doubleClick' ? draftAfterDoubleClick(draw) : draw);
+    setDrawing(false);
+    setDraft(EMPTY_DRAFT);
+    if (!committed) return;
+    dispatch({
+      type: 'addConstraint',
+      kind: committed.kind,
+      position: committed.points[0],
+      points: committed.points,
+    });
+  }, []);
+
+  // The pointer half of the end: a viewport double-click (§6.2). Stable, like the
+  // two handlers above.
+  useEffect(() => {
+    viewRef.current?.onDrawCommit(() => endDrawing('doubleClick'));
+  }, [endDrawing, viewportReady]);
+
+  // Enter commits, Escape cancels, Backspace drops the last vertex (§6.2).
+  // Mounted only while armed, and it ignores keys aimed at a form field, where
+  // Escape is already the numeric fields' revert key (spec §5.2.1).
+  useEffect(() => {
+    if (!drawing && !extending) return;
+    const onKeyDown = (ev: KeyboardEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest('input, select, textarea, [contenteditable="true"]')) return;
+      if (ev.key === 'Escape') {
+        setDrawing(false);
+        setExtending(null);
+        setDraft(EMPTY_DRAFT);
+      } else if (ev.key === 'Enter') {
+        endDrawing('key');
+      } else if (ev.key === 'Backspace' && drawing) {
+        // Not bound while extending (§6.2): every click there is already
+        // committed, and the vertex the user regrets is the selected one, which
+        // the panel's "−" removes.
+        ev.preventDefault();
+        setDraft((d) => removeLastVertex(d));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [drawing, extending, endDrawing]);
+
+  // Arming one viewport tool disarms the other: both consume clicks, and two
+  // armed tools would race for the same click (spec §2.4.2, §6.2).
+  useEffect(() => {
+    if (drawing) {
+      setPlacing(false);
+      setExtending(null);
+    }
+  }, [drawing]);
+  useEffect(() => {
+    if (placing) {
+      setDrawing(false);
+      setExtending(null);
+    }
+  }, [placing]);
+  useEffect(() => {
+    if (extending) {
+      setPlacing(false);
+      setDrawing(false);
+    }
+  }, [extending]);
+
+  // Extend is armed on one polyline, so it disarms as soon as the selection
+  // leaves it — a deletion included (§2.4.2's rule, for the same reason: an
+  // armed click must never edit what the user has moved on from).
+  useEffect(() => {
+    if (extending && extending.id !== selectedPolyline?.id) setExtending(null);
+  }, [extending, selectedPolyline]);
 
   // Disarm "Place on surface" whenever the selection changes or is cleared (spec
   // §2.4.2) — including a deleted entity — so an armed click can never move an
@@ -781,9 +1344,12 @@ export function App() {
   // a camera (compute participation), a section (heatmap on/off), or a zone
   // (contributes to the marked set). Toggling a section or zone is a client-side
   // re-filter only — neither marks the coverage result stale.
-  const handleToggleEnabled = useCallback((kind: 'camera' | 'section' | 'zone', id: string) => {
-    dispatch({ type: 'toggleEnabled', kind, id });
-  }, []);
+  const handleToggleEnabled = useCallback(
+    (kind: 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint', id: string) => {
+      dispatch({ type: 'toggleEnabled', kind, id });
+    },
+    [],
+  );
 
   const handleCameraChange = useCallback((id: string, patch: Partial<CameraConfig>) => {
     dispatch({ type: 'changeCamera', id, patch });
@@ -937,6 +1503,67 @@ export function App() {
     dispatch({ type: 'duplicateEntity', kind: 'zone', id });
   }, []);
 
+  // --- camera constraints (`camera_placement.md` §6, §7). No constraint edit
+  // marks the coverage result stale: a constraint generates cameras and nothing
+  // else (§1.1). The one exception is reshaping a constraint a camera is *bound*
+  // to, which re-clamps that camera — a camera move, handled in the reducer. ----
+  const handleAddConstraintGroup = useCallback(() => {
+    dispatch({ type: 'addConstraintGroup' });
+  }, []);
+
+  /**
+   * "+ → Point / Polyline / Plane" (§7). A polyline **arms the draw mode**
+   * instead of spawning geometry: a polyline with no vertices is not a thing the
+   * user wants, and clicking the surface is how one is stated (§6.2).
+   */
+  const handleAddConstraint = useCallback(
+    (kind: ConstraintKind) => {
+      if (kind === 'polyline') {
+        setDraft(EMPTY_DRAFT);
+        setDrawing(true);
+        return;
+      }
+      dispatch({ type: 'addConstraint', kind, position: workspaceCenter });
+    },
+    [workspaceCenter],
+  );
+
+  const handleConstraintGroupChange = useCallback((id: string, patch: Partial<ConstraintGroup>) => {
+    dispatch({ type: 'changeConstraintGroup', id, patch });
+  }, []);
+
+  const handleConstraintChange = useCallback((id: string, patch: Partial<CameraConstraint>) => {
+    dispatch({ type: 'changeConstraint', id, patch });
+  }, []);
+
+  const handleRenameConstraintGroup = useCallback((id: string, name: string) => {
+    dispatch({ type: 'renameEntity', kind: 'constraintGroup', id, name });
+  }, []);
+
+  const handleRenameConstraint = useCallback((id: string, name: string) => {
+    dispatch({ type: 'renameEntity', kind: 'constraint', id, name });
+  }, []);
+
+  const handleDeleteConstraintGroup = useCallback((id: string) => {
+    dispatch({ type: 'deleteEntity', kind: 'constraintGroup', id });
+  }, []);
+
+  const handleDeleteConstraint = useCallback((id: string) => {
+    dispatch({ type: 'deleteEntity', kind: 'constraint', id });
+  }, []);
+
+  const handleDuplicateConstraintGroup = useCallback((id: string) => {
+    dispatch({ type: 'duplicateEntity', kind: 'constraintGroup', id });
+  }, []);
+
+  const handleDuplicateConstraint = useCallback((id: string) => {
+    dispatch({ type: 'duplicateEntity', kind: 'constraint', id });
+  }, []);
+
+  const handleBindCamera = useCallback((id: string, constraintId: string | null) => {
+    dispatch({ type: 'bindCamera', id, constraintId });
+  }, []);
+
   // Hierarchy drag-reorder (spec §5.5.1). Array order is the display order and
   // round-trips in the scene file, so this is a pure splice: no recompute, no
   // stale/sampling-dirty, and the selection is deliberately left alone.
@@ -959,6 +1586,8 @@ export function App() {
       zones: Zone[];
       volumes: SamplingVolume[];
       useZones: boolean;
+      constraintGroups: ConstraintGroup[];
+      constraints: CameraConstraint[];
     }) => {
       // Geometry build + retained-chunk consumers are App-owned side effects; the
       // scene document is reset in one `sceneReplaced` dispatch (the reducer
@@ -981,11 +1610,18 @@ export function App() {
           zones: next.zones,
           volumes: next.volumes,
           useZones: next.useZones,
+          constraintGroups: next.constraintGroups,
+          constraints: next.constraints,
         },
       });
       setSummary(null);
       setInitializedVoxelSize(null);
       initializedRoomRef.current = null;
+      initializedVoxelSizeRef.current = null;
+      // A load for the outgoing room is now superseded; clearing this both frees
+      // the next `ensureLoaded` to start a fresh one and stops the old flight
+      // from committing bookkeeping for geometry that is gone (spec §14.4).
+      engineLoadRef.current = null;
       viewRef.current?.clearCoverage(); // the overlay lives in SceneView
       void cancelInFlight(); // spec §14.4 step 4, now an actual cancel (SDK §13.2)
       coverageRun.clear(); // wipes the three stores + invalidates in-flight runs
@@ -1041,6 +1677,8 @@ export function App() {
         zones: imported.zones,
         volumes: imported.volumes,
         useZones: imported.useZones,
+        constraintGroups: imported.constraintGroups,
+        constraints: imported.constraints,
       });
       // The scene now lives in this folder, so Save writes back here (§14.5).
       setSaveTarget((target) => nextSaveTarget(target, { kind: 'imported', folder: dir }));
@@ -1118,7 +1756,18 @@ export function App() {
 
       setSceneIOBusy(true);
       try {
-        const current: Scene = { geometry: geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones };
+        const current: Scene = {
+          geometry: geometryObjects,
+          cameras,
+          probes,
+          sections,
+          clipSectionId,
+          zones,
+          volumes,
+          useZones,
+          constraintGroups,
+          constraints,
+        };
         // Assets first: a destination left without a scene.json is visibly
         // incomplete, whereas one with a scene.json missing its assets is a
         // trap that only fails on the next import (§14.5).
@@ -1143,29 +1792,106 @@ export function App() {
   const handleSave = useCallback(() => void handleSaveScene('save'), [handleSaveScene]);
   const handleSaveAs = useCallback(() => void handleSaveScene('saveAs'), [handleSaveScene]);
 
+  /**
+   * Load the engine for `(room, voxelSize)` unless it already holds exactly that,
+   * and report whether it does when this resolves (spec §8).
+   *
+   * **The engine is loaded on scene load, not on the first run.** Both the effect
+   * below and `handleRun` come through here, because engine readiness gates the one
+   * feature that does not pass the Run gate: a pool build drives `compute()`
+   * itself (`camera_placement.md` §4.2, §10). While `initAndLoad` lived only inside
+   * `handleRun`, that readiness check could not be satisfied before the first run —
+   * the placement tool sat disabled from startup asking the user to wait for a load
+   * that would not begin until they pressed Run coverage.
+   *
+   * Idempotent and single-flight: the `(room, voxelSize)` key both short-circuits a
+   * request the engine already satisfies and joins a request already in flight, so
+   * a run firing in the same tick as a scene load cannot issue a second `init`.
+   *
+   * A `voxelSize` change is deliberately *not* eager (spec §8, §6): re-voxelizing
+   * the workspace is the session's most expensive operation, and the slider gates
+   * nothing — the engine already holds a scene — so it is left to the next run.
+   */
+  const ensureLoaded = useCallback(
+    (target: GeometryBuild, voxelSize: number, cameraCount: number): Promise<boolean> => {
+      // The epoch keys every record to the worker instance it describes: a replaced
+      // worker (StrictMode's dev remount) leaves behind both a "loaded" fact that no
+      // longer holds and an `init` that can never settle.
+      const epoch = engine.epoch();
+      const action = engineLoadAction(
+        { epoch: initializedEpochRef.current, room: initializedRoomRef.current, voxelSize: initializedVoxelSizeRef.current },
+        engineLoadRef.current,
+        { epoch, room: target, voxelSize },
+      );
+      if (action === 'satisfied') return Promise.resolve(true);
+      if (action === 'join') return engineLoadRef.current!.promise;
+
+      const gen = coverageRun.generation;
+      const promise = (async () => {
+        const initResult = await engine.initAndLoad(target.sceneMesh, target.worldMin, target.worldMax, voxelSize,
+          chunkSizeFor(target.worldMin, target.worldMax, voxelSize, cameraCount));
+        // An import landed, or the worker was replaced, while we loaded: what this
+        // describes is gone either way, so commit nothing and let the swap's own
+        // load take over (§14.4).
+        if (!coverageRun.isCurrent(gen) || engine.epoch() !== epoch) return false;
+        if (!initResult) {
+          setInitializedVoxelSize(null);
+          initializedVoxelSizeRef.current = null;
+          initializedRoomRef.current = null;
+          return false;
+        }
+        initializedRoomRef.current = target;
+        initializedVoxelSizeRef.current = voxelSize;
+        initializedEpochRef.current = epoch;
+        setInitializedVoxelSize(voxelSize);
+        return true;
+      })();
+      engineLoadRef.current = { epoch, room: target, voxelSize, promise };
+      void promise.finally(() => {
+        if (engineLoadRef.current?.promise === promise) engineLoadRef.current = null;
+      });
+      return promise;
+    },
+    [engine, coverageRun],
+  );
+
+  // --- load the engine as soon as the app has geometry (spec §8): at mount and
+  // after every import/reset. Keyed on `room` alone — a resolution change is left
+  // to the next run (§6) — so the debounced voxel size and camera count are read
+  // through refs rather than depended on. Loading is not computing: coverage still
+  // waits for an explicit Run or an auto-run tick (§14.4 step 4).
+  // A replaced worker holds no scene, so the load has to happen again — and it does
+  // without an extra dependency here: the only thing that replaces the worker is a
+  // remount, which re-runs this effect too (`useEngine`'s effect, registered first,
+  // has already bumped the epoch by then). What the epoch fixes is the *key*: the
+  // remount must not join the terminated worker's unsettled `init`.
+  useEffect(() => {
+    void ensureLoaded(room, debouncedVoxelSizeRef.current, camerasRef.current.length);
+  }, [room, ensureLoaded]);
+
   const handleRun = useCallback(async () => {
     // A re-aggregation is about to replace the whole store under a new descriptor
     // (spec §3.3). Starting a run now would stream accumulators laid out by the
     // old one into results the adopt is about to discard — and, for an
     // incremental run, merge two layouts. Auto-run retries within 100 ms.
     if (reaggregatingRef.current) return;
+    // Whether *this run* has to re-apply the sampled region set: a fresh load
+    // leaves the engine on the full volume, so the run that follows one restates
+    // its zones (`sampling_volumes.md` §8). Read before `ensureLoaded`, since a
+    // successful load updates exactly these two.
     const needsReinit =
-      initializedVoxelSize === null || initializedVoxelSize !== debouncedVoxelSize || initializedRoomRef.current !== room;
+      initializedVoxelSizeRef.current === null ||
+      initializedVoxelSizeRef.current !== debouncedVoxelSize ||
+      initializedRoomRef.current !== room;
 
     // Snapshot the scene "generation": if `applyScene` (import/reset) bumps
     // this while we're mid-run, every check below discards this run's results
     // instead of applying them (spec §14.4; see `coverageRun`'s guard).
     const gen = coverageRun.generation;
     if (needsReinit) {
-      const initResult = await engine.initAndLoad(room.sceneMesh, room.worldMin, room.worldMax, debouncedVoxelSize,
-        chunkSizeFor(room.worldMin, room.worldMax, debouncedVoxelSize, cameras.length));
+      const loaded = await ensureLoaded(room, debouncedVoxelSize, cameras.length);
       if (!coverageRun.isCurrent(gen)) return;
-      if (!initResult) {
-        setInitializedVoxelSize(null);
-        return;
-      }
-      setInitializedVoxelSize(debouncedVoxelSize);
-      initializedRoomRef.current = room;
+      if (!loaded) return;
     }
 
     // Re-apply the sampled region set when it changed or a re-init reset it to
@@ -1216,6 +1942,7 @@ export function App() {
         if (!incremental) {
           coverageRun.reset(grid, runCameras, descriptor);
           noteFullRunRef.current();
+          placementNoteFullRunRef.current();
         }
         viewRef.current?.beginCoverageRun(grid.voxelSize, { incremental });
       },
@@ -1251,7 +1978,7 @@ export function App() {
         setComparison(compareCoverage(before, after, zones, unionLabel(stateRef.current)));
       }
     }
-  }, [engine, room, initializedVoxelSize, debouncedVoxelSize, coverageRun, runGrid]);
+  }, [engine, room, ensureLoaded, debouncedVoxelSize, coverageRun, runGrid]);
 
   // --- re-aggregation on a descriptor edit (spec §3.3) -----------------------
   // Moving a zone or volume, dragging a section, toggling a zone, or moving a
@@ -1339,13 +2066,15 @@ export function App() {
   useEffect(() => {
     if (!autoRun) return;
     const id = setInterval(() => {
-      // Auto-run is suspended while a session is open (spec §8.1): the optimizer
-      // owns the engine's camera list for the duration, and interleaving would
-      // run two computes over two different lists.
+      // Auto-run is suspended while an optimize *or* placement session is open
+      // (spec §8.1, `camera_placement.md` §3.4): that session owns the engine's
+      // camera list for the duration, and interleaving would run two computes
+      // over two different lists.
       if (
         staleRef.current &&
         !busyRef.current &&
         !optimizerBusyRef.current &&
+        !placementBusyRef.current &&
         engineStatusRef.current !== 'error'
       ) {
         handleRunRef.current();
@@ -1360,6 +2089,12 @@ export function App() {
   const selectedZone = zones.find((z) => z.id === selectedZoneId) ?? null;
   const selectedVolume = volumes.find((v) => v.id === selectedVolumeId) ?? null;
   const selectedZoneMemberCount = selectedZoneId ? volumes.filter((v) => v.zoneId === selectedZoneId).length : 0;
+  const selectedConstraintGroup = constraintGroups.find((g) => g.id === selectedConstraintGroupId) ?? null;
+  const selectedConstraint = constraints.find((c) => c.id === selectedConstraintId) ?? null;
+
+  const selectedGroupMemberCount = selectedConstraintGroupId
+    ? constraints.filter((c) => c.groupId === selectedConstraintGroupId).length
+    : 0;
 
   // Camera id → display name (spec §5.6), so every per-camera stat list (§10, §13.7,
   // `sampling_volumes.md` §6.2) and the probe visibility list read the camera's name
@@ -1403,172 +2138,236 @@ export function App() {
   }, [probes, probeQueries]);
 
   return (
+    // The placement mode keeps this shell and replaces what the two side
+    // columns hold (§5) — the widths, the borders and the viewport are the
+    // app's, because the mode's claim is exclusion, not screen space.
     <div className="app">
-      <div className="left-panel" ref={leftPanelRef}>
-        <SceneFileControls
-          fileSystemAccessAvailable={fileSystemAccessAvailable}
-          busy={sceneIOBusy}
-          error={sceneError}
-          status={describeSceneFileStatus(saveTarget, lastSave)}
-          onImport={handleImportScene}
-          onSave={handleSave}
-          onSaveAs={handleSaveAs}
-        />
-        <div className="panel hierarchy-panel">
-          <SceneHierarchy
-            cameras={cameras}
-            probes={probes}
-            sections={sections}
-            zones={zones}
-            volumes={volumes}
-            selection={selection}
-            flaggedIds={engine.state.flaggedCameras}
-            perCamera={hierarchyRates}
-            probeSeenCounts={probeSeenCounts}
-            sectionCellGrids={sectionCellGrids}
-            zoneSummaries={zoneCoverage?.perZone ?? null}
-            collapsedIds={collapsedIds}
-            onSelect={(next) => dispatch({ type: 'selectionChanged', selection: next })}
-            onToggleEnabled={handleToggleEnabled}
-            onToggleCollapse={handleToggleCollapse}
-            onAddCamera={handleAddCamera}
-            onAddProbe={handleAddProbe}
-            onAddSection={handleAddSection}
-            onAddZone={handleAddZone}
-            onAddVolume={handleAddVolume}
-            onDeleteCamera={handleDeleteCamera}
-            onDeleteProbe={handleDeleteProbe}
-            onDeleteSection={handleDeleteSection}
-            onDeleteZone={handleDeleteZone}
-            onDeleteVolume={handleDeleteVolume}
-            onDuplicateCamera={handleDuplicateCamera}
-            onDuplicateProbe={handleDuplicateProbe}
-            onDuplicateSection={handleDuplicateSection}
-            onDuplicateZone={handleDuplicateZone}
-            onDuplicateVolume={handleDuplicateVolume}
-            onReorder={handleReorder}
+      {placementOpen && placementGroup && (
+        <div className="left-panel placement-inputs">
+          <CandidatePositionsPanel
+            session={placement}
+            group={placementGroup}
+            constraints={constraints}
+            error={placementError}
+            onChangeGroup={handleConstraintGroupChange}
           />
+          <StrategyPanel session={placement} group={placementGroup} onChangeGroup={handleConstraintGroupChange} />
+          {/* The template last (§5.1): three fields set once per group, under the
+              two cards whose buttons a session actually presses. */}
+          <NewCameraDefaultsPanel group={placementGroup} onChangeGroup={handleConstraintGroupChange} />
         </div>
-        <div
-          className="panel-divider"
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize hierarchy and detail panels"
-          onPointerDown={onDividerPointerDown}
-          onPointerMove={onDividerPointerMove}
-          onPointerUp={onDividerPointerUp}
-        />
-        <div
-          className="detail-panel"
-          ref={detailPanelRef}
-          style={detailHeight != null ? { height: detailHeight, flex: '0 0 auto' } : undefined}
-        >
-          {selectedVolume ? (
-            <VolumePanel volume={selectedVolume} zones={zones} voxelSize={voxelSize} onChange={handleVolumeChange} />
-          ) : selectedZone ? (
-            <ZonePanel
-              zone={selectedZone}
-              memberCount={selectedZoneMemberCount}
-              summary={zoneCoverage?.perZone.get(selectedZone.id) ?? null}
-              hasRunOnce={hasRunOnce}
-              stale={stale}
-              onRename={handleRenameZone}
-              cameraNameById={cameraNameById}
+      )}
+      {!placementOpen && (
+        <div className="left-panel" ref={leftPanelRef}>
+          <SceneFileControls
+            fileSystemAccessAvailable={fileSystemAccessAvailable}
+            busy={sceneIOBusy}
+            error={sceneError}
+            status={describeSceneFileStatus(saveTarget, lastSave)}
+            onImport={handleImportScene}
+            onSave={handleSave}
+            onSaveAs={handleSaveAs}
+          />
+          <div className="panel hierarchy-panel">
+            <SceneHierarchy
+              cameras={cameras}
+              probes={probes}
+              sections={sections}
+              zones={zones}
+              volumes={volumes}
+              constraintGroups={constraintGroups}
+              constraints={constraints}
+              selection={selection}
+              flaggedIds={engine.state.flaggedCameras}
+              perCamera={hierarchyRates}
+              probeSeenCounts={probeSeenCounts}
+              sectionCellGrids={sectionCellGrids}
+              zoneSummaries={zoneCoverage?.perZone ?? null}
+              collapsedIds={collapsedIds}
+              onSelect={(next) => dispatch({ type: 'selectionChanged', selection: next })}
+              onToggleEnabled={handleToggleEnabled}
+              onToggleCollapse={handleToggleCollapse}
+              onAddCamera={handleAddCamera}
+              onAddProbe={handleAddProbe}
+              onAddSection={handleAddSection}
+              onAddZone={handleAddZone}
+              onAddVolume={handleAddVolume}
+              onAddConstraintGroup={handleAddConstraintGroup}
+              onAddConstraint={handleAddConstraint}
+              onDeleteCamera={handleDeleteCamera}
+              onDeleteProbe={handleDeleteProbe}
+              onDeleteSection={handleDeleteSection}
+              onDeleteZone={handleDeleteZone}
+              onDeleteVolume={handleDeleteVolume}
+              onDuplicateCamera={handleDuplicateCamera}
+              onDuplicateProbe={handleDuplicateProbe}
+              onDuplicateSection={handleDuplicateSection}
+              onDuplicateZone={handleDuplicateZone}
+              onDuplicateVolume={handleDuplicateVolume}
+              onDeleteConstraintGroup={handleDeleteConstraintGroup}
+              onDeleteConstraint={handleDeleteConstraint}
+              onDuplicateConstraintGroup={handleDuplicateConstraintGroup}
+              onDuplicateConstraint={handleDuplicateConstraint}
+              onReorder={handleReorder}
             />
-          ) : selectedSection ? (
-            <SectionPanel
-              section={selectedSection}
-              worldMin={room.worldMin}
-              worldMax={room.worldMax}
-              onChange={handleSectionChange}
-              onRename={handleRenameSection}
-              clipActive={clipSectionId === selectedSection.id}
-              onToggleClip={handleToggleSectionClip}
-            />
-          ) : selectedProbe ? (
-            <ProbePanel
-              probe={selectedProbe}
-              query={probeQueries.get(selectedProbe.id)}
-              hasRunOnce={hasRunOnce}
-              stale={stale}
-              onChange={handleProbeChange}
-              onRename={handleRenameProbe}
-              cameraNameById={cameraNameById}
-              onSelectCamera={(id) => dispatch({ type: 'selectionChanged', selection: { kind: 'camera', id } })}
-            />
-          ) : (
-            <CameraPanel
-              camera={selectedCamera}
-              flagged={selectedCameraId ? engine.state.flaggedCameras.has(selectedCameraId) : false}
-              onChange={handleCameraChange}
-              onRename={handleRenameCamera}
-              onToggleAimLock={handleToggleAimLock}
-            />
-          )}
-        </div>
-      </div>
-      <div className="viewport-col">
-        <div className={`viewport${placing ? ' placing' : ''}`} ref={containerRef}>
-          {/* Top-left toolbar (spec §2.4): two groups — transform, then placement —
-              separated by the wider between-group gap. */}
-          <div className="viewport-toolbar">
-            <div className="toolbar-group">
-              <button
-                type="button"
-                className={`btn secondary icon-btn${selection?.kind === 'probe' || transformMode === 'translate' ? ' active' : ''}`}
-                title="Move"
-                aria-label="Move"
-                aria-pressed={selection?.kind === 'probe' || transformMode === 'translate'}
-                onClick={() => setTransformMode('translate')}
-              >
-                <MoveIcon />
-              </button>
-              <button
-                type="button"
-                className={`btn secondary icon-btn${selection?.kind !== 'probe' && transformMode === 'rotate' ? ' active' : ''}`}
-                title="Rotate"
-                aria-label="Rotate"
-                aria-pressed={selection?.kind !== 'probe' && transformMode === 'rotate'}
-                disabled={selection?.kind === 'probe'}
-                onClick={() => setTransformMode('rotate')}
-              >
-                <RotateIcon />
-              </button>
-              <button
-                type="button"
-                className={`btn secondary icon-btn${selection?.kind === 'volume' && transformMode === 'scale' ? ' active' : ''}`}
-                title="Scale"
-                aria-label="Scale"
-                aria-pressed={selection?.kind === 'volume' && transformMode === 'scale'}
-                disabled={selection?.kind !== 'volume'}
-                onClick={() => setTransformMode('scale')}
-              >
-                <ScaleIcon />
-              </button>
-              <button
-                type="button"
-                className="btn secondary icon-btn"
-                title={spaceTooltip(transformSpace)}
-                aria-label={spaceTooltip(transformSpace)}
-                onClick={() => setTransformSpace((s) => toggleSpace(s))}
-              >
-                {spaceIconKind(transformSpace) === 'box' ? <BoxIcon /> : <GlobeIcon />}
-              </button>
-            </div>
-            <div className="toolbar-group">
-              <button
-                type="button"
-                className={`btn secondary icon-btn${placing ? ' active' : ''}`}
-                title={placeTooltip(selection, placing)}
-                aria-label={placeTooltip(selection, placing)}
-                aria-pressed={placing}
-                disabled={!canPlace(selection)}
-                onClick={() => setPlacing((p) => !p)}
-              >
-                <PlaceIcon />
-              </button>
-            </div>
           </div>
+          <div
+            className="panel-divider"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize hierarchy and detail panels"
+            onPointerDown={onDividerPointerDown}
+            onPointerMove={onDividerPointerMove}
+            onPointerUp={onDividerPointerUp}
+          />
+          <div
+            className="detail-panel"
+            ref={detailPanelRef}
+            style={detailHeight != null ? { height: detailHeight, flex: '0 0 auto' } : undefined}
+          >
+            {selectedConstraint ? (
+              <ConstraintPanel
+                constraint={selectedConstraint}
+                groups={constraintGroups}
+                selectedVertex={activeVertex}
+                extending={extending?.id === selectedConstraint.id}
+                onRename={handleRenameConstraint}
+                onChange={handleConstraintChange}
+                onMoveVertex={handleMoveVertex}
+                onInsertVertex={handleInsertVertex}
+                onDeleteVertex={handleDeleteVertex}
+                onExtend={handleExtendPolyline}
+              />
+            ) : selectedConstraintGroup ? (
+              <ConstraintGroupPanel
+                group={selectedConstraintGroup}
+                memberCount={selectedGroupMemberCount}
+                placementBlocker={placement.entryBlocker(selectedConstraintGroup)}
+                onRename={handleRenameConstraintGroup}
+                onPlaceCameras={handlePlaceCameras}
+              />
+            ) : selectedVolume ? (
+              <VolumePanel volume={selectedVolume} zones={zones} voxelSize={voxelSize} onChange={handleVolumeChange} />
+            ) : selectedZone ? (
+              <ZonePanel
+                zone={selectedZone}
+                memberCount={selectedZoneMemberCount}
+                summary={zoneCoverage?.perZone.get(selectedZone.id) ?? null}
+                hasRunOnce={hasRunOnce}
+                stale={stale}
+                onRename={handleRenameZone}
+                cameraNameById={cameraNameById}
+              />
+            ) : selectedSection ? (
+              <SectionPanel
+                section={selectedSection}
+                worldMin={room.worldMin}
+                worldMax={room.worldMax}
+                onChange={handleSectionChange}
+                onRename={handleRenameSection}
+                clipActive={clipSectionId === selectedSection.id}
+                onToggleClip={handleToggleSectionClip}
+              />
+            ) : selectedProbe ? (
+              <ProbePanel
+                probe={selectedProbe}
+                query={probeQueries.get(selectedProbe.id)}
+                hasRunOnce={hasRunOnce}
+                stale={stale}
+                onChange={handleProbeChange}
+                onRename={handleRenameProbe}
+                cameraNameById={cameraNameById}
+                onSelectCamera={(id) => dispatch({ type: 'selectionChanged', selection: { kind: 'camera', id } })}
+              />
+            ) : (
+              <CameraPanel
+                camera={selectedCamera}
+                flagged={selectedCameraId ? engine.state.flaggedCameras.has(selectedCameraId) : false}
+                onChange={handleCameraChange}
+                onRename={handleRenameCamera}
+                onToggleAimLock={handleToggleAimLock}
+                constraints={constraints}
+                onBind={handleBindCamera}
+                onReposition={
+                  selectedCamera && placement.repositionBlocker(selectedCamera) === null
+                    ? () => void placement.reposition(selectedCamera)
+                    : null
+                }
+                repositionBlocker={selectedCamera ? placement.repositionBlocker(selectedCamera) : null}
+              />
+            )}
+          </div>
+        </div>
+      )}
+      <div className="viewport-col">
+        <div
+          className={`viewport${placing ? ' placing' : ''}${drawing || extending ? ' drawing' : ''}`}
+          ref={containerRef}
+        >
+          {/* Top-left toolbar (spec §2.4): two groups — transform, then placement —
+              separated by the wider between-group gap. Both are gone in the
+              placement mode: nothing is selectable there, and drawing a
+              constraint mid-session would invalidate the pool under it (§5.1). */}
+          {!placementOpen && (
+            <div className="viewport-toolbar">
+              <div className="toolbar-group">
+                <button
+                  type="button"
+                  className={`btn secondary icon-btn${selection?.kind === 'probe' || transformMode === 'translate' ? ' active' : ''}`}
+                  title="Move"
+                  aria-label="Move"
+                  aria-pressed={selection?.kind === 'probe' || transformMode === 'translate'}
+                  onClick={() => setTransformMode('translate')}
+                >
+                  <MoveIcon />
+                </button>
+                <button
+                  type="button"
+                  className={`btn secondary icon-btn${selection?.kind !== 'probe' && transformMode === 'rotate' ? ' active' : ''}`}
+                  title="Rotate"
+                  aria-label="Rotate"
+                  aria-pressed={selection?.kind !== 'probe' && transformMode === 'rotate'}
+                  disabled={selection?.kind === 'probe'}
+                  onClick={() => setTransformMode('rotate')}
+                >
+                  <RotateIcon />
+                </button>
+                <button
+                  type="button"
+                  className={`btn secondary icon-btn${selection?.kind === 'volume' && transformMode === 'scale' ? ' active' : ''}`}
+                  title="Scale"
+                  aria-label="Scale"
+                  aria-pressed={selection?.kind === 'volume' && transformMode === 'scale'}
+                  disabled={selection?.kind !== 'volume'}
+                  onClick={() => setTransformMode('scale')}
+                >
+                  <ScaleIcon />
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary icon-btn"
+                  title={spaceTooltip(transformSpace)}
+                  aria-label={spaceTooltip(transformSpace)}
+                  onClick={() => setTransformSpace((s) => toggleSpace(s))}
+                >
+                  {spaceIconKind(transformSpace) === 'box' ? <BoxIcon /> : <GlobeIcon />}
+                </button>
+              </div>
+              <div className="toolbar-group">
+                <button
+                  type="button"
+                  className={`btn secondary icon-btn${placing ? ' active' : ''}`}
+                  title={placeTooltip(selection, activeVertex, placing)}
+                  aria-label={placeTooltip(selection, activeVertex, placing)}
+                  aria-pressed={placing}
+                  disabled={!canPlace(selection, activeVertex)}
+                  onClick={() => setPlacing((p) => !p)}
+                >
+                  <PlaceIcon />
+                </button>
+              </div>
+            </div>
+          )}
           <div className="viewport-toolbar-center">
             <ViewSelector activeView={activeView} onSelect={setActiveView} disabledViews={disabledViews} />
           </div>
@@ -1591,10 +2390,12 @@ export function App() {
               sectionsVisible={sectionsVisible}
               camerasVisible={gizmosVisible}
               zonesVisible={zonesVisible}
+              constraintsVisible={constraintsVisible}
               onToggleCoverage={() => setOverlayOptions((o) => ({ ...o, visible: !o.visible }))}
               onToggleSections={() => setSectionsVisible((v) => !v)}
               onToggleCameras={() => setGizmosVisible((v) => !v)}
               onToggleZones={() => setZonesVisible((v) => !v)}
+              onToggleConstraints={() => setConstraintsVisible((v) => !v)}
             />
           </div>
           {(() => {
@@ -1620,61 +2421,90 @@ export function App() {
           })()}
         </div>
       </div>
-      <div className="sidebar">
-        <RunBar
-          status={engine.state.status}
-          stale={stale}
-          backend={engine.state.backend}
-          errorMessage={engine.state.errorMessage}
-          warnings={optimizeError ? [...capWarnings, optimizeError] : capWarnings}
-          // An open session owns the engine's camera list, so a display run
-          // started here would fight it (`aim_optimization.md` §3.1).
-          runDisabled={optimizer.busy}
-          autoRun={autoRun}
-          onAutoRunChange={setAutoRun}
-          onRun={handleRun}
-        />
-        <OverlayControls
-          options={overlayOptions}
-          onOptionsChange={(patch) => setOverlayOptions((o) => ({ ...o, ...patch }))}
-          voxelSize={voxelSize}
-          onVoxelSizeChange={setVoxelSize}
-          estimatedVoxelCount={estimatedVoxelCount}
-        />
-        <SamplingVolumeControls
-          useZones={useZones}
-          onUseZonesChange={handleToggleUseZones}
-          zoneLevel={zoneLevel}
-          boxLevel={boxLevel}
-          onZoneLevelChange={handleZoneLevelChange}
-          onBoxLevelChange={handleBoxLevelChange}
-          onGenerate={handleGenerate}
-          marked={markedReadout}
-        />
-        <OptimizePanel
-          optimizer={optimizer}
-          camera={selectedCamera}
-          cameras={cameras}
-          onHover={setHoveredAim}
-          comparison={comparison}
-        />
-        <StatsPanel
-          summary={displaySummary}
-          computeBackend={engine.state.backend}
-          renderBackend={renderBackend}
-          voxelSize={debouncedVoxelSize}
-          cameraNameById={cameraNameById}
-        />
-        {selectedSection && (
-          <SectionStatsPanel
-            section={selectedSection}
-            cellGrid={sectionCellGrids.get(selectedSection.id) ?? null}
-            hasRunOnce={hasRunOnce}
+      {placementOpen && placementGroup && placementMode && (
+        <div className="sidebar placement-review-col">
+          <PlacementReviewPanel
+            session={placement}
+            group={placementGroup}
+            plan={placementPlan}
+            onChangeGroup={handleConstraintGroupChange}
+            cameraCount={cameras.length}
+            maxCameras={MAX_CAMERAS}
+            confirming={placementMode.confirming}
+            onRequestClose={() =>
+              dispatchMode({
+                type: 'requestClose',
+                running: placement.running,
+                hasPool: placement.pool !== null,
+              })
+            }
+            onConfirmClose={() => dispatchMode({ type: 'confirmClose' })}
+            onKeepOpen={() => dispatchMode({ type: 'keepOpen' })}
+            onApply={(plan) => {
+              placement.apply(plan);
+              setPlacementNotice(appliedLabel(plan));
+              dispatchMode({ type: 'applied' });
+            }}
+          />
+        </div>
+      )}
+      {!placementOpen && (
+        <div className="sidebar">
+          <RunBar
+            status={engine.state.status}
             stale={stale}
+            backend={engine.state.backend}
+            errorMessage={engine.state.errorMessage}
+            warnings={[...capWarnings, ...(placementNotice ? [placementNotice] : []), ...(optimizeError ? [optimizeError] : [])]}
+            // An open session owns the engine's camera list, so a display run
+            // started here would fight it (`aim_optimization.md` §3.1).
+            runDisabled={optimizer.busy || placement.busy}
+            autoRun={autoRun}
+            onAutoRunChange={setAutoRun}
+            onRun={handleRun}
+          />
+          <OverlayControls
+            options={overlayOptions}
+            onOptionsChange={(patch) => setOverlayOptions((o) => ({ ...o, ...patch }))}
+            voxelSize={voxelSize}
+            onVoxelSizeChange={setVoxelSize}
+            estimatedVoxelCount={estimatedVoxelCount}
+          />
+          <SamplingVolumeControls
+            useZones={useZones}
+            onUseZonesChange={handleToggleUseZones}
+            zoneLevel={zoneLevel}
+            boxLevel={boxLevel}
+            onZoneLevelChange={handleZoneLevelChange}
+            onBoxLevelChange={handleBoxLevelChange}
+            onGenerate={handleGenerate}
+            marked={markedReadout}
+          />
+          <OptimizePanel
+            optimizer={optimizer}
+            camera={selectedCamera}
+            cameras={cameras}
+            onHover={setHoveredAim}
+            comparison={comparison}
+          />
+          <StatsPanel
+            summary={displaySummary}
+            computeBackend={engine.state.backend}
+            renderBackend={renderBackend}
+            voxelSize={debouncedVoxelSize}
             cameraNameById={cameraNameById}
           />
-        )}
-      </div>
+          {selectedSection && (
+            <SectionStatsPanel
+              section={selectedSection}
+              cellGrid={sectionCellGrids.get(selectedSection.id) ?? null}
+              hasRunOnce={hasRunOnce}
+              stale={stale}
+              cameraNameById={cameraNameById}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }

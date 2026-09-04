@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { duplicateConstraint, duplicateConstraintGroup } from '../src/scene/entityDuplication.ts';
+import type { CameraConstraint, ConstraintGroup } from '../src/placement/region.ts';
 
 import type { SceneCamera } from '../src/cameras/camera.ts';
 import type { Probe } from '../src/scene/probeVisibility.ts';
@@ -112,4 +114,72 @@ test('duplicateZone on an empty zone yields no volumes', () => {
 
 test('duplicateZone returns null for an unknown id', () => {
   assert.equal(duplicateZone([zone('zone-1')], [], 'zone-9'), null);
+});
+
+// --- camera constraints (`camera_placement.md` §7) --------------------------
+
+const dupGroup = (id: string): ConstraintGroup => ({
+  id,
+  name: 'Dock',
+  enabled: false,
+  fov: 90,
+  aspect: 1,
+  near: 0.2,
+  far: 45,
+  namePrefix: 'Dock',
+  poolSize: 120,
+  maxCount: 6,
+  trials: 500,
+  epsilon: 2,
+  seed: 7,
+});
+
+const dupRail = (id: string, groupId: string): CameraConstraint => ({
+  id,
+  groupId,
+  name: 'Rail',
+  enabled: true,
+  distance: 0.4,
+  kind: 'polyline',
+  points: [
+    [0, 5, 0],
+    [0, 5, 8],
+  ],
+});
+
+test('duplicateConstraint copies verbatim into the same group', () => {
+  const constraints = [dupRail('con-1', 'cg-1')];
+  const copy = duplicateConstraint(constraints, 'con-1')!;
+  assert.equal(copy.id, 'con-2');
+  assert.equal(copy.groupId, 'cg-1');
+  assert.equal(copy.distance, 0.4);
+  assert.equal(duplicateConstraint(constraints, 'con-404'), null);
+});
+
+test('a duplicated polyline owns its vertices, so dragging one cannot move the other', () => {
+  const constraints = [dupRail('con-1', 'cg-1')];
+  const copy = duplicateConstraint(constraints, 'con-1')!;
+  assert.equal(copy.kind, 'polyline');
+  if (copy.kind !== 'polyline' || constraints[0].kind !== 'polyline') return;
+  assert.notEqual(copy.points, constraints[0].points);
+  assert.notEqual(copy.points[0], constraints[0].points[0]);
+  copy.points[0][0] = 99;
+  assert.equal(constraints[0].points[0][0], 0);
+});
+
+test('duplicateConstraintGroup deep-copies the group, its strategy, and its constraints', () => {
+  const groups = [dupGroup('cg-1')];
+  const constraints = [dupRail('con-1', 'cg-1'), dupRail('con-2', 'cg-9')];
+  const copy = duplicateConstraintGroup(groups, constraints, 'cg-1')!;
+  assert.equal(copy.group.id, 'cg-2');
+  // The template, the pool size and the whole strategy ride along, and so does `enabled`.
+  assert.equal(copy.group.far, 45);
+  assert.equal(copy.group.seed, 7);
+  assert.equal(copy.group.poolSize, 120);
+  assert.equal(copy.group.enabled, false);
+  // Only this group's constraints, each renumbered and repointed at the copy.
+  assert.equal(copy.constraints.length, 1);
+  assert.equal(copy.constraints[0].id, 'con-3');
+  assert.equal(copy.constraints[0].groupId, 'cg-2');
+  assert.equal(duplicateConstraintGroup(groups, constraints, 'cg-404'), null);
 });

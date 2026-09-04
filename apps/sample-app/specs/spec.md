@@ -75,10 +75,12 @@ apps/sample-app/
       sectionHeatmap.ts    retained ChunkResults → per-section column aggregate + heatmap texture + stats (§13)
       heatmapLegend.ts     Turbo colormap + hue ramp + legend-scale builders (section camera-count/blind + coverage-fraction + coverage-overlay hue modes) (§13.5, §13.6, §9)
       sectionGizmos.ts     per-section heatmap plane + faint bound outlines + transform target (§13.5, §13.8)
-      sceneTree.ts         scene hierarchy node model + derivation (camera + probe + section + zone/volume) (§5.5)
+      sceneTree.ts         scene hierarchy node model + derivation (camera + probe + section + zone/volume + constraint group/constraint) (§5.5)
       reorder.ts           hierarchy drag-reorder: pointer hit-test → insertion target + array splice (§5.5.1)
       samplingVolumes.ts   zone/volume model + OBB math + BVH seeding + marked filter + per-zone aggregation (sampling_volumes.md)
       samplingVolumeGizmos.ts  per-volume wireframe boxes + transform target (sampling_volumes.md §5)
+      constraintGizmos.ts  per-constraint primitive handles + translucent dilation (camera_placement.md §6.1)
+      polylineDraw.ts      the armed polyline draw mode, over §2.4.2's hit test (camera_placement.md §6.2)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
@@ -90,15 +92,25 @@ apps/sample-app/
       greedy.ts            the sequential-greedy round loop, engine-free (aim_optimization.md §4.1)
       session.ts           capture slots, camera masks, capture descriptor (aim_optimization.md §3.1)
       useAimOptimizer.ts   session state + the only engine calls (aim_optimization.md §5, §6)
+    placement/
+      region.ts            constraint membership, measure, nearest point, projection (camera_placement.md §3.2)
+      halton.ts            the low-discrepancy sequence + ball map + per-constraint offsets (camera_placement.md §4.1)
+      pool.ts              pool split, draw, build-step descriptor, rejection (camera_placement.md §4.1–§4.3)
+      leafSet.ts           LeafCubes: build from AggregateResult, rasterize into a bitset (camera_placement.md §2.1)
+      analyze.ts           trial loop, prefix curve, knee — engine-free (camera_placement.md §4.4, §4.5)
+      usePlacement.ts      session state + the only engine calls (camera_placement.md §3.4, §5)
+      mode.ts              the placement mode's lifecycle as a pure reducer + the template line + the Build/Extend/Truncate/Rebuild decision (camera_placement.md §5, §5.1, §3.3.1)
     ui/
       CameraPanel.tsx      selected-camera editors
       ProbePanel.tsx       selected-probe position + per-camera visibility readout (§12.3)
       SectionPanel.tsx     selected-section orientation + range + aggregation editor (§13.6)
       VolumePanel.tsx      selected-volume position/rotation/size + zone reassign (sampling_volumes.md §6.1)
       ZonePanel.tsx        selected-zone name + member count + per-zone stats (sampling_volumes.md §6.2)
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones umbrella, enable/visibility toggle, add "+" menu, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
+      ConstraintGroupPanel.tsx  selected-group name + the Camera placement section: camera template + `Place cameras` (camera_placement.md §5)
+      ConstraintPanel.tsx  selected-constraint kind + distance + geometry + vertex list (camera_placement.md §6)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones and Constraints umbrellas, enable/visibility toggle, add "+" menu with its nested Constraint submenu, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
       OverlayControls.tsx  overlay mode + intensity scale + resolution slider
-      ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones visibility checkboxes (§2.4)
+      ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones/Constraints visibility checkboxes (§2.4)
       ViewSelector.tsx     top-middle View dropdown: Perspective/Top/Front/Right camera selection (§2.4)
       HeatmapLegend.tsx    legend renderer (caption + gradient + ticks); caller picks section (Turbo) vs coverage-overlay (hue) scale (§13.6, §9)
       SamplingVolumeControls.tsx  zone tool: useZones toggle, generate, levels, marked readout (sampling_volumes.md §6.3)
@@ -106,6 +118,9 @@ apps/sample-app/
       SectionStatsPanel.tsx  selected-section coverage stats (§13.7)
       RunBar.tsx           Run button + auto-run toggle + stale/backend indicators
       OptimizePanel.tsx    aim optimizer: entry points, score heatmap, proposal, summary (aim_optimization.md §5, §6)
+      CandidatePositionsPanel.tsx  placement mode, left card 1: pool size + Build + its progress/readout/blocker (camera_placement.md §5.1)
+      StrategyPanel.tsx    placement mode, left card 2: max cams / trials / knee / seed + Analyze (camera_placement.md §5.1)
+      PlacementReviewPanel.tsx  placement mode, right column: curve, slider, stats, pinned Apply/Close (camera_placement.md §5.2, §5.3)
 ```
 
 The app is a **three-column** flex layout (desktop only, §1):
@@ -113,7 +128,8 @@ The app is a **three-column** flex layout (desktop only, §1):
 - **Left panel** — the scene inspector: a **"Scene"** panel with **Load**/**Save**
   scene-file actions (`SceneFileControls`, §14.7) at the top, then the
   `SceneHierarchy` tree, then the selected entity's editor
-  (`CameraPanel`/`ProbePanel`/`SectionPanel`/`VolumePanel`/`ZonePanel`) below it. The
+  (`CameraPanel`/`ProbePanel`/`SectionPanel`/`VolumePanel`/`ZonePanel`/
+  `ConstraintGroupPanel`/`ConstraintPanel`) below it. The
   hierarchy grows to fill the column and scrolls internally; the detail panel
   sits below (and shows a placeholder when nothing is selected). A **draggable
   divider** between the two resizes the split: dragging sets the detail panel's
@@ -135,12 +151,27 @@ The app is a **three-column** flex layout (desktop only, §1):
   coverage denominator), `OptimizePanel` (the aim optimizer,
   [`aim_optimization.md`](./aim_optimization.md) §5 — a tool rather than a selection
   editor, so it sits here and not in the left column, below the zone tool because it
-  optimizes over whatever sampled set that tool defines), `StatsPanel`, and (when a
-  section is selected) `SectionStatsPanel` (§13.7). The heatmap legend is **not** here —
-  it floats over the viewport (see Center, §13.6).
+  optimizes over whatever sampled set that tool defines), `StatsPanel`,
+  and (when a section is selected) `SectionStatsPanel` (§13.7). The heatmap legend is **not** here —
+  it floats over the viewport (see Center, §13.6). The camera placement tool is **not** in
+  this column: it is a mode, not a panel (see **Placement mode** below).
 
 Both side columns share the same fixed width and are not collapsible; only the
 left column's internal hierarchy/detail split is adjustable (via the divider above).
+
+**Placement mode.** One flow **replaces both side columns' contents** rather than sitting
+in one of them: [`camera_placement.md`](./camera_placement.md) §5's camera placement, opened
+by **Place cameras** in the selected constraint group's panel. While it is open the columns
+keep their widths and the viewport keeps the middle, but the left holds the tool's two input
+cards (`CandidatePositionsPanel`, `StrategyPanel`) and the right its review
+(`PlacementReviewPanel`, with Apply and Close pinned below its scroll region). The
+hierarchy, the selection inspector, the run bar, the overlay and zone tools and the stats
+panel are all unmounted; the placement session lives and dies with the mode. The viewport
+keeps its View selector and layer menu and loses its transform toolbar (§2.4); nothing in
+the scene is selectable. Apply or Close restores the columns and the prior selection. It is
+the only mode of its kind, and what earns it one is not screen space but exclusion: the tool
+needs a target that cannot drift, an exit that cannot be navigated away from, and geometry
+that cannot be edited under a live build.
 
 Scroll containers (the side columns, the hierarchy tree, the detail panel) use a
 thin custom-styled scrollbar and reserve a **stable gutter** (`scrollbar-gutter:
@@ -164,13 +195,17 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
 
 Overlays sit over the 3D viewport itself (independent of the side panels): a
 **top-left** transform toolbar, a **top-middle** View selector, and a
-**top-right** layer-visibility dropdown. The viewport also carries a passive
+**top-right** layer-visibility dropdown. In the **placement mode** (§2.2) the transform
+toolbar is hidden — nothing there is selectable — while the View selector and the layer
+menu stay, because the mode's own picture (the pool scatter, the constraint gizmos) is what
+the layer menu governs (`camera_placement.md` §5.1). The viewport also carries a passive
 **orientation-axis indicator** at its bottom-left and the floating
 heatmap legend at its bottom-right (§13.6):
 
 - **Top-left** — tools for the selected entity (§5.2), laid out as **two groups**
   separated by a wider gap than the buttons within a group carry: the **transform**
-  group (mode + space) and the **placement** group (**Place on surface**). The gap
+  group (mode + space) and the **placement** group (**Place on surface**, **Draw
+  polyline**). The gap
   is the grouping — there is no divider rule.
   - Transform **mode** toggle: **Move** / **Rotate** / **Scale** icon buttons,
     switching `TransformControls`'s mode. Each shows its name as a tooltip on hover
@@ -189,9 +224,11 @@ heatmap legend at its bottom-right (§13.6):
   - **Place on surface** — a one-shot placement tool: arm it, then click the scene
     geometry to set the selected entity's position to the point clicked. Its own
     group, separated from the transform buttons above. Enabled **only** for the
-    selection kinds that carry a position — a **camera** or a **probe** — and
-    disabled for a section, a zone, a sampling volume, or an empty selection.
-    Highlighted ("active") while armed. Specified in §2.4.2.
+    selections that carry a placeable point — a **camera**, a **probe**, or a
+    polyline constraint's **selected vertex** (`camera_placement.md` §6.2) — and
+    disabled for a section, a zone, a sampling volume, a point or plane
+    constraint, or an empty selection. Highlighted ("active") while armed.
+    Specified in §2.4.2.
 - **Top-middle** — a **View selector** dropdown that chooses which camera the
   viewport renders through. The button shows the current view's name and a
   chevron and opens a menu (same interaction model as the layer dropdown below —
@@ -252,6 +289,10 @@ heatmap legend at its bottom-right (§13.6):
     (`sampling_volumes.md` §6.3) and per-zone enabled state: hiding the gizmos
     does not change the coverage result or the overlay's zone filtering.
     Defaults to visible.
+  - **Constraints** — shows/hides all camera-constraint gizmos and the placement
+    tool's pool scatter (`camera_placement.md` §6.1, §5.2) at once. Purely visual:
+    constraints are not analysis inputs (`camera_placement.md` §1.1), so hiding them
+    cannot change any number. Defaults to visible.
 
 The eye button renders as an icon button in a top-right toolbar strip and is
 highlighted ("active") while the dropdown is open.
@@ -356,13 +397,23 @@ both make "put this camera on *that* wall" an indirect exercise — the geometry
 already knows where its surfaces are, so a click can name one directly.
 
 **Supported kinds.** Only the selection kinds that carry a `position` are
-placeable: a **camera** (§5) and a **probe** (§12). A section is a set of bounds
+placeable: a **camera** (§5), a **probe** (§12), and a **polyline constraint's
+selected vertex** (`camera_placement.md` §6.2). A section is a set of bounds
 rather than a point (§13.1), a zone has no transform at all, and a sampling
 volume's `position` is its box *centre* — placing it on a surface would bury half
 the box below that surface — so all three leave the button **disabled**. The
 supported set is a single named list in the code, not a condition spelled out at
 each use site, and widening it is a deliberate edit that every consumer must be
 updated for.
+
+**The vertex is the one target that is not an entity.** It is a *sub-selection* on
+a selected constraint (`camera_placement.md` §6.1), so the tool is enabled by the
+pair — a `constraint` selection whose constraint is a polyline, plus a selected
+vertex — and its click writes that vertex rather than the constraint's own
+`position`, which a polyline does not have. It is here rather than in a gesture of
+its own because a vertex *is* a point on a wall or a rail: "put it on that
+surface" is the same question the tool already answers, and answering it twice in
+two ways would be the odd choice.
 
 **Arming.** Clicking the button arms the tool; it is **one-shot**, disarming as
 soon as a placement succeeds. While armed:
@@ -384,6 +435,17 @@ deleted — otherwise the next click would move an entity the user is no longer
 looking at), and on **Escape**. Escape pressed while a numeric text field (§5.2.1)
 holds focus reverts that field only and leaves the tool armed, since Escape is
 already that field's revert key.
+
+**A repeating variant exists.** The **polyline draw mode** (`camera_placement.md` §6.2)
+reuses every rule in this section — the gizmo detach, the crosshair, the suspended pick and
+deselect, the surviving orbit/pan/zoom, the click-vs-drag threshold, and the hit test
+below — and differs only in that it **appends** rather than assigns, is **not** one-shot
+(Enter or double-click commits — the double-click contributing no vertex of its own
+— Backspace removes the last vertex), and needs no selection. **It has no button in this
+toolbar**: it is armed from the hierarchy's "+ ▸ Constraint ▸ Polyline" (§5.5), which is
+where every other constraint is created, so the crosshair is its only armed signal here. **Extend** (`camera_placement.md` §6.2) is the same variant bound to a
+committed polyline: every click is a committed edit there, so nothing about it
+commits or cancels.
 
 **The hit test.** The armed click casts a ray through the active camera and tests
 it against the **scene geometry only** (§4.1, §14.6). Gizmos — camera bodies, probe
@@ -532,6 +594,12 @@ once, never by mixing. That is the point: the work that
 used to run between a `ChunkResult` arriving and the UI updating is what made a run
 visibly stall the viewport even when the engine's own `elapsedMs` was small.
 
+**Camera constraints are absent from the descriptor.** A constraint group and its
+constraints (`camera_placement.md` §1.1) generate cameras and nothing else: they do not
+appear as regions, do not restrict the marked set, and cannot change a single reduction.
+The placement tool's own build steps use a **separate** descriptor of their own
+(`camera_placement.md` §3.3), built from the marked filter this one produces.
+
 **Descriptor caps.** The SDK allows 64 regions, 32 groups, 32 slabs, 256 probes (SDK
 spec §19.6). The app therefore supports 64 sampling volumes, 31 zones (group 31 is the
 marked-set union), 32 sections, and 256 probes.
@@ -598,9 +666,12 @@ for **both**:
   wall tops, angled inward and downward. Defined in `cameras/defaults.ts`.
 - Per-camera config maps to `CameraConfig`:
   `{ id, position, rotation (quat xyzw), fov (vertical°), aspect (16/9), near (0.1), far (~30) }`.
-- A camera also carries an **editable display name** (§5.6) and an **`aimLocked`
+- A camera also carries an **editable display name** (§5.6), an **`aimLocked`
   flag** (`aim_optimization.md` §4.5, default false, excluding it from the aim
-  optimizer). The app models a camera as its own entity — a `Camera` =
+  optimizer), and an optional **`constraintId`** (`camera_placement.md` §6.3) naming the
+  camera constraint it is bound to — provenance for a placed camera, and a clamp that
+  keeps its position inside that constraint's region. The app models a camera as its own
+  entity — a `Camera` =
   `CameraConfig` **plus** those app-only fields — and **converts to the SDK's plain
   `CameraConfig`** (dropping them) only at the `setCameras()` boundary (§8), the one
   place the engine type is required. So they ride **on the camera object**, exactly
@@ -651,6 +722,14 @@ for **both**:
   panel fields and the gizmo: arm the toolbar tool, then click the scene geometry
   to move the camera to the point clicked. Position only, and available for a
   selected camera or probe (§12) only.
+- **A bound camera's position is clamped to its constraint.** When the camera carries
+  `constraintId` (§5, `camera_placement.md` §6.3), **every** write of its position —
+  gizmo drag, a committed numeric field (§5.2.1), Place on surface, the placement tool's
+  own Reposition, and the bind itself — is projected into that constraint's region before
+  it is stored. Reshaping the constraint re-clamps it too, and because that **moves a
+  camera** it marks the result stale, unlike every other constraint edit. So the gizmo slides along the rail and stops at its ends, and a coordinate
+  typed off the wall snaps back to the wall. Rotation is never clamped. The camera panel
+  names the binding and offers a dropdown to rebind or unbind.
 - **Aiming from the camera's own view.** In the **Selected** view (§2.4.1)
   the viewport is the selected camera's image and there is no gizmo, so the
   viewport interactions above are replaced:
@@ -696,6 +775,10 @@ Two kinds of numeric text field appear in the panels, sharing one commit/revert 
 
 Shared behavior for every numeric text field:
 
+- A **bound camera's** position fields commit through the projection of
+  `camera_placement.md` §6.3, so the committed value may differ from the typed one; the
+  field re-derives to what was stored, which is what makes the clamp visible rather than
+  mysterious.
 - **Commit on blur or Enter**; **Escape** reverts to the last committed value. While
   a field is **focused** it holds the raw typed string and is **not** overwritten by
   re-derived props, so a concurrent gizmo drag, an Euler→quat→Euler round-trip (§5.1),
@@ -800,22 +883,29 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 - **Node model.** An app-level `SceneNode` discriminated union (`scene/sceneTree.ts`):
   `{ kind: 'group' }`, `{ kind: 'camera' }`, `{ kind: 'probe' }`, `{ kind: 'section' }`,
   and — for the region-of-interest tool — `{ kind: 'zone' }` (**both selectable and
-  expandable**) and `{ kind: 'volume' }` (a selectable leaf). Nodes carry hierarchy and
+  expandable**) and `{ kind: 'volume' }` (a selectable leaf), and — for the placement tool
+  (`camera_placement.md` §7) — `{ kind: 'constraintGroup' }` (**both selectable and
+  expandable**) and `{ kind: 'constraint' }` (a selectable leaf). Nodes carry hierarchy and
   identity only; entity payload stays in the canonical arrays — cameras in
   `CameraConfig[]` (§5), probes in `Probe[]` (§12.1), sections in `Section[]` (§13.1),
-  zones in `Zone[]`, volumes in `SamplingVolume[]` (`sampling_volumes.md` §2) — which a
-  node references by id. The tree is **derived** via
-  `buildSceneTree(cameras, probes, sections, zones, volumes)` — no separate mutable node
-  state.
+  zones in `Zone[]`, volumes in `SamplingVolume[]` (`sampling_volumes.md` §2), constraint
+  groups in `ConstraintGroup[]` and constraints in `CameraConstraint[]`
+  (`camera_placement.md` §3.1) — which a node references by id. The tree is **derived** via
+  `buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints)`
+  — no separate mutable node state.
 - **Structure.** Auto-derived collapsible groups at the root, one per entity type:
   a **"Cameras"** group over the camera nodes, (when any probes exist) a **"Probes"**
   group over the probe nodes, (when any sections exist) a **"Sections"** group, and
   (when any **zone** exists — including an empty one) a passive **"Zones"** umbrella
   over **selectable+expandable zone nodes**, each holding its volume children
-  (`sampling_volumes.md` §4.1) — the first
-  user-created sub-groups (all other groups are auto-derived by type). Rows are
+  (`sampling_volumes.md` §4.1), and (when any **constraint group** exists — including an
+  empty one) a passive **"Constraints"** umbrella over **selectable+expandable constraint-group
+  nodes**, each holding its constraint children (`camera_placement.md` §7) — the
+  user-created sub-groups (all other groups are auto-derived by type). The root order is
+  **Cameras → Probes → Sections → Zones → Constraints**, fixed. Rows are
   **reorderable by drag within their own group** (§5.5.1); **reparenting** by drag is not
-  offered — a volume changes zone from its panel instead (`sampling_volumes.md` §6.1).
+  offered — a volume changes zone from its panel instead (`sampling_volumes.md` §6.1), and
+  a constraint changes group from its panel (`camera_placement.md` §7).
 - **Rows.** A generic `TreeRow` renders indentation, the expand caret, label,
   selection highlight, and click routing; kind-specific content is dispatched on
   `node.kind`. Camera rows keep the existing checkbox toggle (§5.4), coverage dot,
@@ -831,13 +921,19 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   **enabled checkbox** ("Enable/Disable section", §13.6) and show a small badge with the section's
   **orientation** and its **aggregated coverage** (e.g. `H · mean 47%`), mirroring the
   camera coverage-rate badge; the coverage part is omitted when there is no usable run.
+  **Constraint-group** rows carry an **enabled checkbox** (`camera_placement.md` §3.1) and
+  a badge with the group's constraint count and, after a search, its selected camera count
+  and reachable rate (e.g. `3 constraints · 8 cams · 94%`); the search part is omitted when
+  no search has run. **Constraint** rows carry an **enabled checkbox** and a badge with the
+  constraint's kind and primitive measure (e.g. `polyline · 60 m`).
   A group header shows a caret, label, and passive child count.
 - **Labels.** A row's label is the entity's **resolved display name** — cameras
   (§5.6), probes (§12.1), sections (§13.1), and zones (`sampling_volumes.md` §6.2)
   each via their **on-entity `name`** — falling back to the default `Camera N` /
   `Probe N` / `Section N` / `Zone N` when blank. **Volume** rows are the one
   exception: they keep showing the raw id (`volume-N`); volume names are out of scope
-  (§15).
+  (§15). Constraint groups and constraints resolve from their own **`name`**
+  (`camera_placement.md` §3.1), falling back to `Group N` / `Constraint N`.
 - **Selection.** The app holds a single **unified selection** — a camera, probe,
   section, zone, *or* volume (`{ kind: 'camera' | 'probe' | 'section' | 'zone' |
   'volume'; id } | null`) — so selecting one deselects the others and only one
@@ -846,22 +942,53 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   node selects it (drives its panel); its own caret handles expand/collapse. A zone's
   row **enabled checkbox** (independent per zone, decoupled from selection) controls
   whether it contributes to the visualized marked set (`sampling_volumes.md` §7.3).
-  Clicking a group header (incl. the "Zones" umbrella) only expands/collapses it and
-  does not change the selection.
+  Clicking a **constraint group** or **constraint** node selects it the same way a zone or
+  volume node does; a constraint's own **enabled checkbox** controls whether it contributes
+  pool positions (`camera_placement.md` §4.1) and a group's controls whether the search
+  considers it at all. A **constraint** is pickable in the viewport through its handles
+  (`camera_placement.md` §6.1); a constraint **group** has no pickable body and is selected
+  from the hierarchy only, like a zone. A selected polyline additionally carries a
+  **vertex sub-selection**, which is not a node kind (`camera_placement.md` §6.1).
+  Clicking a group header (incl. the "Zones" and "Constraints" umbrellas) only
+  expands/collapses it and does not change the selection.
 - **Adding entities.** The "Hierarchy" panel header **"+" menu** creates — **Camera**,
-  **Probe**, **Section**, **Zone**, or **Volume**. Cameras/probes/sections spawn at the
-  **workspace center** with the next free id and auto-select. A **Zone** creates an empty
-  zone (`zone-N`); a **Volume** adds a 1 m cube at the center into the target zone
-  (creating "Zone 1" first if none exist) (`sampling_volumes.md` §4.1). Creating a camera
-  or a volume marks the result stale (§8.1); creating a probe, section, or empty zone
-  does not.
-- **Row context menu.** **Right-clicking** a camera, probe, section, zone, or volume row
-  opens a context menu with two actions, **Duplicate** (top) and **Delete** (bottom).
-  Group headers have no context menu.
+  **Probe**, **Section**, **Zone**, **Volume**, or **Constraint ▸**.
+  Cameras/probes/sections spawn at the **workspace center** with the next free id and
+  auto-select. A **Zone** creates an empty zone (`zone-N`); a **Volume** adds a 1 m cube
+  at the center into the target zone (creating "Zone 1" first if none exist)
+  (`sampling_volumes.md` §4.1). Creating a camera or a volume marks the result stale
+  (§8.1); creating a probe, section, or empty zone does not.
+
+  **Constraint ▸ is a submenu, and adds nothing itself.** It holds **Group**, **Point**,
+  **Polyline**, and **Plane** (`camera_placement.md` §7). Four constraint entries
+  sitting flat among the five scene-entity rows made the menu read as nine peers, when
+  the constraint half is one feature's worth of choices; nesting them puts the top level
+  back to six rows and keeps "which kind of constraint" one level down, where the
+  question actually belongs. A **Group** creates an empty group; a **Point** spawns at
+  the workspace centre; a **Plane** a 4 × 4 m rectangle there; **Polyline** arms the draw
+  mode (§2.4, `camera_placement.md` §6.2) instead of spawning geometry, since a polyline
+  with no vertices is not a thing the user wants. The submenu opens on **hover or click**
+  of its row and closes with the parent menu. Both popovers open **outward** — the "+"
+  menu rightward from its button, the submenu rightward from its row — at one **fixed
+  width**, so the two read as a single assembly rather than two panels each sized to its
+  own longest label (`VISUAL_DESIGN.md` → Menu).
+
+  **All four entries are always enabled.** Picking a type when no group exists creates
+  "Group 1" first and adds the constraint to it — the same rule Volume follows for
+  "Zone 1", and already what the reducer does; only the old menu's `when a group exists`
+  gate hid it. **No constraint or group action ever marks the result stale** —
+  constraints are not analysis inputs (`camera_placement.md` §1.1), and adding one "for
+  symmetry" with zones would force a needless recompute.
+- **Row context menu.** **Right-clicking** a camera, probe, section, zone, volume,
+  constraint-group, or constraint row opens a context menu with two actions, **Duplicate**
+  (top) and **Delete** (bottom). Group headers have no context menu.
 - **Deleting entities.** The context-menu **Delete** action removes the row's entity.
   Deleting a **zone** removes it **and all its volumes**. Deleting the selected
   entity clears the selection; deleting a camera, a volume, or a non-empty zone marks the
-  result stale (§8.1); deleting a probe, section, or empty zone does not.
+  result stale (§8.1); deleting a probe, section, empty zone, constraint, or constraint
+  group does not. Deleting a **constraint group** removes it **and all its constraints**;
+  deleting a constraint (directly or with its group) **unbinds** every camera that
+  referenced it — the cameras and their positions stay (`camera_placement.md` §6.3).
 - **Duplicating entities.** The context-menu **Duplicate** action creates a **deep copy**
   of the row's entity with the **next free id** (same id prefix) and **auto-selects** the
   copy. The copy carries **every property verbatim** — including `name` (copied exactly;
@@ -878,10 +1005,18 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
     `enabled` flag.
   - **Volume** — the copy is added to the **same zone** as the original (not the selected
     zone).
+  - **Constraint group** — duplicates the group **and fresh copies of all its
+    constraints** (each with a new constraint id, referencing the new group), carrying the
+    camera template, the pool size and the strategy verbatim (`camera_placement.md` §3.1). The
+    duplicate holds **no pool and no search result**: those are derived from the scene
+    (§3.3.1 there), not properties of the entity.
+  - **Constraint** — the copy is added to the **same group** as the original, and no
+    camera is bound to it (a binding is provenance for a specific camera, so it does not
+    transfer).
 
   Duplicating a camera, a volume, or a **non-empty** zone marks the result stale (§8.1);
-  duplicating a probe, a section, or an **empty** zone does not (mirrors the add/delete
-  stale rules above).
+  duplicating a probe, a section, an **empty** zone, a constraint, or a constraint group
+  does not (mirrors the add/delete stale rules above).
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
   (§15).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
@@ -891,9 +1026,9 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 ### 5.5.1 Reordering rows (drag and drop)
 
 A row is **dragged to reorder it within its own group**. Draggable kinds: **camera**,
-**probe**, **section**, **zone**, and **volume**. The four root group headers are **not**
-draggable — they are auto-derived by type and their order (Cameras → Probes → Sections →
-Zones) is fixed.
+**probe**, **section**, **zone**, **volume**, **constraint group**, and **constraint**. The
+root group headers are **not** draggable — they are auto-derived by type and their order
+(Cameras → Probes → Sections → Zones → Constraints) is fixed.
 
 - **Order is array order.** The tree is derived from the canonical arrays (§5.5), so
   reordering a row **is** a reorder of that entity's array — `cameras`, `probes`,
@@ -990,6 +1125,36 @@ at the `setCameras()` boundary (§8). Rules:
 
 ## 8. Running the calculation
 
+**The engine is initialized when a scene loads, not when a run starts.** As soon as the
+app holds a collision mesh — at startup, and after every import or reset (§14.4) — it
+runs `init` → `loadScene` → `setSampling({ regions: [{ type: 'full' }] })` against the
+current workspace at the debounced `voxelSize`, and computes nothing. Coverage still
+requires an explicit Run or an Auto-run tick: loading a scene is not measuring it.
+
+This is not an optimization; it is what makes engine readiness a state the user can
+reach. A pool build (`camera_placement.md` §4.2) drives `compute()` itself and so does
+**not** pass the Run gate below — it carries its own readiness check instead. While init
+happened only inside a run, that check was unsatisfiable before the first run: from
+startup the placement tool sat disabled reading `Wait for the engine to finish loading
+the scene.` about a load that would never begin until the user clicked Run coverage,
+which the message gave them no reason to do.
+
+The load is **idempotent and single-flight**. The scene-load effect and `handleRun` share
+one "ensure loaded" path, keyed on the `(collision mesh, voxelSize)` pair the engine was
+last loaded against: two overlapping `init` calls are impossible, and a run that finds
+the engine already loaded for its pair skips straight to `setCameras` + `compute`.
+Sampling needs no special case — an import already marks the region set dirty (§8.1), so
+the first run after one re-applies its zones over the full-volume default this load
+leaves behind.
+
+A **`voxelSize` change is deliberately not eager**: it is re-initialized by the next run,
+exactly as before (§6). Re-voxelizing the workspace is the most expensive operation in
+the session, and spending it on every debounced slider settle would burn it on
+resolutions the user is still scrubbing past — while unlike a scene load it gates nothing,
+since the engine already holds a scene. The consequence is that between a resolution edit
+and the next run the engine is loaded at the *previous* voxel size, and a `compute()` started
+in that window samples at that size; this is pre-existing behavior and unchanged here.
+
 - A **Run coverage** button triggers `compute()` on demand.
 - An **Auto-run** checkbox next to the button, **on by default**, triggers
   `compute()` automatically whenever the result is stale (§8.1) instead of
@@ -1038,11 +1203,13 @@ moment of that edit, so the engine goes idle at the next chunk boundary and the 
 whose result is discarded, and only then waits for the one they asked for. A scene
 import cancels the same way (§14.4 step 4).
 
-**Auto-run is suspended while an optimize session is open** (`aim_optimization.md`
-§3.1). That feature drives its own `compute()` calls against a camera list carrying six
-extra capture slots, and letting the staleness poller fire in parallel would interleave
-two runs over two different camera lists. The session's own final run re-establishes the
-displayed numbers when it closes.
+**Auto-run is suspended while an optimize session or a placement session is open**
+(`aim_optimization.md` §3.1, `camera_placement.md` §3.4). Both features drive their own
+`compute()` calls against a camera list carrying six extra capture slots, and letting the
+staleness poller fire in parallel would interleave two runs over two different camera
+lists. The session's own final run re-establishes the displayed numbers when it closes.
+The two sessions **share those six slots and are mutually exclusive** — a scene of any size
+therefore needs six spare slots, not six per feature.
 
 A **camera** edit is deliberately not cancelled: its run is short, and its result is
 still applied — one edit stale, reconciled by the next auto-run — so cancelling would
@@ -1233,6 +1400,9 @@ panel is exactly as above (the SDK summary).
 | `CAMERA_INSIDE_GEOMETRY` | surface which camera; keep it flagged in the list (the SDK never flags a camera carrying `enabled: false`, §5.4) |
 | `TOO_MANY_CAMERAS` | not reachable (10 ≤ 128), but guarded |
 | Descriptor cap exceeded (§3.3) | **warning**, not an error: the over-cap zones / volumes / sections / probes are dropped from the descriptor and named in the status area; the run and every other panel proceed |
+| Placement tool cannot start (engine still loading, slots, a session already open, pending sampling, no enabled constraint) | the entry point is disabled with the reason (`camera_placement.md` §10). The engine-readiness check is the tool's own: a build step does not pass the Run gate of §8 |
+| `CAMERA_INSIDE_GEOMETRY` for a **capture slot** during a session | **suppressed** for the session's duration; the pool position is rejected instead (`camera_placement.md` §4.2) |
+| A pool build `compute()` rejects | build steps stop, the session closes, the partial pool is discarded, the SDK message goes to the status area (`camera_placement.md` §10) |
 | Worker/device errors | reported in a status area; engine re-init offered |
 
 ---
@@ -1722,14 +1892,18 @@ scale, panel split) are **not** part of the scene file — they remain app-local
 - All scene entities live in a single in-memory `Scene`:
   `{ geometry: GeometryObject[], cameras: Camera[], probes: Probe[],
   sections: Section[], clipSectionId: string | null, zones: Zone[],
-  volumes: SamplingVolume[], useZones: boolean }`. A **`Camera`** is the app camera
-  entity — `CameraConfig` extended with a `name` (§5.6) and an **`enabled`** flag
-  (§5.4); the app **filters to enabled cameras and converts each to a plain
-  `CameraConfig`** (dropping `name`/`enabled`) at the `setCameras()` boundary (§8), the
+  volumes: SamplingVolume[], useZones: boolean,
+  constraintGroups: ConstraintGroup[], constraints: CameraConstraint[] }`. A
+  **`Camera`** is the app camera
+  entity — `CameraConfig` extended with a `name` (§5.6), an **`enabled`** flag
+  (§5.4), `aimLocked`, and an optional **`constraintId`** (§5,
+  `camera_placement.md` §6.3); the app **filters to enabled cameras and converts each to a
+  plain `CameraConfig`** (dropping all four) at the `setCameras()` boundary (§8), the
   only place the SDK type is required — so probe/section/zone **and camera** names all
   live on their own entities (no side map). `clipSectionId` is the section currently
   clipping the scene (§13.9), or `null`.
-  `defaultScene()` seeds `zones`/`volumes` **empty**, `useZones` **false**, and
+  `defaultScene()` seeds `zones`/`volumes` **empty**, `useZones` **false**,
+  `constraintGroups`/`constraints` **empty** (`camera_placement.md` §9), and
   `clipSectionId` **null** (`sampling_volumes.md` §9); the default cameras
   (`cameras/defaults.ts`) carry **blank** names, so they display as `Camera N`.
 - The startup scene is **constructed in code** as a `Scene` from today's defaults
@@ -1755,9 +1929,10 @@ scale, panel split) are **not** part of the scene file — they remain app-local
 
 ### 14.3 `scene.json` format
 
-- **`formatVersion`** — integer, currently `2` (bumped from 1 for zones/volumes).
-  The reader **accepts 1 and 2**; a v1 file reads with empty `zones`/`volumes` and
-  `useZones` false. A version **> 2** is rejected (§14.8).
+- **`formatVersion`** — integer, currently `3` (bumped from 1 for zones/volumes, and
+  from 2 for camera constraints). The reader **accepts 1, 2, and 3**: a v1 file reads with
+  empty `zones`/`volumes` and `useZones` false, and a v1 or v2 file reads with empty
+  `constraintGroups`/`constraints`. A version **> 3** is rejected (§14.8).
 - **Coordinates / units** — world space, meters, right-handed **Y-up**: the same frame
   as the SDK and glTF. Rotations are **quaternions `[x, y, z, w]`** throughout (matching
   `CameraConfig.rotation`, §5.1).
@@ -1769,9 +1944,10 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   - `gltf` — a `src` reference (§14.2) to a GLB/GLTF asset.
 - **`cameras`** / **`probes`** / **`sections`** — the serialized cameras, `Probe[]`,
   and `Section[]` (§5, §12.1, §13.1). A **camera** object is the app `Camera` shape —
-  the `CameraConfig` fields **plus** an optional `name`, an optional `enabled`, **and an
-  optional `aimLocked`** (`aim_optimization.md` §9, absent ⇒ `false`, omitted on write
-  when false) — **not** the bare SDK type; the reader builds the app `Camera`, and the app converts
+  the `CameraConfig` fields **plus** an optional `name`, an optional `enabled`, an
+  optional `aimLocked` (`aim_optimization.md` §9, absent ⇒ `false`, omitted on write
+  when false), **and an optional `constraintId`** (`camera_placement.md` §6.3, absent ⇒
+  unbound, omitted on write when absent) — **not** the bare SDK type; the reader builds the app `Camera`, and the app converts
   to `CameraConfig` only at `setCameras()` (§14.1). A camera's **`enabled`** flag
   (§5.4) is **optional on read**, defaulting to `true` when absent, and — since
   cameras are enabled by default — **omitted on write when `true`** (only
@@ -1783,18 +1959,19 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   defaulting to the **full workspace-AABB extent** along its in-plane axis when absent — so
   files written before finite footprints load spanning the whole workspace in-plane,
   unchanged in appearance. Like `clipRange` and the camera `enabled` flag, adding them is
-  back-compatible, so there is **no format-version bump** (still `2`).
+  back-compatible, so there is **no format-version bump** (they were added under `2`).
 - **`name`** on each **camera**, **probe**, and **section** is the user-edited
   display label (§5.6, §12.1, §13.1), **optional on read** — a blank/missing name
   reads as the default `Camera N` / `Probe N` / `Section N`, never an error — and, to
   keep files tidy, is **omitted on write when blank** (an unnamed entity has no `name`
   key and reads back as its default). Adding `name` is back-compatible, so there is
-  **no format-version bump** (still `2`), exactly like `clipRange`/`clipSectionId`/the
+  **no format-version bump** (added under `2`), exactly like `clipRange`/`clipSectionId`/the
   camera `enabled` flag.
 - **Array order is significant.** The order of `cameras`, `probes`, `sections`, `zones`,
-  and `volumes` is the **hierarchy display order** (§5.5), preserved verbatim on read and
+  `volumes`, `constraintGroups`, and `constraints` is the **hierarchy display order**
+  (§5.5), preserved verbatim on read and
   write. Drag-reordering (§5.5.1) rewrites these arrays in place; there is no separate
-  order field and none is needed, so reordering is **not** a format change (still `2`). A
+  order field and none is needed, so reordering is **not** a format change. A
   `volumes` array may **interleave zones** — volumes always append on create — and the
   reader/writer preserve that interleaving exactly; a zone's row order is the order of its
   own volumes within the array, ignoring the others.
@@ -1808,13 +1985,25 @@ scale, panel split) are **not** part of the scene file — they remain app-local
   to `true` when absent); each volume is `{ id, zoneId, position, rotation, size }`.
   `useZones` is a persisted analysis setting (default `false` when absent).
   Generation levels are **not** persisted (tool state).
+- **`constraintGroups`** / **`constraints`** — the camera-placement state
+  (`camera_placement.md` §9). A group is
+  `{ id, name, enabled, fov, far, namePrefix, poolSize, maxCount, trials, epsilon, seed }`
+  — the camera **template**, the **pool size** and the analysis **strategy** all persist, so a
+  seeded search is reproducible from the file that records its output. A group carries no
+  `aspect`/`near` of its own (`camera_placement.md` §3.1.1); both keys are read and ignored
+  when an older file has them. A constraint is
+  `{ id, groupId, name, enabled, kind, distance }` plus its per-kind geometry:
+  `position` (point), `points` (polyline), or `position`/`rotation`/`size` (plane).
+  The **pool, the search result, and the selected camera count are not persisted** —
+  derived data invalidated by any scene change (`camera_placement.md` §3.3.1), the same
+  line drawn for the zone tool's generation levels.
 - **Ids** are unique within each category; duplicates are rejected (§14.8).
 
 Sketch:
 
 ```json
 {
-  "formatVersion": 2,
+  "formatVersion": 3,
   "useZones": false,
   "geometry": [
     { "kind": "room", "halfX": 10, "halfZ": 10, "height": 6, "thickness": 0.3,
@@ -1840,6 +2029,19 @@ Sketch:
   "volumes": [
     { "id": "volume-1", "zoneId": "zone-1",
       "position": [3,1.5,-2], "rotation": [0,0.259,0,0.966], "size": [4,3,6] }
+  ],
+  "constraintGroups": [
+    { "id": "cg-1", "name": "Dock", "enabled": true,
+      "fov": 60, "far": 30, "namePrefix": "Dock",
+      "poolSize": 200, "maxCount": 10, "trials": 1000, "epsilon": 1.0, "seed": 1 }
+  ],
+  "constraints": [
+    { "id": "con-1", "groupId": "cg-1", "name": "Gantry rail", "enabled": true,
+      "kind": "polyline", "distance": 0.4,
+      "points": [[-9,5.4,-9],[-9,5.4,9],[9,5.4,9]] },
+    { "id": "con-2", "groupId": "cg-1", "name": "North wall", "enabled": true,
+      "kind": "plane", "distance": 0.3,
+      "position": [0,4,-9.6], "rotation": [0,0,0,1], "size": [18,3] }
   ]
 }
 ```
@@ -1858,7 +2060,8 @@ Sketch:
    **cancel any in-flight compute** (`camera-coverage-sdk` §13.2 — an actual abort, not
    just a discarded result), replace the `Scene`, clear the coverage overlay
    and the retained per-run probe/section data (they read "no-data", §12.3/§13.4, until
-   the next run), and **require an explicit Run** (§8) — import never auto-computes.
+   the next run), **re-initialize the engine against the new collision mesh (§8) — a load,
+   not a run**, and **require an explicit Run** (§8) — import never auto-computes.
 5. On **any** failure the current scene is left **completely untouched** and a single
    clear error is surfaced (§14.8). There is never a half-loaded scene — silently
    dropping an occluder would understate coverage.
@@ -1953,10 +2156,13 @@ Sketch:
 |---|---|
 | User cancels the folder picker | no-op, scene unchanged |
 | `scene.json` missing / not JSON / schema-invalid | abort, keep current scene, show error |
-| Newer `formatVersion` (> 2) | abort, keep current scene, show error (v1 and v2 are accepted) |
-| Duplicate id within a category (incl. zones, volumes) | abort, keep current scene, show error |
+| Newer `formatVersion` (> 3) | abort, keep current scene, show error (v1, v2 and v3 are accepted) |
+| Duplicate id within a category (incl. zones, volumes, constraint groups, constraints) | abort, keep current scene, show error |
 | Unknown geometry `kind` | abort, keep current scene, show error |
 | `volume.zoneId` referencing no zone, or non-positive `size` | abort, keep current scene, show error |
+| `constraint.groupId` referencing no group, or `camera.constraintId` referencing no constraint | abort, keep current scene, show error |
+| Unknown constraint `kind`, negative/non-finite `distance`, a polyline with fewer than 2 points, or a non-positive plane `size` component | abort, keep current scene, show error |
+| A group template, pool size or strategy out of range (`fov` outside (0,180), `far ≤ 0`, `poolSize`/`maxCount`/`trials < 1`, `epsilon < 0`, non-integer `seed`) | abort, keep current scene, show error (`camera_placement.md` §9) |
 | Unsafe `src` (absolute / URL / `..` / outside folder) | abort, keep current scene, show error |
 | Referenced GLB missing or fails to parse | abort, keep current scene, show error |
 | Export write fails | keep in-memory scene **and the target**, show error |
@@ -1981,8 +2187,12 @@ Sketch:
 
 - **Camera aim optimization shipped** — redundancy-weighted re-aiming of the existing
   cameras, [`aim_optimization.md`](./aim_optimization.md); its §13 lists that feature's
-  own out-of-scope items (optimizing position or FOV, image-quality terms, joint rather
-  than sequential-greedy optimization).
+  own out-of-scope items (image-quality terms, joint rather than sequential-greedy
+  optimization).
+- **Camera placement shipped** — constraint-driven random search over mount positions,
+  [`camera_placement.md`](./camera_placement.md); its §15 lists that feature's own
+  out-of-scope items (aim-aware and redundancy-aware scoring, smarter search than
+  independent trials, relocating existing cameras, cost terms, further constraint kinds).
 - Mode 2 (coverage-count thresholding), per-camera coverage isolation view.
 - Height-band sampling regions as a live control. (Box/oriented-box sampling
   regions grouped into zones **shipped** as sampling zones —
@@ -2045,13 +2255,36 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
   camera is aimed, which is what makes aim optimization cheap (`aim_optimization.md` §2).
 - **Panorama** — the reachable set captured as a weighted angular image around one mount
   point, `6 × R × R` bins over six cube faces (`aim_optimization.md` §3.2).
-- **Capture slot** — one of six session-only cameras that produce a panorama. They occupy
-  mask bits but are never scene entities (`aim_optimization.md` §3.1).
+- **Capture slot** — one of six session-only cameras that measure a mount point: a
+  panorama for the aim optimizer, a reachable-set count for the placement tool. They occupy
+  mask bits but are never scene entities, and the two features **share** them, so only one
+  session can be open at a time (`aim_optimization.md` §3.1, `camera_placement.md` §3.4).
 - **Φ (scene potential)** — `Σ_v G(n(v))` over the marked set, where `G` is the running
   sum of the optimizer's redundancy weight. A camera's optimization score is exactly its
   marginal contribution to Φ, which is why sequential-greedy re-aiming converges — for any
   weight depending only on `n`, so the weight can be tuned on measured coverage without
   touching the argument (`aim_optimization.md` §1.1, §1.2).
+- **Camera constraint** — a region a camera may be **mounted** in: a point, polyline, or
+  plane rectangle **dilated** by a `distance` tolerance. Unlike a sampling volume it is
+  **not** a coverage input — it changes no number, and only generates cameras
+  (`camera_placement.md` §1.1).
+- **Constraint group** — a named container of camera constraints; the unit a placement
+  **analysis** runs over, carrying the **camera template** (the `fov`/`aspect`/`near`/`far`
+  of the camera model being planned for), the **pool size**, and the **strategy**
+  (`maxCount`/`trials`/`epsilon`/`seed`) (`camera_placement.md` §3.1).
+- **Placement analysis** — the trial loop over a built pool, run by **Analyze**. It
+  measures no coverage: every rate it reports is the aim-free upper bound
+  (`camera_placement.md` §4.4, §1.3).
+- **Layout** — a set of mount positions, scored as the **union** of their reachable sets
+  with every counted voxel worth 1. The unit a placement trial scores; the union is what
+  penalizes a clustered layout (`camera_placement.md` §1.2).
+- **Pool** — the built mount positions a placement analysis draws its layouts from. A
+  position's reachable set is cached because it cannot change between trials, which is what
+  makes a search cost one dispatch per position rather than one per trial
+  (`camera_placement.md` §2.2, §3.3).
+- **Knee** — the fewest cameras whose best layout comes within `epsilon` of the best score
+  a search found; a preselection on the score-vs-count curve, not a verdict
+  (`camera_placement.md` §4.5).
 - **Sampling volume** — a user-placed, editable **oriented box**. Unlike a
   probe/section observer, it is **coverage input**: it changes which voxels are
   counted. Belongs to exactly one zone (`sampling_volumes.md` §2, §10).

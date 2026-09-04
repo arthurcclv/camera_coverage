@@ -23,13 +23,16 @@ import { averageDisplayValue, type Section, type SectionCellGrid } from '../scen
 import type { SamplingVolume, Zone, ZoneSummary } from '../scene/samplingVolumes.ts';
 import type { Selection } from '../scene/viewportSelection.ts';
 import {
+  primitiveMeasure,
+  type CameraConstraint,
+  type ConstraintGroup,
+  type ConstraintKind,
+} from '../placement/region.ts';
+import {
   buildSceneTree,
   flattenVisible,
-  nodeIdForCamera,
-  nodeIdForProbe,
-  nodeIdForSection,
-  nodeIdForVolume,
-  nodeIdForZone,
+  nodeIdForSelection,
+  nodeSelection,
   type RenderRow,
   type SceneNode,
 } from '../scene/sceneTree.ts';
@@ -39,13 +42,23 @@ import {
   type ReorderableKind,
   type RowBox,
 } from '../scene/reorder.ts';
+import {
+  deleteHandlers,
+  duplicateHandlers,
+  type DeletableKind,
+  type EntityMenuHandlers,
+} from './entityMenu.ts';
+import { popoverSide, MENU_WIDTH_PX } from './menuPopover.ts';
 
-export interface SceneHierarchyProps {
+export interface SceneHierarchyProps extends EntityMenuHandlers {
   cameras: SceneCamera[];
   probes: Probe[];
   sections: Section[];
   zones: Zone[];
   volumes: SamplingVolume[];
+  /** Camera-placement groups (`camera_placement.md` §7). */
+  constraintGroups: ConstraintGroup[];
+  constraints: CameraConstraint[];
   /** Unified selection (spec §5.5); drives the highlighted node. */
   selection: Selection;
   flaggedIds: Set<string>;
@@ -61,28 +74,26 @@ export interface SceneHierarchyProps {
   onSelect(selection: Selection): void;
   /** Toggle the row's enabled state — camera (enable/disable), section
    * (heatmap on/off), or zone (contributes to the marked set) — §5.5, §7.3. */
-  onToggleEnabled(kind: 'camera' | 'section' | 'zone', id: string): void;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
   onToggleCollapse(nodeId: string): void;
   onAddCamera(): void;
   onAddProbe(): void;
   onAddSection(): void;
   onAddZone(): void;
   onAddVolume(): void;
-  onDeleteCamera(id: string): void;
-  onDeleteProbe(id: string): void;
-  onDeleteSection(id: string): void;
-  onDeleteZone(id: string): void;
-  onDeleteVolume(id: string): void;
-  onDuplicateCamera(id: string): void;
-  onDuplicateProbe(id: string): void;
-  onDuplicateSection(id: string): void;
-  onDuplicateZone(id: string): void;
-  onDuplicateVolume(id: string): void;
+  onAddConstraintGroup(): void;
+  /**
+   * Add a constraint of `kind` to the targeted group (`camera_placement.md` §7).
+   * A polyline arms the draw mode instead of spawning geometry (§6.2) — which of
+   * the two happens is App's call, not the tree's.
+   */
+  onAddConstraint(kind: ConstraintKind): void;
   /** Drag-reorder within a group (§5.5.1): move `id` before `beforeId`, or last when null. */
   onReorder(kind: ReorderableKind, id: string, beforeId: string | null): void;
 }
 
-type DeletableKind = 'camera' | 'probe' | 'section' | 'zone' | 'volume';
+/** Kinds whose row carries an enabled checkbox (spec §5.5, `camera_placement.md` §7). */
+type ToggleableKind = 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint';
 
 interface ContextMenuState {
   x: number;
@@ -138,6 +149,10 @@ function reorderableTarget(node: SceneNode): { kind: ReorderableKind; entityId: 
       return { kind: 'zone', entityId: node.zoneId };
     case 'volume':
       return { kind: 'volume', entityId: node.volumeId };
+    case 'constraintGroup':
+      return { kind: 'constraintGroup', entityId: node.groupId };
+    case 'constraint':
+      return { kind: 'constraint', entityId: node.constraintId };
     default:
       return null;
   }
@@ -348,11 +363,46 @@ function dotColor(rate: number | undefined, flagged: boolean): string {
   return `hsl(${hue * 360}, 85%, 55%)`;
 }
 
+/**
+ * A fixed-positioned popover's resolved place: which way it opens, its top, and
+ * both candidate horizontal edges (spec §5.5).
+ */
+interface Placement {
+  side: 'right' | 'left';
+  top: number;
+  /** Left edge in CSS px, used when `side` is `'right'`. */
+  left: number;
+  /** Distance from the window's right edge, used when `side` is `'left'`. */
+  right: number;
+}
+
+/**
+ * Measure `anchor` and resolve where an outward-opening popover goes, or null when
+ * there is no anchor to measure (the popover then stays closed).
+ *
+ * `edges` names the anchor edges to open from: `outward` is where the popover's left
+ * edge lands normally, `inward` the edge its right edge pins to on the flip.
+ */
+function placeOutward(
+  anchor: HTMLElement | null,
+  edges: (rect: DOMRect) => { outward: number; top: number; inward: number },
+): Placement | null {
+  if (!anchor) return null;
+  const { outward, top, inward } = edges(anchor.getBoundingClientRect());
+  return {
+    side: popoverSide(outward, MENU_WIDTH_PX, window.innerWidth),
+    top,
+    left: outward,
+    right: window.innerWidth - inward,
+  };
+}
+
 export function SceneHierarchy(props: SceneHierarchyProps) {
   const { cameras, probes, sections, zones, volumes, selection, collapsedIds } = props;
+  const { constraintGroups, constraints } = props;
   const nodes = useMemo(
-    () => buildSceneTree(cameras, probes, sections, zones, volumes),
-    [cameras, probes, sections, zones, volumes],
+    () => buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints),
+    [cameras, probes, sections, zones, volumes, constraintGroups, constraints],
   );
   const rows = useMemo(() => flattenVisible(nodes, collapsedIds), [nodes, collapsedIds]);
   const rateById = useMemo(
@@ -360,29 +410,39 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
     [props.perCamera],
   );
   const volumeById = useMemo(() => new Map(volumes.map((v) => [v.id, v])), [volumes]);
+  const constraintById = useMemo(
+    () => new Map(props.constraints.map((c) => [c.id, c])),
+    [props.constraints],
+  );
 
-  const selectedNodeId =
-    selection?.kind === 'camera'
-      ? nodeIdForCamera(selection.id)
-      : selection?.kind === 'probe'
-        ? nodeIdForProbe(selection.id)
-        : selection?.kind === 'section'
-          ? nodeIdForSection(selection.id)
-          : selection?.kind === 'zone'
-            ? nodeIdForZone(selection.id)
-            : selection?.kind === 'volume'
-              ? nodeIdForVolume(selection.id)
-              : null;
+  const selectedNodeId = nodeIdForSelection(selection);
 
-  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  /**
+   * The "+" popover's measured placement, or null when closed (spec §5.5).
+   *
+   * It opens **outward** — left edge at the button's left edge, extending right —
+   * which overhangs `.left-panel`, so like the submenu below it is `position: fixed`
+   * placed from the button's rect rather than absolute inside the panel, whose
+   * `overflow: hidden` would clip it.
+   */
+  const [addMenu, setAddMenu] = useState<Placement | null>(null);
+  const addMenuOpen = addMenu !== null;
+  const addButtonRef = useRef<HTMLButtonElement | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  /**
+   * The Constraint submenu's measured placement, or null when closed (spec §5.5).
+   * One entry is enough because the "+" menu has exactly one nested row.
+   */
+  const [submenu, setSubmenu] = useState<Placement | null>(null);
+  const constraintRowRef = useRef<HTMLLIElement | null>(null);
   const { treeRef, drag, onRowPointerDown } = useDragReorder(rows, props.onReorder);
 
   // Close either popover on any outside interaction (spec §5.5 menus are transient).
   useEffect(() => {
     if (!addMenuOpen && !contextMenu) return;
     const close = () => {
-      setAddMenuOpen(false);
+      setAddMenu(null);
+      setSubmenu(null);
       setContextMenu(null);
     };
     window.addEventListener('click', close);
@@ -393,10 +453,33 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
     };
   }, [addMenuOpen, contextMenu]);
 
+  // Hover *or* click opens the Constraint submenu, and the row itself adds nothing
+  // (spec §5.5). The side is decided from the row's measured right edge, so a wide
+  // left panel flips the popover inward instead of off-screen.
+  const openSubmenu = () => {
+    // Left edge at the row's right edge; 4px above its top, flush with the parent
+    // popover's padding, so the two read as one surface.
+    setSubmenu(placeOutward(constraintRowRef.current, (r) => ({ outward: r.right, top: r.top - 4, inward: r.left })));
+  };
+  // Travelling onto any sibling row closes it, as a desktop menu does.
+  const closeSubmenu = () => setSubmenu(null);
+  /** Dismiss the whole "+" popover — what picking any entry does. */
+  const closeMenus = () => {
+    setSubmenu(null);
+    setAddMenu(null);
+  };
+
+  // The "+" popover opens below the button, its left edge on the button's left edge.
+  const openAddMenu = () => {
+    setSubmenu(null);
+    setContextMenu(null);
+    setAddMenu(placeOutward(addButtonRef.current, (r) => ({ outward: r.left, top: r.bottom + 4, inward: r.right })));
+  };
+
   const openContextMenu = (ev: React.MouseEvent, kind: DeletableKind, id: string) => {
     ev.preventDefault();
     ev.stopPropagation();
-    setAddMenuOpen(false);
+    setAddMenu(null);
     setContextMenu({ x: ev.clientX, y: ev.clientY, kind, id });
   };
 
@@ -412,30 +495,88 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             aria-label="Add entity"
             aria-haspopup="menu"
             aria-expanded={addMenuOpen}
+            ref={addButtonRef}
             onClick={(e) => {
               e.stopPropagation();
-              setAddMenuOpen((o) => !o);
-              setContextMenu(null);
+              if (addMenuOpen) closeMenus();
+              else openAddMenu();
             }}
           >
             +
           </button>
-          {addMenuOpen && (
-            <ul className="menu" role="menu">
-              <li role="menuitem" onClick={() => { setAddMenuOpen(false); props.onAddCamera(); }}>
+          {addMenu && (
+            <ul
+              className="menu"
+              role="menu"
+              style={
+                addMenu.side === 'right'
+                  ? { top: addMenu.top, left: addMenu.left }
+                  : { top: addMenu.top, right: addMenu.right }
+              }
+            >
+              <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddCamera(); }}>
                 Camera
               </li>
-              <li role="menuitem" onClick={() => { setAddMenuOpen(false); props.onAddProbe(); }}>
+              <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddProbe(); }}>
                 Probe
               </li>
-              <li role="menuitem" onClick={() => { setAddMenuOpen(false); props.onAddSection(); }}>
+              <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddSection(); }}>
                 Section
               </li>
-              <li role="menuitem" onClick={() => { setAddMenuOpen(false); props.onAddZone(); }}>
+              <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddZone(); }}>
                 Zone
               </li>
-              <li role="menuitem" onClick={() => { setAddMenuOpen(false); props.onAddVolume(); }}>
+              <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddVolume(); }}>
                 Volume
+              </li>
+              {/* The one nested row (spec §5.5): it opens the four constraint entries
+                  and never adds anything itself. All four stay enabled with no group
+                  present — the reducer creates "Group 1" the way a volume creates
+                  "Zone 1" (`camera_placement.md` §7). */}
+              <li
+                ref={constraintRowRef}
+                role="menuitem"
+                className={`has-submenu${submenu ? ' open' : ''}`}
+                aria-haspopup="menu"
+                aria-expanded={submenu !== null}
+                onPointerEnter={openSubmenu}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openSubmenu();
+                }}
+              >
+                Constraint
+                <span className="submenu-caret" aria-hidden="true">
+                  ▸
+                </span>
+                {submenu && (
+                  <ul
+                    className="menu submenu"
+                    role="menu"
+                    style={
+                      submenu.side === 'right'
+                        ? { top: submenu.top, left: submenu.left }
+                        : { top: submenu.top, right: submenu.right }
+                    }
+                    // An entry's own handler runs first; stopping here keeps the click
+                    // from bubbling to the parent row, which would re-open the submenu
+                    // the entry just closed.
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <li role="menuitem" onClick={() => { closeMenus(); props.onAddConstraintGroup(); }}>
+                      Group
+                    </li>
+                    <li role="menuitem" onClick={() => { closeMenus(); props.onAddConstraint('point'); }}>
+                      Point
+                    </li>
+                    <li role="menuitem" onClick={() => { closeMenus(); props.onAddConstraint('polyline'); }}>
+                      Polyline
+                    </li>
+                    <li role="menuitem" onClick={() => { closeMenus(); props.onAddConstraint('plane'); }}>
+                      Plane
+                    </li>
+                  </ul>
+                )}
               </li>
             </ul>
           )}
@@ -459,6 +600,8 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             sections={sections}
             zones={zones}
             volumeById={volumeById}
+            constraintGroups={props.constraintGroups}
+            constraintById={constraintById}
             onSelect={props.onSelect}
             onToggleEnabled={props.onToggleEnabled}
             onToggleCollapse={props.onToggleCollapse}
@@ -489,11 +632,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             onClick={() => {
               const { kind, id } = contextMenu;
               setContextMenu(null);
-              if (kind === 'camera') props.onDuplicateCamera(id);
-              else if (kind === 'probe') props.onDuplicateProbe(id);
-              else if (kind === 'section') props.onDuplicateSection(id);
-              else if (kind === 'zone') props.onDuplicateZone(id);
-              else props.onDuplicateVolume(id);
+              duplicateHandlers(props)[kind](id);
             }}
           >
             Duplicate
@@ -503,11 +642,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             onClick={() => {
               const { kind, id } = contextMenu;
               setContextMenu(null);
-              if (kind === 'camera') props.onDeleteCamera(id);
-              else if (kind === 'probe') props.onDeleteProbe(id);
-              else if (kind === 'section') props.onDeleteSection(id);
-              else if (kind === 'zone') props.onDeleteZone(id);
-              else props.onDeleteVolume(id);
+              deleteHandlers(props)[kind](id);
             }}
           >
             Delete
@@ -533,8 +668,10 @@ interface TreeRowProps {
   sections: Section[];
   zones: Zone[];
   volumeById: Map<string, SamplingVolume>;
+  constraintGroups: ConstraintGroup[];
+  constraintById: Map<string, CameraConstraint>;
   onSelect(selection: Selection): void;
-  onToggleEnabled(kind: 'camera' | 'section' | 'zone', id: string): void;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
   onToggleCollapse(nodeId: string): void;
   onContextMenu(ev: React.MouseEvent, kind: DeletableKind, id: string): void;
 }
@@ -553,17 +690,18 @@ function TreeRow(props: TreeRowProps) {
         ? props.sections.find((s) => s.id === node.sectionId)?.enabled ?? true
         : node.kind === 'zone'
           ? props.zones.find((z) => z.id === node.zoneId)?.enabled ?? true
-          : true;
+          : node.kind === 'constraintGroup'
+            ? props.constraintGroups.find((g) => g.id === node.groupId)?.enabled ?? true
+            : node.kind === 'constraint'
+              ? props.constraintById.get(node.constraintId)?.enabled ?? true
+              : true;
 
   const handleClick = () => {
     // A group header only expands/collapses; every other kind selects. A zone
     // node selects (the caret handles its own expand/collapse, §4.1).
-    if (node.kind === 'group') props.onToggleCollapse(node.id);
-    else if (node.kind === 'camera') props.onSelect({ kind: 'camera', id: node.cameraId });
-    else if (node.kind === 'probe') props.onSelect({ kind: 'probe', id: node.probeId });
-    else if (node.kind === 'section') props.onSelect({ kind: 'section', id: node.sectionId });
-    else if (node.kind === 'zone') props.onSelect({ kind: 'zone', id: node.zoneId });
-    else props.onSelect({ kind: 'volume', id: node.volumeId });
+    const selection = nodeSelection(node);
+    if (selection === null) props.onToggleCollapse(node.id);
+    else props.onSelect(selection);
   };
 
   // The caret toggles expansion in place (for zones, without selecting — §4.1).
@@ -579,6 +717,8 @@ function TreeRow(props: TreeRowProps) {
     else if (node.kind === 'section') props.onContextMenu(ev, 'section', node.sectionId);
     else if (node.kind === 'zone') props.onContextMenu(ev, 'zone', node.zoneId);
     else if (node.kind === 'volume') props.onContextMenu(ev, 'volume', node.volumeId);
+    else if (node.kind === 'constraintGroup') props.onContextMenu(ev, 'constraintGroup', node.groupId);
+    else if (node.kind === 'constraint') props.onContextMenu(ev, 'constraint', node.constraintId);
     // Group headers have no context menu (spec §5.5).
   };
 
@@ -644,6 +784,21 @@ function TreeRow(props: TreeRowProps) {
         />
       )}
       {node.kind === 'volume' && <VolumeRowContent node={node} volume={props.volumeById.get(node.volumeId)} />}
+      {node.kind === 'constraintGroup' && (
+        <ConstraintGroupRowContent
+          node={node}
+          enabled={enabled}
+          onToggleEnabled={props.onToggleEnabled}
+        />
+      )}
+      {node.kind === 'constraint' && (
+        <ConstraintRowContent
+          node={node}
+          constraint={props.constraintById.get(node.constraintId)}
+          enabled={enabled}
+          onToggleEnabled={props.onToggleEnabled}
+        />
+      )}
     </li>
   );
 }
@@ -662,7 +817,7 @@ interface CameraRowContentProps {
   rate: number | undefined;
   flagged: boolean;
   enabled: boolean;
-  onToggleEnabled(kind: 'camera' | 'section' | 'zone', id: string): void;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
 }
 
 function CameraRowContent({ node, rate, flagged, enabled, onToggleEnabled }: CameraRowContentProps) {
@@ -709,7 +864,7 @@ function SectionRowContent({
   node: Extract<SceneNode, { kind: 'section' }>;
   section: Section | undefined;
   cellGrid: SectionCellGrid | null;
-  onToggleEnabled(kind: 'camera' | 'section' | 'zone', id: string): void;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
   if (!section) return null;
   const badge =
@@ -742,7 +897,7 @@ function ZoneRowContent({
   node: Extract<SceneNode, { kind: 'zone' }>;
   summary: ZoneSummary | null;
   enabled: boolean;
-  onToggleEnabled(kind: 'camera' | 'section' | 'zone', id: string): void;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
   return (
     <>
@@ -781,6 +936,87 @@ function VolumeRowContent({
       <span className="rate">
         {sx.toFixed(1)} × {sy.toFixed(1)} × {sz.toFixed(1)} m
       </span>
+    </>
+  );
+}
+
+/**
+ * A constraint-group row (`camera_placement.md` §7): its enabled checkbox and
+ * its constraint count.
+ *
+ * **No search result rides along.** An earlier design appended the selected
+ * camera count and that layout's reachable rate, which made sense while the tool
+ * lived in the sidebar beside the visible tree. Placement is a mode now (§5):
+ * the hierarchy is hidden for a session's whole life and no result outlives it,
+ * so that badge could never be seen — and a rate that *did* survive would be a
+ * stale aim-free upper bound (§1.3) sitting in the tree with nothing to
+ * invalidate it, which is the one misreading this feature can cause.
+ */
+function ConstraintGroupRowContent({
+  node,
+  enabled,
+  onToggleEnabled,
+}: {
+  node: Extract<SceneNode, { kind: 'constraintGroup' }>;
+  enabled: boolean;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
+}) {
+  return (
+    <>
+      <input
+        type="checkbox"
+        className="tree-row-toggle"
+        checked={enabled}
+        title={enabled ? 'Disable group' : 'Enable group'}
+        aria-label={enabled ? 'Disable group' : 'Enable group'}
+        onClick={(e) => e.stopPropagation()}
+        onChange={() => onToggleEnabled('constraintGroup', node.groupId)}
+      />
+      <span className="dot constraint-dot" />
+      <span className="label">{node.label}</span>
+      <span className="count">{node.childIds.length}</span>
+    </>
+  );
+}
+
+/**
+ * A constraint row (`camera_placement.md` §7): its enabled checkbox, its kind,
+ * and its primitive measure — the weight its share of the pool is drawn by
+ * (§4.1), so the row explains why one constraint gets more samples than another.
+ */
+function ConstraintRowContent({
+  node,
+  constraint,
+  enabled,
+  onToggleEnabled,
+}: {
+  node: Extract<SceneNode, { kind: 'constraint' }>;
+  constraint: CameraConstraint | undefined;
+  enabled: boolean;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
+}) {
+  if (!constraint) return null;
+  const measure = primitiveMeasure(constraint);
+  const detail =
+    constraint.kind === 'point'
+      ? 'point'
+      : constraint.kind === 'polyline'
+        ? `polyline · ${measure.toFixed(1)} m`
+        : `plane · ${measure.toFixed(0)} m²`;
+  return (
+    <>
+      <input
+        type="checkbox"
+        className="tree-row-toggle"
+        checked={enabled}
+        title={enabled ? 'Disable constraint' : 'Enable constraint'}
+        aria-label={enabled ? 'Disable constraint' : 'Enable constraint'}
+        onClick={(e) => e.stopPropagation()}
+        onChange={() => onToggleEnabled('constraint', node.constraintId)}
+      />
+      <span className="dot constraint-dot" />
+      <span className="label">{node.label}</span>
+      <span className="rate">{detail}</span>
     </>
   );
 }

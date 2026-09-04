@@ -55,3 +55,7 @@ draw call, order-independent.
 - No state library (Redux/Zustand/…) — state is React hooks, pushed to the scene as a `SceneView` snapshot.
 - No component/CSS framework — styling is hand-written in `index.css`.
 - No test framework beyond `node:test`.
+- No numeric or optimization library. The aim optimizer's search is an exhaustive scan
+  over a mip pyramid and placement's is a seeded Monte Carlo over cached voxel sets —
+  both a few dozen lines of plain arithmetic, and both deliberately simple enough that
+  the objective is readable in one function (see DECISIONS.md).

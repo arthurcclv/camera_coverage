@@ -89,6 +89,13 @@ export interface Zone {
 }
 ```
 
+**A sampling volume is not a camera constraint**, though the two look alike in the
+hierarchy: a volume is an **analysis input** — it changes which voxels are counted, and
+every coverage number in the app depends on it — while a camera constraint
+(`camera_placement.md` §1.1) is a **generator** that changes no number and only produces
+cameras. A volume is also a plain box; a constraint is a point, polyline, or plane dilated
+by a tolerance.
+
 A volume is an OBB: a unit cube scaled by `size`, rotated by `rotation`, translated
 to `position` (axis-aligned when `rotation` is identity). `{position, rotation,
 size}` maps 1:1 to a Three.js object's `position`/`quaternion`/`scale`, so
@@ -543,7 +550,9 @@ the returned `SamplingStats`.
   round-trips** (§7.3; default `true` when absent); each serialized volume carries
   `{ id, zoneId, position, rotation, size }`. Bump **`formatVersion` to `2`**; the
   reader **accepts 1 and 2** (a v1 file → empty zones/volumes, `useZones` false);
-  version **> 2** is rejected (`spec.md` §14.8). Sections serialize their per-entity
+  version **> 2** was rejected. (The format has since moved to **3** for camera
+  constraints, `camera_placement.md` §9; `spec.md` §14.3 carries the current rule and the
+  reader accepts 1, 2, and 3. Zones and volumes are unchanged by that bump.) Sections serialize their per-entity
   flag as **`enabled`** too (renamed from the legacy `visible`, which the reader
   still accepts for back-compat). Rotations quaternions `[x,y,z,w]`, meters, Y-up.
 - **Validation (`spec.md` §14.8).** Zone ids and volume ids unique within their

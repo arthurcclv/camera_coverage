@@ -23,4 +23,15 @@ export const RenderOrder = {
   coverageFog: 2,
   /** Sampling-volume translucent fill — drawn last, tints over the fog. */
   volumeFill: 3,
+  /**
+   * The armed draw mode's draft: its vertices and its segments
+   * (`camera_placement.md` §6.2). Above everything, and paired with
+   * `depthTest: false` on those materials.
+   *
+   * Every draft vertex is a point **on** a surface by construction — the hit test
+   * puts it there — so a depth-tested line through them is coplanar with the wall
+   * being drawn on and z-fights it away. The draft is what the user is doing right
+   * now; it has to be visible even where it is buried.
+   */
+  draftOverlay: 4,
 } as const;

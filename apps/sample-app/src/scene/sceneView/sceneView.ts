@@ -37,11 +37,20 @@ import { CameraGizmoSet } from '../cameraGizmos.ts';
 import { ProbeGizmoSet } from '../probeGizmos.ts';
 import { SectionGizmoSet } from '../sectionGizmos.ts';
 import { SamplingVolumeGizmoSet } from '../samplingVolumeGizmos.ts';
+import { ConstraintGizmoSet, PlacementOverlay } from '../constraintGizmos.ts';
+import type { CameraConstraint } from '../../placement/region.ts';
 import { CoverageOverlay, type OverlayOptions } from '../coverageOverlay.ts';
 import { threeSpace, type TransformSpace } from '../transformSpace.ts';
 import { axisMapping, type ClipBand, type Section, type SectionCellGrid } from '../sectionHeatmap.ts';
 import { clipBandPlanes, setGeometryClippingPlanes, type GeometryBuild } from '../sceneGeometryBuild.ts';
-import { isClick, selectionAfterClick, type PointerPos, type Selection } from '../viewportSelection.ts';
+import {
+  isClick,
+  selectionAfterClick,
+  vertexAfterClick,
+  type PointerPos,
+  type Selection,
+} from '../viewportSelection.ts';
+import { drawClickAction } from '../polylineDraw.ts';
 import type { SamplingVolume } from '../samplingVolumes.ts';
 import type { SceneCamera } from '../../cameras/camera.ts';
 import type { Probe } from '../probeVisibility.ts';
@@ -94,6 +103,31 @@ export interface SceneViewState {
    * click places instead of selecting, and the TransformControls gizmo detaches.
    */
   placing: boolean;
+  /** Camera constraints (`camera_placement.md` §6.1). */
+  constraints: readonly CameraConstraint[];
+  /** The selected polyline's vertex sub-selection, or null (§6.1). */
+  selectedVertex: number | null;
+  /** Constraints layer visibility — gizmos and the pool scatter (`spec.md` §2.4). */
+  constraintsVisible: boolean;
+  /** The built pool's positions, shaded by their own reachable count (§5.2). */
+  poolPositions: readonly { position: Vec3; count: number }[];
+  /** Pool indices the previewed layout uses (§5.2). */
+  chosenPoolIndices: ReadonlySet<number>;
+  /**
+   * Whether the polyline draw mode is armed (§6.2). Like `placing` it detaches
+   * the gizmo and consumes viewport clicks, but it appends instead of assigning
+   * and is not one-shot.
+   */
+  drawing: boolean;
+  /**
+   * The draft's **committed** vertices, drawn as dots (§6.2). Separate from
+   * `draftPolyline` because that one ends at the cursor, which is not a vertex.
+   */
+  draftVertices: readonly Vec3[];
+  /** The in-progress polyline, including its rubber-band cursor (§6.2). */
+  draftPolyline: readonly Vec3[];
+  /** Where each camera the Apply plan moves stands today → where it goes (§5.2). */
+  placementMoves: readonly { from: Vec3; to: Vec3 }[];
 }
 
 type SelectionKind = NonNullable<Selection>['kind'];
@@ -101,6 +135,7 @@ type SelectionKind = NonNullable<Selection>['kind'];
 const camId = (s: Selection): string | null => (s?.kind === 'camera' ? s.id : null);
 const probeId = (s: Selection): string | null => (s?.kind === 'probe' ? s.id : null);
 const volumeId = (s: Selection): string | null => (s?.kind === 'volume' ? s.id : null);
+const constraintId = (s: Selection): string | null => (s?.kind === 'constraint' ? s.id : null);
 
 export class SceneView {
   private readonly viewport: Viewport;
@@ -108,10 +143,15 @@ export class SceneView {
   private readonly probeGizmos: ProbeGizmoSet;
   private readonly sectionGizmos: SectionGizmoSet;
   private readonly volumeGizmos: SamplingVolumeGizmoSet;
+  private readonly constraintGizmos: ConstraintGizmoSet;
+  private readonly placementOverlay: PlacementOverlay;
   private readonly overlay: CoverageOverlay;
 
   /** The viewport-pickable sets, arbitrated together on a click (spec §5.2, §12.4). */
-  private readonly pickableSets: ReadonlyArray<{ kind: 'camera' | 'probe' | 'volume'; set: GizmoPicker }>;
+  private readonly pickableSets: ReadonlyArray<{
+    kind: 'camera' | 'probe' | 'volume' | 'constraint';
+    set: GizmoPicker;
+  }>;
   /**
    * Every set that carries a TransformControls attach target, keyed by selection
    * kind. A zone is a container with no viewport body, so it has no entry here and
@@ -124,9 +164,15 @@ export class SceneView {
   private readonly down: PointerPos = { x: 0, y: 0 };
 
   private prev: SceneViewState | null = null;
-  private selectHandler: ((selection: Selection) => void) | null = null;
+  private selectHandler: ((selection: Selection, vertex: number | null) => void) | null = null;
   private transformHandler: ((change: TransformChange) => void) | null = null;
   private placeHandler: ((point: Vec3) => void) | null = null;
+  /** A draw-mode click: one appended polyline vertex (§6.2). */
+  private drawHandler: ((point: Vec3) => void) | null = null;
+  /** A draw-mode hover: where the rubber band ends, or null on a miss (§6.2). */
+  private drawHoverHandler: ((point: Vec3 | null) => void) | null = null;
+  /** A draw-mode double-click: commit what is drawn (§6.2). */
+  private drawCommitHandler: (() => void) | null = null;
 
   /**
    * In-flight aim drag in the Selected view (spec §2.4.1, §5.2). The orientation
@@ -149,6 +195,8 @@ export class SceneView {
     this.probeGizmos = new ProbeGizmoSet();
     this.sectionGizmos = new SectionGizmoSet();
     this.volumeGizmos = new SamplingVolumeGizmoSet();
+    this.constraintGizmos = new ConstraintGizmoSet();
+    this.placementOverlay = new PlacementOverlay();
     this.overlay = new CoverageOverlay();
 
     // The geometry group itself is added by the first `sync` (room swap path), so
@@ -157,6 +205,8 @@ export class SceneView {
     viewport.scene.add(this.probeGizmos.group);
     viewport.scene.add(this.sectionGizmos.group);
     viewport.scene.add(this.volumeGizmos.group);
+    viewport.scene.add(this.constraintGizmos.group);
+    viewport.scene.add(this.placementOverlay.group);
     viewport.scene.add(this.overlay.object);
 
     // A viewport click raycasts each pickable set and the nearest hit wins
@@ -167,12 +217,14 @@ export class SceneView {
       { kind: 'camera', set: this.gizmos },
       { kind: 'probe', set: this.probeGizmos },
       { kind: 'volume', set: this.volumeGizmos },
+      { kind: 'constraint', set: this.constraintGizmos },
     ];
     this.attachableSets = {
       camera: this.gizmos,
       probe: this.probeGizmos,
       section: this.sectionGizmos,
       volume: this.volumeGizmos,
+      constraint: this.constraintGizmos,
     };
 
     // A genuine click selects the picked gizmo (or deselects on a miss); the click
@@ -183,7 +235,14 @@ export class SceneView {
       this.down.y = ev.clientY;
       this.beginAim(ev);
     };
-    this.onPointerMove = (ev) => this.moveAim(ev);
+    this.onPointerMove = (ev) => {
+      // While drawing, the pointer drives the rubber band rather than an aim.
+      if (this.prev?.drawing) {
+        this.hoverDraw(ev);
+        return;
+      }
+      this.moveAim(ev);
+    };
     this.onPointerUp = (ev) => this.endAim(ev);
     this.onClick = (ev) => {
       // An armed "Place on surface" click is consumed for placement (spec §2.4.2).
@@ -192,6 +251,16 @@ export class SceneView {
       // or deselects.
       if (this.prev?.placing) {
         this.placeFromClick(ev);
+        return;
+      }
+      // An armed draw click appends a vertex instead (`camera_placement.md`
+      // §6.2). Same precedence as placement, and for the same reasons.
+      if (this.prev?.drawing) {
+        // Append, or commit on the second click of a double-click — the rule is
+        // `drawClickAction`'s (§6.2), including the click-vs-drag threshold.
+        const action = drawClickAction(ev.detail, this.down, { x: ev.clientX, y: ev.clientY });
+        if (action === 'commit') this.drawCommitHandler?.();
+        else if (action === 'append') this.drawFromClick(ev);
         return;
       }
       // Viewport clicks change nothing in the Selected view: no picking, and no
@@ -208,8 +277,14 @@ export class SceneView {
         if (hit) candidates.push({ selection: { kind, id: hit.id }, distance: hit.distance });
       }
       const hit = nearestHit(candidates);
-      const next = selectionAfterClick(this.prev?.selection ?? null, hit, this.down, { x: ev.clientX, y: ev.clientY });
-      this.selectHandler?.(next);
+      const up = { x: ev.clientX, y: ev.clientY };
+      const next = selectionAfterClick(this.prev?.selection ?? null, hit, this.down, up);
+      // A click that landed on a polyline's vertex handle selects that vertex as
+      // well (`camera_placement.md` §6.1). The handles are part of the pickable
+      // body, so the constraint above is already selected by the same hit; this
+      // resolves *which* handle, from the ray the pick just used.
+      const picked = hit?.kind === 'constraint' ? this.constraintGizmos.pickVertex(this.raycaster, hit.id) : null;
+      this.selectHandler?.(next, vertexAfterClick(this.prev?.selectedVertex ?? null, picked, this.down, up));
     };
     this.onObjectChange = () => this.emitTransform();
 
@@ -239,8 +314,16 @@ export class SceneView {
     return this.viewport.renderBackend;
   }
 
-  /** Register the callback for a resolved viewport selection change (spec §5.2). */
-  onSelect(handler: (selection: Selection) => void): void {
+  /**
+   * Register the callback for a resolved viewport selection change (spec §5.2).
+   *
+   * The second argument is the polyline **vertex** the click resolved to
+   * (`camera_placement.md` §6.1): the handle the ray hit, or null. It rides along
+   * with the selection because one click decides both — a handle hit selects the
+   * constraint *and* the vertex — and two callbacks would let App apply half of
+   * that decision.
+   */
+  onSelect(handler: (selection: Selection, vertex: number | null) => void): void {
     this.selectHandler = handler;
   }
 
@@ -256,6 +339,25 @@ export class SceneView {
    */
   onPlace(handler: (point: Vec3) => void): void {
     this.placeHandler = handler;
+  }
+
+  /** Register the callback for one appended draw-mode vertex (§6.2). */
+  onDraw(handler: (point: Vec3) => void): void {
+    this.drawHandler = handler;
+  }
+
+  /** Register the callback for the hovered rubber-band point, or a miss (§6.2). */
+  onDrawHover(handler: (point: Vec3 | null) => void): void {
+    this.drawHoverHandler = handler;
+  }
+
+  /**
+   * Register the callback for a double-click commit (§6.2). The keyboard's
+   * **Enter** commit is App's own — it never reaches the viewport — so this is
+   * the pointer half of the same decision.
+   */
+  onDrawCommit(handler: () => void): void {
+    this.drawCommitHandler = handler;
   }
 
   /** Empty the coverage overlay outright, with no run following (spec §14.4). */
@@ -332,6 +434,31 @@ export class SceneView {
       this.volumeGizmos.update(next.volumes, volumeId(next.selection), next.enabledZoneIds);
     }
 
+    // --- constraint gizmos (`camera_placement.md` §6.1): [constraints,
+    // selectedConstraintId, selectedVertex] -------------------------------------
+    if (
+      !prev ||
+      prev.constraints !== next.constraints ||
+      constraintId(prev.selection) !== constraintId(next.selection) ||
+      prev.selectedVertex !== next.selectedVertex
+    ) {
+      this.constraintGizmos.update(next.constraints, constraintId(next.selection), next.selectedVertex);
+    }
+
+    // --- pool scatter + draft polyline (`camera_placement.md` §5.2, §6.2) ------
+    if (!prev || prev.poolPositions !== next.poolPositions || prev.chosenPoolIndices !== next.chosenPoolIndices) {
+      this.placementOverlay.setPool(next.poolPositions, next.chosenPoolIndices);
+    }
+    if (!prev || prev.draftPolyline !== next.draftPolyline) {
+      this.placementOverlay.setDraft(next.draftPolyline);
+    }
+    if (!prev || prev.draftVertices !== next.draftVertices) {
+      this.placementOverlay.setDraftVertices(next.draftVertices);
+    }
+    if (!prev || prev.placementMoves !== next.placementMoves) {
+      this.placementOverlay.setMoves(next.placementMoves);
+    }
+
     // --- overlay options (spec §9) ---------------------------------------------
     if (!prev || prev.overlayOptions !== next.overlayOptions) {
       this.overlay.setOptions(next.overlayOptions);
@@ -340,8 +467,16 @@ export class SceneView {
     // --- TransformControls attach per selection kind (spec §12.4, §13.8), with
     // `activeView` in the diff because the Selected view detaches (§2.4.1) and
     // `placing` because an armed placement tool detaches too (§2.4.2) -----------
-    if (!prev || prev.selection !== next.selection || prev.activeView !== next.activeView || prev.placing !== next.placing) {
-      this.attachForSelection(next.selection, next.activeView, next.placing);
+    if (
+      !prev ||
+      prev.selection !== next.selection ||
+      prev.activeView !== next.activeView ||
+      prev.placing !== next.placing ||
+      prev.drawing !== next.drawing ||
+      prev.selectedVertex !== next.selectedVertex ||
+      prev.constraints !== next.constraints
+    ) {
+      this.attachForSelection(next);
     }
 
     // --- TransformControls mode (spec §12.4, §13.8): [transformMode, selection] -
@@ -362,6 +497,13 @@ export class SceneView {
     // --- zone (sampling-volume) layer visibility (spec §2.4) -------------------
     if (!prev || prev.zonesVisible !== next.zonesVisible) {
       this.volumeGizmos.group.visible = next.zonesVisible;
+    }
+
+    // --- constraints layer visibility (spec §2.4): gizmos and the pool scatter
+    // together, since both are the placement tool's picture ---------------------
+    if (!prev || prev.constraintsVisible !== next.constraintsVisible) {
+      this.constraintGizmos.group.visible = next.constraintsVisible;
+      this.placementOverlay.setVisible(next.constraintsVisible);
     }
 
     // --- Selected view source (spec §2.4.1): the selected camera's pose + lens.
@@ -405,6 +547,8 @@ export class SceneView {
     this.probeGizmos.dispose();
     this.sectionGizmos.dispose();
     this.volumeGizmos.dispose();
+    this.constraintGizmos.dispose();
+    this.placementOverlay.dispose();
     this.viewport.dispose();
   }
 
@@ -426,6 +570,30 @@ export class SceneView {
    * nothing at all, which is what leaves the tool armed for another try: App only
    * disarms on a delivered point.
    */
+  /**
+   * An armed draw click appends one vertex (§6.2), through the same
+   * click-vs-drag threshold and clip-aware surface hit as placement — a click
+   * that concludes an orbit drag appends nothing.
+   */
+  /** The click-vs-drag threshold was already applied by `drawClickAction` (§6.2). */
+  private drawFromClick(ev: MouseEvent): void {
+    const room = this.prev?.room;
+    if (!room) return;
+    this.setRayFromEvent(ev);
+    const point = surfaceHit(this.raycaster.intersectObject(room.group, true), this.prev?.clipBand ?? null);
+    if (point) this.drawHandler?.(point);
+  }
+
+  /** Track the hovered surface point so the rubber band follows the cursor (§6.2). */
+  private hoverDraw(ev: PointerEvent): void {
+    const room = this.prev?.room;
+    if (!room) return;
+    this.setRayFromEvent(ev as unknown as MouseEvent);
+    this.drawHoverHandler?.(
+      surfaceHit(this.raycaster.intersectObject(room.group, true), this.prev?.clipBand ?? null),
+    );
+  }
+
   private placeFromClick(ev: MouseEvent): void {
     if (!isClick(this.down, { x: ev.clientX, y: ev.clientY })) return;
     const room = this.prev?.room;
@@ -536,6 +704,26 @@ export class SceneView {
       if (mid === undefined || centerA === undefined || centerB === undefined) return;
       const bounds = sectionBoundsFromCenters(current, { mid, centerA, centerB });
       this.transformHandler?.({ kind: 'section', id: sel.id, ...bounds });
+    } else if (sel.kind === 'constraint') {
+      const constraint = this.prev?.constraints.find((c) => c.id === sel.id);
+      if (!constraint) return;
+      const vertex = this.prev?.selectedVertex ?? null;
+      // A polyline has no whole-constraint transform: the gizmo is attached to
+      // one vertex handle, so the drag reads back as that vertex (§6.1, §6.2).
+      if (constraint.kind === 'polyline') {
+        if (vertex === null) return;
+        const position = this.constraintGizmos.readVertex(sel.id, vertex);
+        if (!position) return;
+        this.transformHandler?.({ kind: 'constraintVertex', id: sel.id, vertex, position });
+        return;
+      }
+      const t = this.constraintGizmos.readTransform(sel.id);
+      if (!t) return;
+      this.transformHandler?.(
+        constraint.kind === 'plane'
+          ? { kind: 'constraint', id: sel.id, position: t.position, rotation: t.rotation, size: t.size }
+          : { kind: 'constraint', id: sel.id, position: t.position },
+      );
     }
   }
 
@@ -544,14 +732,32 @@ export class SceneView {
    * §12.4, §13.8; `sampling_volumes.md` §5). A zone is a container with no
    * viewport body, so selecting one detaches.
    */
-  private attachForSelection(selection: Selection, activeView: ViewId, placing: boolean): void {
+  private attachForSelection(state: SceneViewState): void {
+    const { selection, activeView, placing, drawing } = state;
     // The Selected view shows no gizmo: it would be attached to the very camera
     // being rendered through, so its handles would surround the viewer (§2.4.1).
-    // An armed placement tool detaches too, so the whole viewport is clickable
-    // surface with no dead zone around the selected entity (§2.4.2).
-    if (activeView === 'camera' || placing) {
+    // An armed placement or draw tool detaches too, so the whole viewport is
+    // clickable surface with no dead zone around the selected entity (§2.4.2,
+    // `camera_placement.md` §6.2).
+    if (activeView === 'camera' || placing || drawing) {
       this.viewport.transformControls.detach();
       return;
+    }
+    // A polyline has no whole-constraint transform: the gizmo goes on the
+    // selected vertex's handle, which §6.1 always resolves for a polyline — the
+    // null branch is the guard for a vertex that has since been deleted
+    // (`camera_placement.md` §6.1).
+    if (selection?.kind === 'constraint') {
+      const constraint = state.constraints.find((c) => c.id === selection.id);
+      if (constraint?.kind === 'polyline') {
+        const target =
+          state.selectedVertex === null
+            ? undefined
+            : this.constraintGizmos.attachTargetForVertex(selection.id, state.selectedVertex);
+        if (target) this.viewport.transformControls.attach(target);
+        else this.viewport.transformControls.detach();
+        return;
+      }
     }
     const target = selection ? this.attachableSets[selection.kind]?.getAttachTarget(selection.id) : undefined;
     if (target) this.viewport.transformControls.attach(target);

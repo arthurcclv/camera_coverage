@@ -3,7 +3,9 @@
 Product vision, goals, and design principles for the demo app. The authoritative
 behavioral definition is [`../specs/spec.md`](../specs/spec.md) (with volumetric
 rendering detailed in [`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md)
-and the region-of-interest tool in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md));
+the region-of-interest tool in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md),
+the aim optimizer in [`../specs/aim_optimization.md`](../specs/aim_optimization.md), and
+camera placement in [`../specs/camera_placement.md`](../specs/camera_placement.md));
 this file is the plain-language orientation.
 
 ## Vision
@@ -34,6 +36,18 @@ result. It is a **readable reference for SDK consumers**, not a shipping product
   you can hover to swing the camera live; across the scene it runs a sequential-greedy
   pass and offers the result as a set of proposals to Apply or Discard. Nothing is
   written to the scene until Apply.
+- **Say where cameras *may* go, and let the app pick** — draw the mount regions a site
+  actually offers (a bracket, a gantry rail, a wall, each with a tolerance) and search
+  them for a small set of positions that together see as much as possible
+  (`specs/camera_placement.md`). The answer comes as a **score-vs-count curve**, because
+  the interesting question is not "where do 10 cameras go" but "how many do I need" —
+  the tool marks the fewest that get within a point of the best it found, and the user
+  moves the slider from there. Placement chooses positions only; the aim optimizer above
+  then points them, and the stats panel reports what they actually cover. It is the app's
+  one **mode**: the columns stay where they are, but everything in them gives way to the
+  tool — candidate positions and strategy on the left, the curve and the plan on the right —
+  so the target group cannot drift, the exit cannot be navigated away from, and no geometry
+  can be edited under a live build (see DECISIONS.md).
 - **Drop probes** — points whose exact per-camera visibility is read back from the
   most recent run and drawn as green sightlines to the cameras that see them.
 - Add **sections** — axis-aligned slabs aggregated into a 2D coverage heatmap.
@@ -74,7 +88,14 @@ controls/stats. No mobile, no persistence.
    Selection, transform-space mapping, panel split, tree derivation, overlay
    encoding, probe voxel lookup, and volumetric slab/chord math are pure
    functions with unit tests; React/Three are the untested glue.
-5. **Probes read retained results, not fresh raycasts.** Per-point visibility is
+5. **Every expensive measurement is cached against what it depends on, not re-taken.**
+   The aim optimizer captures a mount point's reachable set once and then scores
+   orientations for free; placement builds a *pool* of mount points once and then
+   scores whole layouts for free. Both work because a reachable set does not depend on
+   where cameras point or on how many exist — so the cache's validity is a short, statable
+   list (geometry, resolution, counted set, range), and camera edits are deliberately not
+   on it.
+6. **Probes read retained results, not fresh raycasts.** Per-point visibility is
    decoded from the masks of the *most recent completed run*, against a snapshot
    of that run's enabled-camera list — so it can go stale, and the UI says so.
 

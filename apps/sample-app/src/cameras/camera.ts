@@ -30,6 +30,17 @@ export interface SceneCamera extends CameraConfig {
    * that are *good* and still must not change.
    */
   aimLocked?: boolean;
+  /**
+   * The camera constraint this camera is bound to (`camera_placement.md` §6.3),
+   * or absent when unbound.
+   *
+   * Two things at once: **provenance** for a camera the placement tool created,
+   * and a **clamp** — every write of a bound camera's position is projected into
+   * that constraint's region, so a reviewed layout cannot drift into places
+   * where no mount exists. Deleting the constraint unbinds the camera; the
+   * camera and its position stay.
+   */
+  constraintId?: string;
 }
 
 /** The default `Camera N` label derived from a `cam-N` id (§5.6). */
@@ -47,10 +58,10 @@ export function cameraLabel(camera: SceneCamera): string {
   return trimmed.length > 0 ? trimmed : defaultCameraName(camera.id);
 }
 
-/** Strip the app-only `name`/`aimLocked`, yielding the plain SDK `CameraConfig` (spec §8). */
+/** Strip the app-only fields, yielding the plain SDK `CameraConfig` (spec §8). */
 export function toCameraConfig(camera: SceneCamera): CameraConfig {
   // `enabled` is *kept*: since spec §5.4 the engine needs it to hold the camera's
-  // mask-bit slot open. `name` and `aimLocked` are app-only.
-  const { name: _name, aimLocked: _aimLocked, ...config } = camera;
+  // mask-bit slot open. `name`, `aimLocked`, and `constraintId` are app-only.
+  const { name: _name, aimLocked: _aimLocked, constraintId: _constraintId, ...config } = camera;
   return config;
 }

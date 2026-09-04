@@ -253,6 +253,12 @@ idle.
 (128). Above that the entry points are disabled with the message
 `Aim optimization needs 6 spare camera slots; the scene uses N of 128.`
 
+**The placement tool claims the same six ids** (`camera_placement.md` §3.4), so an aim
+session and a placement session are **mutually exclusive** and each disables the other's
+entry points while open. Sharing them is deliberate: a feature that wanted its own six
+would double the spare-slot requirement of every scene, for two tools a user never runs
+simultaneously.
+
 **Pending sampling.** A capture inherits the engine's validity mask rather than setting it,
 so a session is also blocked while a sampling edit awaits a run (§2.2).
 
@@ -713,9 +719,15 @@ A `COMPUTE_CANCELED` from the user's own Cancel is not an error and is surfaced 
 
 ## 13. Out of scope / future
 
-- Optimizing **position** as well as orientation, and optimizing FOV or range.
+- **Position placement shipped** — choosing *where* cameras go, from user-declared mount
+  regions, is [`camera_placement.md`](./camera_placement.md). It is a separate feature
+  rather than an extension of this one because its objective is deliberately different:
+  every voxel worth 1, other cameras ignored, unioned over a layout (that spec's §1.2).
+  The two compose in one direction — place, then aim — and **share the six capture slots**
+  of §3.1, so only one session can be open at a time. Optimizing **FOV or range** remains
+  out of scope for both.
 - Any objective term for image quality — pixels-per-metre, incident angle, lighting.
-- Adding or removing cameras (placement, not aiming).
+- **Removing** or relocating existing cameras. `camera_placement.md` only adds.
 - Per-camera angular limits beyond the `pitch ∈ [−89, 89]` clamp and the lock flag.
 - Optimizing several cameras simultaneously (joint rather than sequential-greedy), and the
   surrogate-model optimizers — Bayesian optimization, CMA-ES, differential evolution — that

@@ -1,7 +1,7 @@
 /**
  * Viewport top-right layer-visibility dropdown (spec §2.4). A single eye icon
  * button opens a checklist of the viewport-only layers — Coverage, Sections,
- * Cameras, Zones. Toggling a checkbox flips that layer immediately and leaves
+ * Cameras, Zones, Constraints. Toggling a checkbox flips that layer immediately and leaves
  * the menu open so several can be changed in one pass; the menu closes on an
  * outside click, Escape, or re-clicking the eye button. Rows are always present
  * regardless of scene contents (toggling an empty layer is a no-op).
@@ -13,10 +13,13 @@ export interface ViewportLayerMenuProps {
   sectionsVisible: boolean;
   camerasVisible: boolean;
   zonesVisible: boolean;
+  /** Constraint gizmos + the placement pool scatter (`camera_placement.md` §5.2, §6.1). */
+  constraintsVisible: boolean;
   onToggleCoverage(): void;
   onToggleSections(): void;
   onToggleCameras(): void;
   onToggleZones(): void;
+  onToggleConstraints(): void;
 }
 
 // Layer glyphs (spec §2.4). Coverage = stacked planes (the volumetric overlay),
@@ -48,6 +51,16 @@ function CameraIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polygon points="23 7 16 12 23 17 23 7" />
       <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+    </svg>
+  );
+}
+
+// Constraints = a rail with a mount point on it (`camera_placement.md` §6.1).
+function ConstraintsIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 18 10 11 21 11" />
+      <circle cx="10" cy="11" r="2.5" />
     </svg>
   );
 }
@@ -122,6 +135,12 @@ export function ViewportLayerMenu(props: ViewportLayerMenuProps) {
           <LayerRow label="Sections" icon={<GridIcon />} checked={props.sectionsVisible} onToggle={props.onToggleSections} />
           <LayerRow label="Cameras" icon={<CameraIcon />} checked={props.camerasVisible} onToggle={props.onToggleCameras} />
           <LayerRow label="Zones" icon={<ZonesIcon />} checked={props.zonesVisible} onToggle={props.onToggleZones} />
+          <LayerRow
+            label="Constraints"
+            icon={<ConstraintsIcon />}
+            checked={props.constraintsVisible}
+            onToggle={props.onToggleConstraints}
+          />
         </ul>
       )}
     </div>

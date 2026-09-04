@@ -6,6 +6,687 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Placement *builds* its pool; the aim optimizer still *captures*
+
+Conventions in [`CONVENTIONS.md`](CONVENTIONS.md); behavior in
+[`../specs/camera_placement.md`](../specs/camera_placement.md) §2.1, §4.3.
+
+**Why.** Inside the placement tool the engine-facing word was *capture* and the user-facing
+word was *Build* — the panel's button read **Build**, its progress line read
+`capturing 43/200`, and its confirm asked to discard a *captured* pool. Two names for one
+act, split across the seam where the user meets it, so the message a user reads and the
+function they triggered shared no vocabulary.
+
+**Decision.** Placement says **build** throughout: the unit is a **build step** — one
+`compute()` over the six-camera rig at one position — the loop over a whole pool is a
+**build**, and the result is a **built pool**. The noun form matters: a bare `build` would
+read as the verb next to the app's existing `buildAggregateSpec`, so the per-step
+identifiers carry the step (`buildStepSpec`, `buildStepCameras`, `classifyBuildStep`,
+`BuildStepOutcome`), and the pool loop is `buildPool()`.
+
+**Scope.** The aim optimizer keeps *capture*, and so does the machinery the two features
+**share** — `optimize/cubeRig.ts`'s `captureRig`/`CAPTURE_SLOTS`, the `opt-cap-0…5` slot
+ids, and `optimize/session.ts`'s capture descriptor. Renaming those would have pushed the
+rename through a feature whose own word fits it better: the optimizer captures a panorama,
+it does not build a pool.
+
+**Trade-off.** The two features now name the same six slots' work differently, and
+placement prose has to say "a build step places the capture rig". That seam is real, but it
+falls between features rather than between a button and the code behind it, which is where
+it was costing the user.
+
+---
+
+## The pool split rounds, and settles its remainder against the largest weight
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §4.1.
+
+**Why.** `poolSplit` truncated (`Math.floor`) where §4.1 says `round`, and took the
+overshoot the floor-of-1 creates off the *smallest* weight. Both were invisible in the
+tests, which asserted only that the shares summed to `poolSize` and came out in weight
+order — true of many wrong splits. On the spec's own worked example (weights 1 : 60 : 2400,
+`poolSize = 200`) it produced 1 : 4 : 195 where the spec's table says 1 : 5 : 194: the rail
+was quietly one position short, and the remainder loop never even ran, because truncated
+shares had already reached 200.
+
+**Decision.** Round, and treat the remainder as **signed**, settled against the largest
+weights in both directions. Handing out a shortfall and taking back an overshoot are the
+same rule, and taking from the largest is what makes the arithmetic land on the spec's
+example: the floor inflated the post above its fair share, and the wall is the constraint
+that can absorb that without losing a position that matters. The example is now asserted as
+a `deepEqual` rather than as a sum and an ordering — a worked example in a spec is a test
+case, and pinning it loosely is what let the bug through.
+
+---
+
+## Per-kind dispatch is exhaustive by construction, not by a trailing `else`
+
+Conventions in [`CONVENTIONS.md`](CONVENTIONS.md).
+
+**Why.** `ui/entityMenu.ts` already records this bug once: an if/else chain ending in a bare
+`else` that assumed `volume` silently swallowed `constraint` and `constraintGroup` when the
+union grew. The convention was written, and then two more sites shipped with the same shape
+— the hierarchy's row click (bare `else` claiming `constraint`) and the reducer's
+`toggleEnabled` (a trailing `return` claiming `zone`). A rule that is only prose gets
+re-broken; the compiler has to be the one enforcing it.
+
+**Decision.** Every kind dispatch is a construct the compiler checks. `sceneTree.nodeSelection`
+maps `SceneNode` → `Selection` through a `{ [K in SceneNode['kind']]: … }` mapped type, so a
+new node kind fails to compile until it has a branch; the hierarchy row and `reorder`'s
+`entityIdOf` both route through it, which also removed a second copy of the per-kind
+id-unwrapping. `toggleEnabled` became a `switch` exhaustive per case. The cost is one
+indirection at each call site, and it buys a compile error in place of a row that silently
+does nothing.
+
+---
+
+## The camera template moves into the placement mode, and loses `aspect` and `near`
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §3.1.1, §5, §5.1.
+
+**Why.** The template lived in `ConstraintGroupPanel`, under a **Camera placement** heading
+it shared with the **Place cameras** button — the "one thought" argument. But that panel is
+unmounted for the mode's whole life, and none of the template is read until the mode is
+open. So the fields sat in the one place they could not be seen while they mattered, and the
+mode had to restate them read-only in the review column to say what it was about to bolt to
+the wall. A heading, a second thought in a panel whose one job is to get the user into the
+tool, and a read-only copy of an editable field, all to keep three inputs outside the tool
+that consumes them.
+
+**Decision.** The template is the mode's **third card**, `New camera defaults`, and the
+group panel is name + constraint count + button. The card is **last** in the column, under
+both buttons: `Name prefix`/`FOV`/`Range` are set once per group and then left alone, while
+`Size`/`Seed` and `Max cams`/`Trials` are what a session iterates on — leading with the
+settled card would push Build and Analyze down the column for the whole of every session.
+Having no button of its own is what lets it sit below two that do. The review column's
+read-only template summary is deleted along with `templateSummary()`; a read-only copy of an
+editable field on the same screen is a thing to keep in sync, not a thing to read.
+
+**And two fields are gone entirely.** `aspect` and `near` are now placement-wide constants
+from `DEFAULT_TEMPLATE`, off the `ConstraintGroup` altogether:
+
+- `aspect` provably cannot change a reachable set (the rig is six `aspect = 1` frusta) and
+  Apply never writes it onto an existing camera, so a per-group value could only ever reach
+  a *created* camera. A field that decides nothing about the search is not worth a row in
+  the mode.
+- `near` **is** a build-step input, which is the case for keeping it — and the case against.
+  It is in the pool's fingerprint, so every value that differs from the default silently
+  rebuilds the pool, minutes of GPU on the real site, for a difference no plot can show.
+  A metre-scale site has no reason to want anything else. Fixing it removes a way to spend
+  that by accident.
+
+Both remain editable on the placed `Camera`, which is where they were always the user's to
+tune. The scene file keeps `formatVersion: 3`: the writer omits the two keys and the reader
+reads past them without validating, so a file from either build loads in both to the same
+scene — they never fed anything a reader needs.
+
+---
+
+## The knee tolerance is a review control: it moves to the curve, and costs nothing
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §4.5, §5.2.
+
+**Why.** `Knee (pp)` sat in the *Strategy* card beside **Analyze**, and `epsilon` was in
+`analysisStamp`. But `epsilon` appears nowhere in the trial loop: §4.4 scores every prefix
+count regardless, and the knee is one scan of the finished curve. So a tolerance edit dimmed
+the curve, printed `Strategy changed — Analyze again`, and did nothing at all until the user
+spent `trials` trials recomputing a number already derivable from the plot on screen. It was
+the only field in the card whose press-cost was zero and whose stale-cost was not.
+
+**Decision.** Three kinds of field, sorted by *when they are read*, not by topic: the **draw
+inputs** (`poolSize`, `seed`) are read before the build step and live with **Build**; the
+**strategy** (`maxCount`, `trials`) is read during the trials and lives with **Analyze**; the
+**review policy** (`epsilon`) is read after them and lives in the review column, directly
+under the count slider and immediately below the ◉ it moves. `epsilon` leaves
+`analysisStamp`, `kneeOf` takes the **curve** rather than a live `AnalysisState`, and the knee
+is derived per render instead of stored — which is what makes the edit free.
+
+**The subtlety worth recording.** Deriving the knee means the *selected count* has to decide
+whether to follow it. Always following overrides a count the user dragged to; never following
+leaves the tolerance unable to pick one, which was its whole job. So the session stores
+`picked` + `countPinned` rather than a `selected` number, and `selectedCount` returns the live
+knee until the slider is touched. The next **Analyze** clears the pin, because an analysis is
+a new suggestion.
+
+Two labels were considered and rejected. `Knee (%)` matches the curve's own axis ticks but
+invites the *relative* reading — the drop is `top − epsilon·markedTotal/100`, absolute in the
+rate, not a fraction of `top`; they agree at a 94% ceiling and diverge at a low one, which is
+exactly the site where the number is being read carefully. Dropping the unit entirely was
+worse after the move, not better: under a `Count 8` slider, a bare `Knee` holding `1.0` reads
+as a camera count more strongly than it ever did under `Max cams 12`. So the label keeps
+`(pp)` and the row carries a tooltip that spells it out in words.
+
+---
+
+## `Seed` is a draw input: it lives beside `Size`, and rebuilds rather than extends
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §3.3.1, §5.1.
+
+**Why.** `Seed` sat in the *Strategy* card with `Max cams`, `Trials` and `Knee (pp)`, which
+read as a fourth knob on the search. It is not one. The seed offsets every constraint's
+Halton sub-sequence (§4.1), so it decides *which* positions get built — and it was in
+neither the pool's fingerprint nor `buildAction`. So editing it against a pool of 200 and
+raising `Size` to 260 read **Extend to 260**, appended 60 new-seed positions to 200 old-seed
+ones, and handed the analysis one pool drawn from two seeds. Nothing said so.
+
+**Decision.** The seed is a **draw input**, alongside `poolSize`, not part of the strategy:
+the panel puts the two together in *Candidate position pool*, above the Build that spends them,
+and `Strategy` keeps the three fields that re-run for free. `Pool` records the `seed` it was
+drawn from, and `buildAction` reads **Rebuild** on a mismatch whatever `Size` did, so an
+extend can never mix seeds.
+
+**The trade worth recording.** The obvious mechanism was to add the seed to
+`poolFingerprint`, which is one line. It was the wrong line: that fingerprint is also what
+`stalePool` compares, so a seed nudge would have dimmed the curve, disabled **Apply**, and
+printed `The scene changed; rebuild the pool.` about an edit that changed no scene —
+contradicting the rule recorded under *Build extends the pool; an edit marks the result
+stale* below, that a nudged `Seed` must not cost a good layout. Recording the seed *on the pool* buys the same guarantee with the right consequence:
+the result is marked stale (`analysisStamp` already carried the seed), the button re-labels,
+and no blocker fires.
+
+---
+
+## Overlay geometries are born with a `position` attribute
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §6.2 (the draft
+polyline) and §5.2 (the planned camera moves).
+
+**Why.** The draw mode's rubber-band line was rewritten three times and could not be seen
+once, while its vertex dots — same group, same render order, same frame — showed correctly.
+The data was right every time: the unit tests read the endpoint pairs straight out of the
+geometry and matched. The cause was upstream of the material and the buffer layout.
+`PlacementOverlay` is constructed once and added to the scene, but its draft and move lines
+are filled in on demand, so they were added carrying a bare `new THREE.BufferGeometry()`.
+The animation loop is already running by then, so three renders those objects while empty —
+and on that frame `RenderObject.getAttributes()` resolves the vertex buffers from
+`geometry.attributes` and caches them, an empty list plus an empty `attributesId` map.
+`needsGeometryUpdate` afterwards re-checks only the attributes named in that map, so a
+`position` attribute *added* later is invisible to it: the render object is never rebuilt,
+keeps a pipeline with no vertex buffer, and draws nothing for the rest of its life. No
+error, no warning, no wrong number. Two earlier suspects — `LineDashedMaterial`, then dashes
+in an over-allocated buffer cut down by `setDrawRange` — were both real problems in their own
+right and both replaced, which is why the fix kept not working: every rewrite sat on the same
+bare geometry.
+
+**Decision.** A geometry that reaches the scene before its data does starts with a
+placeholder `position` attribute — `PlacementOverlay.emptyLineGeometry`, two zero vertices —
+and its object starts `visible = false` until there is something to draw. That puts
+`position` in `attributesId`, so each later `setAttribute` is a change three detects and the
+render object is rebuilt. Every other line in the app (`probeGizmos`, `sectionGizmos`, the
+committed polyline) builds its geometry attributes-first and never hit this; the convention
+is written down in [CONVENTIONS.md](./CONVENTIONS.md) so the next lazily-filled overlay does
+not rediscover it.
+
+**The alternative** — build a fresh `BufferGeometry` per update and swap it onto the object —
+also works (`geometry.id` changing *is* detected) but disposes and reallocates a geometry on
+every pointer move, and leaves the same trap open for anything that keeps one geometry.
+
+---
+
+## A polyline is edited one vertex at a time, and the sub-selection carries its polyline
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §6.1, §6.2.
+
+**Why.** The first cut of the constraint panel listed every vertex as a `Vec3Field` row with
+its own insert/delete buttons. That reads fine on the 3-vertex rail of a demo room and falls
+apart on the real site (440 × 201 × 1120 m), where a rail runs to dozens of vertices: the
+one row the user actually wants is the one they are holding in the viewport, and it is the
+hardest row in a wall of numbers to find. Worse, the list *was* the only way to select a
+vertex — clicking a handle in the viewport did nothing, because `pickVertexAt` existed on
+`SceneView` and was called from nowhere.
+
+**Decision.** The panel shows the **selected vertex only** — a subhead naming which one of
+how many, its coordinates, and three actions: `+` (insert midway to the next vertex,
+disabled on the last), `−` (delete, disabled at two vertices), and **Extend** (always
+offered). Selection moves to the viewport, where clicking a vertex handle selects it and the
+constraint together, resolved in the same `onSelect` the ordinary pick uses. **Place on
+surface** widens to accept a vertex, the first target in that tool that is a sub-selection
+rather than an entity — a vertex *is* a point on a wall, so answering "put it there" twice
+in two ways would have been the odd choice.
+
+**A polyline always has exactly one vertex selected**, defaulting to its **last**. That
+removes the "no vertex" state from the panel, the gizmo, and the tool at once, and it makes
+delete need no follow-up write: the held index lands on whichever vertex took its place, and
+the clamp turns a deleted last vertex into the new last. The cost is that `+` starts
+disabled on a freshly selected polyline, which is the right trade — the end just drawn is
+what **Extend** grows.
+
+**The sub-selection is stored as `{ id, vertex }`, not a bare index.** "A vertex belongs to
+one constraint" is then a property of the data rather than an effect that clears it. An
+effect cannot do this job: a click on a handle of an *unselected* polyline sets both halves
+in one batch, and a clear-on-selection-change effect runs afterwards and undoes the half the
+user aimed at. Pairing the index with its polyline makes another polyline's index simply not
+this one's, resolving to the default with nothing to fire in between.
+
+**Extend commits per click**, because it edits a committed entity rather than a draft: Enter,
+a double-click, and Escape all only disarm, and Backspace is not bound — the vertex a user
+regrets is the selected one, and `−` removes it. Which end grows is the selected vertex's
+index: **vertex 1 prepends, any other appends**, a rule the user can restate, unlike
+"the nearer end" which would have to measure. Since an Extend click's insert index is also
+the new vertex's own index, selecting it is the whole rule, and a run of clicks keeps growing
+the same end.
+
+**Dropped:** the specced-but-unimplemented "clicking a segment inserts a vertex there". `+`
+covers insertion, and one insertion path is worth more than the pixel-accuracy that gesture
+bought — it also leaves a viewport click on a polyline meaning exactly one thing, with no
+segment-versus-handle priority rule to learn or to test.
+
+**Also dropped: the Draw polyline button in the viewport toolbar.** The draw mode is armed
+from the hierarchy's "+ ▸ Constraint ▸ Polyline" alone. Two ways to create the same entity
+is one too many, the toolbar otherwise only ever *moves* what is already selected, and the
+button had to sit disabled until a constraint group existed while the menu row it duplicated
+creates one on demand. The cost, stated in the spec rather than papered over: the draw mode
+is now the one armed tool with no highlighted button, so the crosshair is its only armed
+signal.
+
+**And: a double-click contributes no vertex of its own.** The first cut kept the vertex the
+double-click's first click appended, on the reasoning that the user had already seen it land.
+Wrong reasoning — ending the line *is* the gesture, so a vertex where the user double-clicked
+to **stop** is not one they asked for, and it left a near-zero-length final segment behind.
+`draftAfterDoubleClick` takes it back out on commit; **Enter** commits the draft as drawn,
+having added no click to take back. Extend follows the same rule by *deleting* the vertex its
+first click inserted — no bookkeeping needed, since every Extend click selects the vertex it
+inserted.
+
+---
+
+## The engine loads when a scene loads, not when a run starts
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §8, §14.4.
+
+**Why.** `initAndLoad` was reachable from exactly one place: inside `handleRun`. That read
+as a sensible laziness — don't voxelize a workspace nobody has asked to measure — and it
+was fine for as long as every consumer of the engine came through the Run gate. Camera
+placement doesn't. A pool build drives `compute()` itself
+(`camera_placement.md` §4.2), so it carries its own readiness check, and that check could
+not be satisfied before the first run: from startup the tool sat disabled reading
+`Wait for the engine to finish loading the scene.` while nothing was loading and nothing
+would until the user pressed Run coverage — which the message gave them no reason to do.
+Auto-run couldn't rescue it either, since `stale` only latches once `hasRunOnce` is set.
+The viewport showing the geometry made it worse: the app renders that mesh itself, so the
+scene looked loaded while the worker held nothing.
+
+**Decision.** A `[room]` effect loads the engine as soon as the app has a collision mesh,
+at mount and after every import/reset, through one shared `ensureLoaded` that `handleRun`
+also calls. Idempotence and single-flight come from an `(epoch, room, voxelSize)` key,
+decided by the pure `engineLoadAction` helper rather than by ad-hoc ref checks — a run
+firing in the same tick as the effect joins the in-flight promise instead of paying `init`
+twice.
+
+**The epoch is not optional.** `useEngine` bumps it every time it creates a worker, because
+what the engine has loaded is a fact about one worker instance. The first version of this
+change keyed on `(room, voxelSize)` alone and deadlocked immediately in dev: StrictMode
+mounts, unmounts, and remounts, so the first worker was terminated mid-`init` and its
+promise never settled — and the remount's request, looking identical, joined that dead
+promise and sat on `Initializing…` forever. The same key protects the mirror-image bug,
+where a new worker would be *believed* loaded because the old one had been, leaving the
+placement tool enabled against an engine holding no scene. The `useEngine` worker effect
+resets `EngineState` for the same reason.
+
+**Trade-offs.**
+
+- **Startup now spends `init` + `loadScene` unasked.** On a large workspace that is real
+  time, and it buys nothing for a user who only wanted to look around the geometry. It is
+  the price of making readiness a state the user can reach at all, and it is bounded: one
+  load per scene, not per run.
+- **A `voxelSize` change is deliberately left lazy.** Eager re-voxelizing on every
+  debounced slider settle would spend the costliest call in the session on resolutions the
+  user is still scrubbing past, and unlike a scene load it gates nothing. The cost is that
+  between a resolution edit and the next run the engine holds the *previous* voxel size,
+  so a `compute()` started in that window samples at that size — pre-existing behavior, not
+  introduced here, and the pool's own fingerprint invalidates a built pool on the
+  change.
+- **Loading is not computing.** The eager load stops at `setSampling({ full })`; import
+  still requires an explicit Run (spec §14.4 step 4), and a scene with zones re-applies
+  its regions on that first run because the import already marked the region set dirty.
+
+---
+
+## Camera placement is a mode, not a panel
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §5, §5.1.
+
+**Why.** The tool shipped as a right-sidebar panel with a group dropdown, and both halves of
+that were wrong. The dropdown was a **second selection model** living beside the hierarchy's:
+the user had already said which group they meant by selecting it, and the panel asked again
+because a panel sharing the column with everything else had no other way to know. And the
+panel could be navigated away from — select anything else and the session's only exit was
+gone, while its six held capture slots kept the Run button disabled. A stranded session
+strands the app.
+
+**Decision.** Opening placement enters a **mode** that keeps the app's three-column shell and
+**replaces what the two side columns hold**: the tool's inputs left, its review right, the
+viewport in the middle at its usual width. The hierarchy, the inspector, the run bar, the
+overlay and zone tools and the stats panel are all unmounted, and the session lives and dies
+with the mode. Four consequences follow, and each removes a failure the panel had:
+
+- **No group selector.** The mode targets the group `Place cameras` was pressed on, for its
+  whole life.
+- **The exit cannot be navigated away from**, and inside the review column **Close** is
+  pinned below the scroll region rather than flowing after the stats — so the §5.1 invariant
+  is structural in both dimensions rather than remembered.
+- **Nothing else is editable.** No constraint edit can invalidate the pool underneath a live
+  session, because the panels that would edit one are gone, viewport picking is inert, and
+  the transform and draw toolbars are hidden.
+- **The strategy moved into the mode**, while the camera template stayed in the group's
+  panel. The strategy is how the analysis searches; the template describes the group.
+  Off-screen sliders that silently change what a button does were the reason the two were
+  ever apart.
+
+**What the mode does *not* claim.** An earlier version of this decision put the tool in a
+dock along the bottom of a full-width viewport, on the argument that the plan preview and the
+pool scatter are drawn *in the viewport*. That argument did not survive: the viewport at
+`window − 680px` is exactly as wide as it is for every other task in this app, including
+judging camera gizmos, and the dock bought its width by inventing a layout that matched
+nothing else. The mode earns itself on **exclusion**, not screen space.
+
+**Cost.** One dialog (the close guard) in an app that otherwise has none. It is not
+decoration: a pool is minutes of GPU on the real 440 × 201 × 1120 m site, and Escape is one
+keystroke. The mode also made the hierarchy's group-row result badge (`8 cams · 94%
+reachable`) unreachable — the tree is hidden for the session's whole life and no result
+outlives it — so that badge was removed rather than left to display a stale aim-free upper
+bound with nothing to invalidate it.
+
+---
+
+## Build extends the pool; an edit marks the result stale
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §3.3.1, §5.1.
+
+**Why.** Putting `Size` directly above **Build** made two latent problems into daily ones.
+The spec had always promised that raising `poolSize` *extends* the pool rather than rebuilding
+it — the draw is prefix-stable precisely so that raising 200 to 260 costs 60 build steps — but
+`buildPool()` reset its state and replanned every draw, so the promise was never kept. And
+with the strategy fields now permanently on screen beside the curve, editing one left the two
+visibly disagreeing, with nothing saying which was current.
+
+**Decision.** Build resolves to one of four acts, and says which on the button: **Build**
+(no pool), **Extend to N**, **Truncate to N**, **Rebuild** (fingerprint moved, or the same
+size again). They differ by two orders of magnitude — a rebuild is minutes of GPU on the real
+site, a truncation is free — and a single label would make the cheap edit and the expensive
+one look identical. Separately, an edit to `Size` or any strategy field **marks the result
+stale** rather than clearing it: the curve dims and takes a note, while its stats, its
+viewport preview and **Apply** all stay live, because the layout on screen is still a real
+layout over a real pool and dropping it would cost a good answer to a nudged `Seed`. Pressing
+Build *does* clear it — a layout is a list of indices into the pool, and Build is the press
+that changes the pool underneath them.
+
+**The subtlety worth recording.** Carrying a pool forward needs **two** numbers per
+constraint, not one. A share is a target count of *kept* positions, while the constraint's
+sequence has already moved past whatever §4.2 rejected. Planning from `kept` rebuilds
+draws already known to see nothing; planning `share − nextSeq` comes up short by exactly the
+rejection count. `HeldDraws` carries both, and `Pool.size` records the size that was *asked
+for* rather than the count that was kept — otherwise a scene with a buried constraint would
+read `Extend` forever.
+
+---
+
+## Apply disables the surplus instead of deleting it
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §5.3.1, §5.3.3.
+
+**Why.** The first version of the plan below deleted the cameras the chosen count made
+surplus, on the reasoning that the scene should then hold exactly the layout that was
+approved. Two things were wrong with that. It destroyed names and per-camera edits in an
+app with no undo — the plan is derived from a search the user is still exploring, so the
+press that costs the most is the one they are most likely to want back. And it threw away
+the wrong thing: a camera the search did not use is not a mistake, it is a mount the site
+already has, which is exactly the asset the next search at a higher count wants to spend.
+
+**Decision.** The plan's third list is `disables`, not `deletes`: only the camera's
+`enabled` flag goes false, and its id, name, position, rotation, lens, and binding all
+stay. That is the same state the hierarchy's eye toggle produces (`spec.md` §5.4) — a
+dimmed gizmo, still selectable, contributing nothing to `compute()` — so the reversal is a
+single click the user already knows. Three consequences:
+
+- **A move writes `enabled: true`.** An earlier Apply may have stood down the very camera a
+  later one hands a position, and a layout the curve scored at 8 cameras has to be 8
+  *contributing* cameras or the number on the button is not the number in the scene. It is
+  the one field Apply both sets and clears.
+- **`boundCameras` includes disabled cameras.** They are hardware on the rail, and
+  including them is the whole mechanism by which a re-search picks them back up rather than
+  creating new ones beside them. Their cost stays plain distance — being disabled buys no
+  discount, since flipping a flag costs nothing on site while a metre of travel is a
+  physical re-installation.
+- **The `MAX_CAMERAS` gate counts only the creates.** A disable frees no slot: a disabled
+  camera stays in the scene and keeps its mask-bit index (`spec.md` §5.4). So the gate went
+  from `cameras − deletes + creates` to `cameras + creates`, which is *stricter* — a plan
+  that stands down four cameras on a 128-camera scene can no longer add four elsewhere.
+
+**Trade-off.** A scene accumulates disabled cameras: re-search a group a few times at
+varying counts and it holds more camera entities than the layout uses, all of them counting
+against the 128-camera budget. That is accepted — the budget is a real ceiling and the
+hierarchy shows what is off, whereas a deletion is unrecoverable. The panel no longer warns
+about the surplus, only states it.
+
+---
+
+## Apply re-arranges the group's cameras before it creates any
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §5.3.
+
+**Why.** The first design appended: Apply added one new camera per chosen position and left
+everything else alone. That is the wrong operation for the domain. A site already has
+cameras on its rails, so the answer to "where should eight cameras go" is *these eight,
+moved there* — appending turned every re-search into a scene the user then had to prune by
+hand, which is the opposite of a tool whose headline output is "how many do you need".
+
+**Decision.** Apply derives a **plan** over the group's bound cameras: `moves` for as many
+as the layout can staff, `creates` only for positions left over, `disables` for cameras the
+chosen count makes surplus. Three sub-decisions carry the weight:
+
+- **The group is the budget, not the constraint.** A camera bound to any constraint of the
+  group may be moved onto a position on a *different* constraint of it, and its binding is
+  rewritten. A rail and the wall beside it are alternatives, not separate budgets.
+- **Pairing minimises total metres moved**, solved exactly (Hungarian, `O(n³)` —
+  microseconds here). Every metre is a physical re-installation, so travel is the real
+  cost; greedy-nearest can be forced into an arbitrarily long move by one early pick, and
+  the test pins optimality against brute force over every permutation so it cannot pass by
+  agreeing with a greedy that happens to be right. When cameras outnumber positions the
+  assignment runs over the *positions*, which makes the stood-down cameras the ones
+  furthest from anywhere the layout wants.
+- **A move writes only what the search depended on**: `position`, `constraintId`, and
+  `near`/`far` (the pool was built at the group's range, so a camera with a different
+  `far` was scored against a reachable set it does not have). `fov` and `aspect` provably do
+  not affect a reachable set, so Apply leaves the lens — and the name, the aim, and the id —
+  alone.
+
+**Trade-off.** Apply rewrites positions and bindings across a whole group in one press,
+which is a large edit in an app with no undo. It is mitigated by legibility rather than by
+a modal — the button states the plan it will perform, and the viewport draws a line from
+each camera's current position to where the plan sends it.
+
+The surplus was originally *deleted* here; see the entry above for why it is now disabled.
+
+---
+
+## A failed build step and an empty one must never look alike
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §4.2, §10.
+
+**Why.** `engine.compute` reports a failure by **returning null**, not by throwing
+(`engine/useEngine.ts`) — it has already put the reason in the engine's own status. A
+failed run also yields no aggregation chunks. So at the call site, "the engine broke" and
+"this mount point sees nothing" arrive as the identical value, and placement has a rule
+that acts on the second one (§4.2 rejects the position and redraws).
+
+The first version conflated them, and the failure mode was ugly out of proportion to the
+bug: clicking **Build candidate positions** before `init` resolved reached a worker holding no engine,
+every draw was classified as "saw nothing", the loop ran to the end of its rejection
+budget, no error was ever raised, and the session kept the six capture slots — which
+disabled the Run button, with the panel showing no way to close the session because
+Discard only rendered once there was a curve. One missing distinction stranded the app.
+
+**Decision.** Three things, each addressing one layer:
+
+- whether the run *happened* travels separately from what it found, and
+  `classifyBuildStep(ran, count)` — a named, tested function — is the only place they meet;
+- `poolBlocker` takes an `engineReady` flag and checks it **first**, because a build step is
+  the one entry point that does not pass the app's Run gate, and every other blocker's
+  message would mislead while the engine holds no scene;
+- the panel offers **Close session** whenever the slots are held, not only once there is
+  something to discard. `slotsActive` is what disables Run, so a session without a visible
+  exit can strand the whole app.
+
+**Trade-off.** A pure classifier for what looks like one `if` is more indirection than the
+line deserves — until you have watched the two cases be confused. The name is the point.
+
+---
+
+## Placement caches each mount point's reachable set instead of re-measuring per trial
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §2.2, §3.3.
+
+**Why.** The obvious placement search scatters `m` positions, computes the layout's
+coverage, and repeats. Each trial is then one `compute()` whose dirty set is `m` reachable
+balls scattered across the site — on the real 440 × 201 × 1120 m workspace, most of the
+chunks, most of the time. It is also slot-bound: a rig is six mask bits and `MAX_CAMERAS`
+is 128, so `6m + existingCameras ≤ 128` caps `m` at **5** on a 96-camera site.
+
+Both problems are the same mistake — re-measuring something that cannot change between
+trials. A position's reachable set depends on the geometry, the grid, the marked set, and
+`near`/`far`; it does **not** depend on the other cameras, because the objective weighs
+every voxel the same and ignores them (§1.2).
+
+**Decision.** Build each pool position once, cache its reachable set, and evaluate trials
+as CPU set unions. One rig is resident at a time, so a placement search needs the **same six
+spare slots** the aim optimizer already asks for, on a scene of any size — and changing
+`maxCount`, `trials`, or `epsilon` re-searches with zero GPU work.
+
+**Trade-off.** The search only ever considers the `poolSize` positions it drew, so it is a
+search over a sample of the region rather than the region itself. Extending the pool is
+additive (the draw is prefix-stable, §3.3.1), which is what makes that acceptable.
+
+---
+
+## The cache holds the SDK's merged cubes, not an expanded bitset
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §2.1, §4.4.
+
+**Why.** A reachable set as a dense bitset over the workspace is `|voxels| / 8` bytes *per
+pool position* — 12 MiB each on a 99M-voxel site, gigabytes for a 200-position pool. But
+`leafCounts` already returns the set as merged power-of-two cubes (SDK §19.2), measured at
+2.7–5.0 bytes per voxel on a cluttered scene and 0.005 on a large sparse one.
+
+**Decision.** Cache what the SDK returns and never expand it. A trial rasterizes its
+layout's cubes into one reused scratch bitset, counting **only newly-set bits** — which
+makes the running score exact at every prefix and costs `Σ|R(p)|` writes rather than
+`maxCount × |U|`. A cube's rows run along X, which is also the fastest axis of the global
+voxel index, so each row is one contiguous bit run.
+
+**Trade-off.** Trials are milliseconds rather than microseconds, and the scratch bitset caps
+the searchable workspace at ~536M voxels (a 64 MiB allocation) — refused with a message
+naming the fix rather than allocating half a gigabyte unasked.
+
+---
+
+## Placement scores are aim-free, and the panel never calls them "coverage"
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §1.2, §1.3, §5.2.
+
+**Why.** A layout's score is `|⋃ᵢ R(pᵢ)|` — the union of its mount points' reachable sets,
+every voxel worth 1. That is an **upper bound** on what the placed cameras will cover: a
+real camera sees one frustum, not its whole reachable set, and the score cannot tell a mount
+in the middle of a hall from one in its corner. Reading it against the stats panel's
+measured coverage is the one misreading this feature can cause.
+
+**Decision.** Split the two questions and keep each one statable in a line: placement
+answers "where do mounts need to be" (aim-free, other cameras ignored, unioned over a
+layout), and `aim_optimization.md` §1.1 answers "given these mounts, where should each
+camera look" (redundancy-weighted, per camera). The workflow composes them — place, then
+Optimize all aims, then read the measured rate — and the curve's axis is labelled
+**reachable**, never coverage. The **pool ceiling** is drawn beside it, because a flat
+stretch of the curve is ambiguous without it: it can mean "more cameras would not help" or
+"too few layouts were tried at that count".
+
+**Trade-off.** The tool reports no coverage prediction at all, and deliberately ships no
+before/after table of its own — §6.3 of the aim optimizer is where measured numbers live.
+Aim-aware scoring is the largest available improvement and is parked in §15.
+
+---
+
+## The union is the anti-clustering mechanism — there is no separation knob
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §1.2.
+
+**Why.** Two mounts that see the same hall should not score twice for it. Ranking positions
+*individually* and taking the top N would pile every camera into the most open spot, which
+is what a minimum-separation field, an overlap heuristic, or a distance proxy would then
+have to paper over — each of them a stand-in for a quantity nobody measured.
+
+**Decision.** Score the **layout**, not the position, and count each voxel once. A clustered
+layout is then penalised by the objective itself, so the feature needs no separation knob at
+all. The test that guards this is the two-rooms case: a score that summed instead of unioned
+puts both cameras in the larger room and passes every other unit test in the suite.
+
+---
+
+## A constraint is a generator, not an analysis input
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §1.1, §8;
+[`../specs/spec.md`](../specs/spec.md) §5.5.
+
+**Why.** Constraints and sampling volumes look alike in the hierarchy — a named container
+over child regions, both with enabled checkboxes — and the reflex is to give them the same
+rules. But a sampling volume changes **what is counted**, so every edit to one dirties the
+sampled set and marks the coverage result stale; a constraint changes **nothing** that is
+computed or counted, and only produces cameras.
+
+**Decision.** No constraint or group edit marks the result stale, and constraints never
+enter the aggregation descriptor. The one exception is reshaping a constraint a camera is
+*bound* to: that moves the camera, which is a coverage input however it was triggered. The
+rule is "did a camera actually move", not "was a constraint touched" — so a reshape that
+leaves every bound camera inside its region marks nothing and costs no recompute.
+
+**Trade-off.** Two entity families with visually similar rows and deliberately different
+staleness rules. Both specs say so at the point of confusion rather than trusting the reader
+to infer it.
+
+---
+
+## The occupancy pre-screen was designed, then dropped — only a raycast can tell
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §4.2.
+
+**Why.** A drawn position can be buried inside a building, and the first design pre-screened
+the pool with a new SDK `classifyPoints` query so no build step would be wasted. It cannot
+work here: the app hard-codes `solidDetection: false` (`spec.md` §3.2, §4.2) because the
+flood fill would otherwise misclassify the enclosed interior of a watertight imported room —
+and with solid detection off, `SOLID_GEOMETRY` is never produced at all (SDK §6.2). Nor
+would a finer reading help: at metre voxels a camera flush on a wall and a camera 3 m inside
+the building are both MIXED/EMPTY.
+
+**Decision.** The **build step itself** is the authority: a built position whose reachable
+count is 0 is rejected and the constraint's sequence advances. One rule covers inside a
+wall, outside the workspace, sealed in, and beyond every marked zone — all four make the
+position useless as a mount, so none needs distinguishing. The SDK gained nothing.
+
+**Trade-off.** Rejections cost a build step each. The spec keeps an *optional* six-ray BVH
+pre-screen as a pure accelerator that can only skip build steps which would have been rejected
+anyway — safe precisely because nothing it decides is load-bearing.
+
+---
+
+## Both sessions share the same six capture slots
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §3.4;
+[`../specs/aim_optimization.md`](../specs/aim_optimization.md) §3.1.
+
+**Why.** Aim optimization and placement both need a six-camera rig in the engine's camera
+list, and disabled cameras still consume mask bits against the 128 limit. Giving placement
+its own six would double every scene's spare-slot requirement — for two tools a user never
+runs simultaneously.
+
+**Decision.** One set of ids (`opt-cap-0…5`), shared, with the two sessions **mutually
+exclusive**: each disables the other's entry points while open, and both mask the slots out
+of every display descriptor until a full run replaces the retained chunks.
+
+**Trade-off.** A user cannot keep an aim preview open while building a pool. The message
+says which session holds the slots, which is cheaper than the alternative failure — a scene
+that has room for neither tool.
+
+---
+
 ## The optimizer scores the *counted* set, never the *sampled* one
 
 Behavior in [`../specs/aim_optimization.md`](../specs/aim_optimization.md) §2.2, §3.1.

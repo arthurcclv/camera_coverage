@@ -18,11 +18,26 @@ import type { Probe } from './probeVisibility.ts';
 import type { GeometryObject } from './geometryModel.ts';
 import type { Scene } from './sceneModel.ts';
 import { defaultZoneName, type SamplingVolume, type Zone } from './samplingVolumes.ts';
+import {
+  constraintProblem,
+  defaultConstraintName,
+  defaultGroupName,
+  groupProblem,
+  type CameraConstraint,
+  type ConstraintGroup,
+  type ConstraintKind,
+} from '../placement/region.ts';
 
-/** Version written by {@link serializeScene}; bumped to 2 for zones/volumes (§14.3). */
-export const SCENE_FILE_FORMAT_VERSION = 2;
-/** Versions {@link parseSceneFile} accepts; a v1 file reads with empty zones/volumes (§14.8). */
-export const SUPPORTED_FORMAT_VERSIONS = [1, 2] as const;
+/**
+ * Version written by {@link serializeScene}: 2 for zones/volumes, 3 for camera
+ * constraints (§14.3, `camera_placement.md` §9).
+ */
+export const SCENE_FILE_FORMAT_VERSION = 3;
+/**
+ * Versions {@link parseSceneFile} accepts (§14.8): a v1 file reads with empty
+ * zones/volumes, and a v1 or v2 file with empty constraint groups/constraints.
+ */
+export const SUPPORTED_FORMAT_VERSIONS = [1, 2, 3] as const;
 
 /** On-disk shape of a name-bearing entity: `name` is optional (§14.3 omit-on-write). */
 type Serialized<T extends { name: string }> = Omit<T, 'name'> & { name?: string };
@@ -35,6 +50,8 @@ type SerializedCamera = Omit<SceneCamera, 'name' | 'enabled' | 'aimLocked'> & {
   name?: string;
   enabled?: boolean;
   aimLocked?: boolean;
+  /** The constraint this camera is bound to (`camera_placement.md` §6.3); omitted when unbound. */
+  constraintId?: string;
 };
 
 export interface SceneFileJSON {
@@ -52,6 +69,14 @@ export interface SceneFileJSON {
   volumes: SamplingVolume[];
   /** Whether zones restrict coverage (§14.3); persisted analysis setting. */
   useZones: boolean;
+  /**
+   * Camera-placement groups (§14.3, `camera_placement.md` §9). Each carries the
+   * camera **template**, the pool size and the whole **strategy**, so a seeded analysis is
+   * reproducible from the file that records its output.
+   */
+  constraintGroups: Serialized<ConstraintGroup>[];
+  /** Mount regions belonging to groups (§14.3, `camera_placement.md` §9). */
+  constraints: Serialized<CameraConstraint>[];
 }
 
 export type ParseResult = { ok: true; scene: Scene } | { ok: false; error: string };
@@ -175,6 +200,13 @@ function parseCameras(raw: unknown): SceneCamera[] | string {
     // and only written when true — so it is back-compatible and needs no version
     // bump, exactly like `enabled` and `name`.
     if (item.aimLocked === true) camera.aimLocked = true;
+    // `constraintId` (`camera_placement.md` §9) is optional on read and only
+    // written when bound. Referential integrity is checked once the constraints
+    // are parsed, since the arrays are read in file order.
+    if (item.constraintId !== undefined) {
+      if (typeof item.constraintId !== 'string') return `cameras[${i}]: constraintId must be a string`;
+      camera.constraintId = item.constraintId;
+    }
     cameras.push(camera);
   }
   return cameras;
@@ -310,12 +342,139 @@ function parseVolumes(raw: unknown, zones: Zone[]): SamplingVolume[] | string {
   return volumes;
 }
 
+const CONSTRAINT_KINDS: ConstraintKind[] = ['point', 'polyline', 'plane'];
+
+/**
+ * Parses `constraintGroups` (§14.3, `camera_placement.md` §9): each carries the
+ * camera template, the pool size and the strategy, ids unique, blank name → default.
+ *
+ * All three are validated by `groupProblem` — the same predicate
+ * the panels use — so an imported group and a hand-edited one are rejected for
+ * the same reasons, in the same words.
+ */
+function parseConstraintGroups(raw: unknown): ConstraintGroup[] | string {
+  if (raw === undefined) return []; // v1/v2 file (§14.8)
+  if (!Array.isArray(raw)) return 'constraintGroups must be an array';
+  const groups: ConstraintGroup[] = [];
+  const seenIds = new Set<string>();
+  for (const [i, item] of raw.entries()) {
+    if (!isRecord(item) || typeof item.id !== 'string') return `constraintGroups[${i}]: requires a string id`;
+    if (seenIds.has(item.id)) return `duplicate constraint group id "${item.id}"`;
+    seenIds.add(item.id);
+    if (item.enabled !== undefined && typeof item.enabled !== 'boolean') {
+      return `constraintGroups[${i}]: enabled must be a boolean`;
+    }
+    if (item.namePrefix !== undefined && typeof item.namePrefix !== 'string') {
+      return `constraintGroups[${i}]: namePrefix must be a string`;
+    }
+    // `aspect` and `near` are deliberately absent: a group carried them before
+    // they became placement-wide constants (`camera_placement.md` §3.1.1), so an
+    // older file's keys are read past rather than validated or kept.
+    const numbers = ['fov', 'far', 'poolSize', 'maxCount', 'trials', 'epsilon', 'seed'] as const;
+    for (const key of numbers) {
+      if (!isFiniteNumber(item[key])) return `constraintGroups[${i}]: ${key} must be a number`;
+    }
+    const rawName = typeof item.name === 'string' ? item.name.trim() : '';
+    const group: ConstraintGroup = {
+      id: item.id,
+      name: rawName.length > 0 ? rawName : defaultGroupName(item.id),
+      enabled: item.enabled !== false,
+      fov: item.fov as number,
+      far: item.far as number,
+      namePrefix: typeof item.namePrefix === 'string' ? item.namePrefix : '',
+      poolSize: item.poolSize as number,
+      maxCount: item.maxCount as number,
+      trials: item.trials as number,
+      epsilon: item.epsilon as number,
+      seed: item.seed as number,
+    };
+    const problem = groupProblem(group);
+    if (problem) return `constraintGroups[${i}]: ${problem}`;
+    groups.push(group);
+  }
+  return groups;
+}
+
+/**
+ * Parses `constraints` (§14.3, `camera_placement.md` §9): each `{ id, groupId,
+ * name, enabled, kind, distance }` plus its per-kind geometry, ids unique, every
+ * `groupId` resolving to a parsed group.
+ */
+function parseConstraints(raw: unknown, groups: ConstraintGroup[]): CameraConstraint[] | string {
+  if (raw === undefined) return []; // v1/v2 file (§14.8)
+  if (!Array.isArray(raw)) return 'constraints must be an array';
+  const groupIds = new Set(groups.map((g) => g.id));
+  const constraints: CameraConstraint[] = [];
+  const seenIds = new Set<string>();
+  for (const [i, item] of raw.entries()) {
+    if (!isRecord(item) || typeof item.id !== 'string' || typeof item.groupId !== 'string') {
+      return `constraints[${i}]: requires id and groupId`;
+    }
+    if (seenIds.has(item.id)) return `duplicate constraint id "${item.id}"`;
+    seenIds.add(item.id);
+    if (!groupIds.has(item.groupId)) {
+      return `constraints[${i}]: groupId "${item.groupId}" references no constraint group`;
+    }
+    if (!CONSTRAINT_KINDS.includes(item.kind as never)) {
+      return `constraints[${i}]: kind must be one of ${CONSTRAINT_KINDS.join(', ')}`;
+    }
+    if (item.enabled !== undefined && typeof item.enabled !== 'boolean') {
+      return `constraints[${i}]: enabled must be a boolean`;
+    }
+    if (!isFiniteNumber(item.distance)) return `constraints[${i}]: distance must be a number`;
+    const rawName = typeof item.name === 'string' ? item.name.trim() : '';
+    const base = {
+      id: item.id,
+      groupId: item.groupId,
+      name: rawName.length > 0 ? rawName : defaultConstraintName(item.id),
+      enabled: item.enabled !== false,
+      distance: item.distance,
+    };
+    let constraint: CameraConstraint;
+    switch (item.kind as ConstraintKind) {
+      case 'point':
+        if (!isVec3(item.position)) return `constraints[${i}]: point requires position`;
+        constraint = { ...base, kind: 'point', position: item.position };
+        break;
+      case 'polyline':
+        if (!Array.isArray(item.points) || !item.points.every(isVec3)) {
+          return `constraints[${i}]: polyline requires an array of [x,y,z] points`;
+        }
+        constraint = { ...base, kind: 'polyline', points: item.points as Vec3[] };
+        break;
+      case 'plane': {
+        const size = item.size;
+        if (!isVec3(item.position) || !isQuat(item.rotation)) {
+          return `constraints[${i}]: plane requires position and rotation`;
+        }
+        if (!Array.isArray(size) || size.length !== 2 || !size.every(isFiniteNumber)) {
+          return `constraints[${i}]: plane requires a two-number size`;
+        }
+        constraint = {
+          ...base,
+          kind: 'plane',
+          position: item.position,
+          rotation: item.rotation,
+          size: [size[0], size[1]],
+        };
+        break;
+      }
+    }
+    const problem = constraintProblem(constraint);
+    if (problem) return `constraints[${i}]: ${problem}`;
+    constraints.push(constraint);
+  }
+  return constraints;
+}
+
 /**
  * Validates and parses a `scene.json` document (spec §14.4, §14.8) — schema,
- * `formatVersion` (accepts 1 and 2; a v1 file reads with empty zones/volumes and
- * `useZones` false), geometry `kind`s + asset-path safety, id uniqueness within
- * each id-bearing category, and `volume.zoneId` referential integrity. Never
- * throws; the caller (`sceneIO.ts`) decides how to surface `{ ok: false }`.
+ * `formatVersion` (accepts 1, 2 and 3; a v1 file reads with empty zones/volumes
+ * and `useZones` false, a v1/v2 file with no constraint groups), geometry
+ * `kind`s + asset-path safety, id uniqueness within each id-bearing category,
+ * and the `volume.zoneId` / `constraint.groupId` / `camera.constraintId`
+ * referential integrity. Never throws; the caller (`sceneIO.ts`) decides how to
+ * surface `{ ok: false }`.
  */
 export function parseSceneFile(json: unknown): ParseResult {
   if (!isRecord(json)) return fail('scene.json must be a JSON object');
@@ -345,6 +504,23 @@ export function parseSceneFile(json: unknown): ParseResult {
   if (json.useZones !== undefined && typeof json.useZones !== 'boolean') return fail('useZones must be a boolean');
   const useZones = json.useZones === true;
 
+  const constraintGroups = parseConstraintGroups(json.constraintGroups);
+  if (typeof constraintGroups === 'string') return fail(constraintGroups);
+
+  const constraints = parseConstraints(json.constraints, constraintGroups);
+  if (typeof constraints === 'string') return fail(constraints);
+
+  // A camera's binding is checked here rather than in `parseCameras`, which runs
+  // before the constraints exist. A dangling binding is rejected outright: it
+  // would otherwise read as an unclamped camera the user believes is on a rail
+  // (`camera_placement.md` §6.3, spec §14.8).
+  const constraintIds = new Set(constraints.map((c) => c.id));
+  for (const camera of cameras) {
+    if (camera.constraintId !== undefined && !constraintIds.has(camera.constraintId)) {
+      return fail(`camera "${camera.id}": constraintId "${camera.constraintId}" references no constraint`);
+    }
+  }
+
   // Which section clips (§13.9): optional, default null; an id that names no
   // loaded section is coerced to null so a stale reference never clips nothing.
   const clipSectionId =
@@ -352,7 +528,21 @@ export function parseSceneFile(json: unknown): ParseResult {
       ? json.clipSectionId
       : null;
 
-  return { ok: true, scene: { geometry, cameras, probes, sections, clipSectionId, zones, volumes, useZones } };
+  return {
+    ok: true,
+    scene: {
+      geometry,
+      cameras,
+      probes,
+      sections,
+      clipSectionId,
+      zones,
+      volumes,
+      useZones,
+      constraintGroups,
+      constraints,
+    },
+  };
 }
 
 /**
@@ -379,11 +569,19 @@ function serializeCamera(camera: SceneCamera): SerializedCamera {
         const { aimLocked: _aimLocked, ...rest } = stripped;
         return rest;
       })();
+  // `constraintId` is written only when bound (`camera_placement.md` §9).
+  const withoutBinding =
+    camera.constraintId !== undefined
+      ? withoutLock
+      : (() => {
+          const { constraintId: _constraintId, ...rest } = withoutLock;
+          return rest;
+        })();
   if (camera.enabled) {
-    const { enabled: _enabled, ...rest } = withoutLock;
+    const { enabled: _enabled, ...rest } = withoutBinding;
     return rest;
   }
-  return withoutLock;
+  return withoutBinding;
 }
 
 /** Serializes a `Scene` to the `scene.json` shape (spec §14.5) — a plain data copy. */
@@ -400,5 +598,10 @@ export function serializeScene(scene: Scene): SceneFileJSON {
     zones: scene.zones,
     volumes: scene.volumes,
     useZones: scene.useZones,
+    // Groups and constraints carry user-edited names, stripped when blank like
+    // every other entity (§14.3). The strategy rides on the group, so a
+    // seeded search reproduces from the file (`camera_placement.md` §9).
+    constraintGroups: scene.constraintGroups.map(stripBlankName),
+    constraints: scene.constraints.map(stripBlankName),
   };
 }

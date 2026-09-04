@@ -18,6 +18,7 @@ import type { MarkedFilter } from '../scene/aggregateSpec.ts';
 import { buildPanorama, type Panorama } from './panorama.ts';
 import { optimizeAims, proposeFor, type AimProposal, type GreedyResult } from './greedy.ts';
 import { captureSpec, sessionBlocker, sessionCameras, toOptimizable } from './session.ts';
+import { describeError } from '../errorText.ts';
 
 export interface OptimizeProgress {
   round: number;
@@ -216,7 +217,7 @@ export function useAimOptimizer({
         publishOverrides();
         setState((s) => ({ ...s, panorama: pano, preview, running: false, picked: null }));
       } catch (err) {
-        onError(describe(err));
+        onError(describeError(err));
         closeSession(true);
       }
     },
@@ -253,7 +254,7 @@ export function useAimOptimizer({
       if (result.canceled) closeSession(true);
       else setState((s) => ({ ...s, result, running: false, progress: null }));
     } catch (err) {
-      onError(describe(err));
+      onError(describeError(err));
       closeSession(true);
     }
   }, [cameras, capture, closeSession, onError, openSession, publishOverrides, samplingPending]);
@@ -321,8 +322,4 @@ export function useAimOptimizer({
     }),
     [state, overrides, maskSlots, openFor, runAll, cancel, applyAll, discard, scoreAt, pick, noteFullRun],
   );
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

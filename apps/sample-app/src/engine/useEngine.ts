@@ -72,6 +72,39 @@ export function initConfig(
   return { worldMin, worldMax, voxelSize, chunkSizeXZ, solidDetection: false, backend };
 }
 
+/** What a request to load `(room, voxelSize)` should do (spec §8). */
+export type EngineLoadAction = 'satisfied' | 'join' | 'start';
+
+/**
+ * Decide whether a load request needs a new `initAndLoad`, can await one already
+ * running, or is already satisfied (spec §8).
+ *
+ * The engine is loaded from two places — the scene-load effect and a run — and
+ * `init` is the session's most expensive call, so "am I already doing this?" has to
+ * be answered without racing. Keying on the `(room, voxelSize)` pair is what makes
+ * that answerable: a pair the engine already holds needs nothing, the same pair
+ * already in flight needs only the existing promise, and anything else is a fresh
+ * load. `room` is compared by identity — a geometry build is rebuilt, never mutated,
+ * so a new object *is* the signal that the geometry changed (spec §14.4).
+ *
+ * The **epoch** is part of the key because a load is a fact about one worker
+ * instance. A replaced worker (StrictMode's dev remount is the everyday case)
+ * invalidates both records at once: what the old instance loaded, and what it had
+ * in flight when it was terminated. Keying without it deadlocks — the remount joins
+ * a promise belonging to a worker that no longer exists and can never settle.
+ */
+export function engineLoadAction<R>(
+  loaded: { epoch: number; room: R | null; voxelSize: number | null },
+  inFlight: { epoch: number; room: R; voxelSize: number } | null,
+  request: { epoch: number; room: R; voxelSize: number },
+): EngineLoadAction {
+  const same = (a: { epoch: number; room: R | null; voxelSize: number | null }) =>
+    a.epoch === request.epoch && a.room === request.room && a.voxelSize === request.voxelSize;
+  if (same(loaded)) return 'satisfied';
+  if (inFlight && same(inFlight)) return 'join';
+  return 'start';
+}
+
 const INITIAL_STATE: EngineState = {
   status: 'idle',
   backend: null,
@@ -90,8 +123,26 @@ export function useEngine() {
   const [state, setState] = useState<EngineState>(INITIAL_STATE);
   const clientRef = useRef<WorkerClient | null>(null);
   const workerRef = useRef<Worker | null>(null);
+  /**
+   * Which worker/client instance the hook currently holds — bumped every time one
+   * is created (spec §8).
+   *
+   * What the engine has loaded is a property of *this* instance, so anything
+   * caching that fact has to key on the epoch as well. React StrictMode makes the
+   * point concretely: it mounts, unmounts, and remounts in dev, so the first
+   * worker is terminated mid-`init` and its `init` promise never settles. Without
+   * the epoch, the remount's load request looked like "the load I want is already
+   * in flight", joined that dead promise, and the app read `Initializing…` forever.
+   */
+  const epochRef = useRef(0);
+  /** The current instance epoch, read outside render by the app's load path. */
+  const epoch = useCallback(() => epochRef.current, []);
 
   useEffect(() => {
+    // A fresh worker holds no engine, so the previous instance's status, backend,
+    // and stats describe nothing: reset rather than let them stand.
+    epochRef.current += 1;
+    setState(INITIAL_STATE);
     const worker = new Worker(new URL('../worker.ts', import.meta.url), { type: 'module' });
     workerRef.current = worker;
     clientRef.current = WorkerClient.fromWorker(worker);
@@ -240,8 +291,8 @@ export function useEngine() {
   );
 
   return useMemo(
-    () => ({ state, initAndLoad, setCameras, setSampling, compute, reaggregate }),
-    [state, initAndLoad, setCameras, setSampling, compute, reaggregate],
+    () => ({ state, epoch, initAndLoad, setCameras, setSampling, compute, reaggregate }),
+    [state, epoch, initAndLoad, setCameras, setSampling, compute, reaggregate],
   );
 }
 

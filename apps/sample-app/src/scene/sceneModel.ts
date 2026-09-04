@@ -12,6 +12,7 @@ import type { GeometryObject } from './geometryModel.ts';
 import type { Probe } from './probeVisibility.ts';
 import type { Section } from './sectionHeatmap.ts';
 import type { SamplingVolume, Zone } from './samplingVolumes.ts';
+import type { CameraConstraint, ConstraintGroup } from '../placement/region.ts';
 
 export interface Scene {
   geometry: GeometryObject[];
@@ -28,10 +29,26 @@ export interface Scene {
   volumes: SamplingVolume[];
   /** Whether zones restrict coverage (`sampling_volumes.md` §2.2, §9); default off. */
   useZones: boolean;
+  /** Camera-placement groups (`camera_placement.md` §3.1, §9). */
+  constraintGroups: ConstraintGroup[];
+  /** Mount regions belonging to groups (`camera_placement.md` §3.1, §9). */
+  constraints: CameraConstraint[];
 }
 
 export function defaultScene(): Scene {
-  // Zones/volumes seed empty — the default room is unchanged until the user
-  // generates or adds (`sampling_volumes.md` §9).
-  return { geometry: defaultGeometry(), cameras: defaultCameras(), probes: [], sections: [], clipSectionId: null, zones: [], volumes: [], useZones: false };
+  // Zones/volumes and constraint groups/constraints seed empty — the default
+  // room is unchanged until the user generates or adds (`sampling_volumes.md`
+  // §9, `camera_placement.md` §9).
+  return {
+    geometry: defaultGeometry(),
+    cameras: defaultCameras(),
+    probes: [],
+    sections: [],
+    clipSectionId: null,
+    zones: [],
+    volumes: [],
+    useZones: false,
+    constraintGroups: [],
+    constraints: [],
+  };
 }

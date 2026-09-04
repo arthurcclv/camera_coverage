@@ -4,6 +4,7 @@
  * re-derived from it on every render rather than kept as separate local
  * state, so it never drifts.
  */
+import { constraintLabel, type CameraConstraint } from '../placement/region.ts';
 import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
 import { cameraLabel, type SceneCamera } from '../cameras/camera.ts';
 import { eulerToQuat, quatToEuler } from '../cameras/math.ts';
@@ -18,9 +19,30 @@ export interface CameraPanelProps {
   onRename(id: string, name: string): void;
   /** Toggle the aim lock (`aim_optimization.md` §4.5); never marks stale. */
   onToggleAimLock(id: string): void;
+  /** Constraints this camera may be bound to (`camera_placement.md` §6.3). */
+  constraints: readonly CameraConstraint[];
+  /** Bind, rebind, or unbind — binding clamps the camera into its region (§6.3). */
+  onBind(id: string, constraintId: string | null): void;
+  /**
+   * Move this camera to the best-scoring position on its own constraint (§4.6),
+   * or null when it cannot run (unbound, or a session already holds the slots).
+   */
+  onReposition: (() => void) | null;
+  /** Why Reposition is unavailable, for its tooltip (§10). */
+  repositionBlocker: string | null;
 }
 
-export function CameraPanel({ camera, flagged, onChange, onRename, onToggleAimLock }: CameraPanelProps) {
+export function CameraPanel({
+  camera,
+  flagged,
+  onChange,
+  onRename,
+  onToggleAimLock,
+  constraints,
+  onBind,
+  onReposition,
+  repositionBlocker,
+}: CameraPanelProps) {
   if (!camera) {
     return (
       <div className="panel">
@@ -98,6 +120,41 @@ export function CameraPanel({ camera, flagged, onChange, onRename, onToggleAimLo
           />
           Lock aim (exclude from optimization)
         </label>
+
+        {/* The binding is provenance *and* a clamp: while it is set, every write
+            of this camera's position is projected into the constraint's region,
+            so a reviewed layout cannot drift off its rail (`camera_placement.md`
+            §6.3). */}
+        <div className="row">
+          <label htmlFor="cam-constraint">Constraint</label>
+          <select
+            id="cam-constraint"
+            className="text-input"
+            value={camera.constraintId ?? ''}
+            onChange={(e) => onBind(camera.id, e.target.value === '' ? null : e.target.value)}
+          >
+            <option value="">(unbound)</option>
+            {constraints.map((c) => (
+              <option key={c.id} value={c.id}>
+                {constraintLabel(c)}
+              </option>
+            ))}
+          </select>
+        </div>
+        {camera.constraintId !== undefined && (
+          <>
+            <p className="hint">Position is clamped to this constraint's region.</p>
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={onReposition === null}
+              title={repositionBlocker ?? 'Move to the best-scoring position on this constraint'}
+              onClick={() => onReposition?.()}
+            >
+              Reposition on constraint
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

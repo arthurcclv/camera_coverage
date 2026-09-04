@@ -1,3 +1,10 @@
+/* The one value repeated often enough to earn a custom property, per
+   `ai/VISUAL_DESIGN.md` ("if you find yourself repeating a value, promote it to
+   a `:root` variable"). The rest of the palette is still ad hoc by design. */
+:root {
+  --border-subtle: #2a2e36;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -79,9 +86,11 @@ body {
 .viewport canvas {
   display: block;
 }
-/* Armed "Place on surface" tool (spec §2.4.2): the next click lands a position,
-   so the whole viewport reads as a click target. */
-.viewport.placing canvas {
+/* An armed viewport tool — "Place on surface" (spec §2.4.2) or the polyline draw
+   mode (`camera_placement.md` §6.2): the next click lands a position, so the
+   whole viewport reads as a click target. */
+.viewport.placing canvas,
+.viewport.drawing canvas {
   cursor: crosshair;
 }
 
@@ -159,7 +168,7 @@ body {
   overflow-y: auto;
   scrollbar-gutter: stable;
   background: #1b1e24;
-  border-left: 1px solid #2a2e36;
+  border-left: 1px solid var(--border-subtle);
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -172,7 +181,7 @@ body {
   width: 340px;
   flex-shrink: 0;
   background: #1b1e24;
-  border-right: 1px solid #2a2e36;
+  border-right: 1px solid var(--border-subtle);
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -266,7 +275,7 @@ body {
 
 .panel {
   background: #20242b;
-  border: 1px solid #2a2e36;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   padding: 10px 12px;
 }
@@ -316,7 +325,7 @@ body {
   appearance: none;
   height: 10px;
   border-radius: 5px;
-  border: 1px solid #2a2e36;
+  border: 1px solid var(--border-subtle);
 }
 .row input[type='range'].spectrum::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -341,7 +350,7 @@ body {
   width: 56px;
   background: #14161a;
   color: #e6e8eb;
-  border: 1px solid #2a2e36;
+  border: 1px solid var(--border-subtle);
   border-radius: 4px;
   padding: 2px 4px;
   font-size: 12px;
@@ -382,7 +391,7 @@ body {
   min-width: 0;
   background: #14161a;
   color: #e6e8eb;
-  border: 1px solid #2a2e36;
+  border: 1px solid var(--border-subtle);
   border-radius: 4px;
   padding: 3px 5px;
   font-size: 12px;
@@ -394,14 +403,19 @@ body {
   border-color: #3a5ba0;
 }
 
-/* Editable value field at the right end of a slider row (spec §5.2.1) — the same
-   boxed chrome as the grouped vector fields, replacing the old read-only readout. */
-.row input.slider-value {
+/* The boxed numeric field, in its two placements (spec §5.2.1): `.slider-value`
+   is the editable readout at the right end of a slider row, `.number-field` the
+   same box standing alone as a row's only control (a group's Aspect and Near, the
+   placement mode's Size and strategy). One rule, because they are one control —
+   and a `NumberInput` with neither class renders as an unstyled browser input,
+   since it is a `type="text"` field that no bare-element rule matches. */
+.row input.slider-value,
+.row input.number-field {
   width: 56px;
   flex-shrink: 0;
   background: #14161a;
   color: #e6e8eb;
-  border: 1px solid #2a2e36;
+  border: 1px solid var(--border-subtle);
   border-radius: 4px;
   padding: 3px 5px;
   font-size: 12px;
@@ -409,7 +423,8 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.row input.slider-value:focus {
+.row input.slider-value:focus,
+.row input.number-field:focus {
   outline: none;
   border-color: #3a5ba0;
 }
@@ -433,7 +448,7 @@ body {
   cursor: not-allowed;
 }
 .btn.secondary {
-  background: #2a2e36;
+  background: var(--border-subtle);
 }
 .btn.secondary:hover:not(:disabled) {
   background: #333844;
@@ -452,6 +467,26 @@ body {
   display: block;
   width: 100%;
   margin-top: 8px;
+}
+
+/* A row whose primary button takes the width and whose secondary keeps its own
+   (the placement mode's Build and Analyze, each with a Cancel that appears only
+   while it runs). The primary is the same width in both states, so a build step
+   starting does not resize the control the user just pressed.
+
+   Separated from the fields above by the same rule the pinned action footer uses:
+   the fields are what the button spends, so the line marks where reading settings
+   ends and pressing begins. */
+.row.button-row {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+.row.button-row > .btn {
+  flex: 1;
+}
+.row.button-row > .btn.secondary {
+  flex: 0 0 auto;
 }
 
 .badge {
@@ -636,6 +671,14 @@ button.tree-caret:focus-visible {
 .hint.warn {
   color: #ffb84d;
 }
+/* A result stated under a card's title, before the controls that produced it —
+   the placement mode's pool readout and analysis readout (`camera_placement.md`
+   §5.1). Set off below rather than above, since the title already separates it. */
+.hint.readout {
+  margin: 0 0 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
 
 /* Scene panel header + add-entity menu (spec §5.5). */
 .scene-header {
@@ -664,14 +707,20 @@ button.tree-caret:focus-visible {
   min-width: 120px;
   z-index: 10;
 }
-.add-menu-anchor .menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-}
-.menu.context-menu {
+/* The three hierarchy popovers (add menu, its submenu, the right-click context menu)
+   share one **fixed width** rather than sizing to their own longest label, so the add
+   menu and its submenu line up as one assembly — and so React can decide which way a
+   popover opens before it has rendered (`ui/menuPopover.ts`, whose MENU_WIDTH_PX
+   mirrors this; `test/menuPopover.test.ts` fails if the two drift).
+
+   All three are `position: fixed`, placed from their anchor's measured rect: they open
+   outward, away from the panel, and `.left-panel`'s `overflow: hidden` would clip an
+   absolutely positioned child at the panel edge. */
+.add-menu-anchor .menu,
+.menu.context-menu,
+.menu.submenu {
   position: fixed;
+  width: 160px;
 }
 .menu li {
   padding: 6px 10px;
@@ -684,6 +733,31 @@ button.tree-caret:focus-visible {
   font-weight: 400;
 }
 .menu li:hover {
+  background: #2c66c9;
+  color: #fff;
+}
+
+/* Nested submenu (spec §5.5, VISUAL_DESIGN.md → Menu → Submenu). The parent row
+   holds the child popover, so it needs its own positioning context; the child
+   reuses `.menu` chrome unchanged — nesting adds a position, not a new surface. */
+.menu li.has-submenu {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.submenu-caret {
+  color: #7a828f;
+  font-size: 10px;
+  line-height: 1;
+}
+.menu li.has-submenu:hover .submenu-caret,
+.menu li.has-submenu.open .submenu-caret {
+  color: #fff;
+}
+/* Stays lit while its submenu is open, so the trail from "+" to the entry reads. */
+.menu li.has-submenu.open {
   background: #2c66c9;
   color: #fff;
 }
@@ -853,7 +927,7 @@ button.tree-caret:focus-visible {
 .legend-bar {
   height: 12px;
   border-radius: 4px;
-  border: 1px solid #2a2e36;
+  border: 1px solid var(--border-subtle);
   margin: 6px 0 2px;
 }
 .legend-labels {
@@ -905,7 +979,7 @@ button.tree-caret:focus-visible {
   min-width: 0;
   background: #14161a;
   color: #e6e8eb;
-  border: 1px solid #2a2e36;
+  border: 1px solid var(--border-subtle);
   border-radius: 4px;
   padding: 4px 6px;
   font-size: 12px;
@@ -933,7 +1007,7 @@ button.tree-caret:focus-visible {
   display: block;
   margin: 8px 0 4px;
   border-radius: 6px;
-  border: 1px solid #2a2e36;
+  border: 1px solid var(--border-subtle);
   image-rendering: pixelated;
   cursor: crosshair;
 }
@@ -983,7 +1057,7 @@ button.tree-caret:focus-visible {
   font-weight: 600;
   color: #7c8592;
   text-align: left;
-  border-bottom: 1px solid #2a2e36;
+  border-bottom: 1px solid var(--border-subtle);
 }
 .aim-summary.aim-compare th:last-child,
 .aim-summary.aim-compare td:last-child {
@@ -999,4 +1073,201 @@ button.tree-caret:focus-visible {
 }
 .aim-summary.aim-compare .regressed {
   color: #ffb84d;
+}
+
+/* --- Camera placement (camera_placement.md §5.2, §6, §7) ------------------- */
+
+/* Constraint rows: violet swatch — a hue of its own, so a constraint is never
+   mistaken for a sampling volume (teal) in the hierarchy. A constraint generates
+   cameras; a volume changes what is counted (camera_placement.md §1.1). */
+.tree-row .dot.constraint-dot {
+  background: #c08bd0;
+}
+
+/* The reachable-vs-count curve (§5.2). Clicking it picks the count, so it takes
+   a pointer cursor and a hit area wider than the 1px polyline. */
+/* Placement mode (`camera_placement.md` §5): the app's own three columns, with
+   both side columns' *contents* replaced. Nothing here changes the shell — the
+   widths, the borders and the viewport are the app's — because the mode's claim
+   is exclusion, not screen space. */
+
+/* Left column: the three input cards, stacked, no hierarchy/detail split to
+   resize. It keeps `.left-panel`'s plain symmetric 12px and does **not** scroll
+   as a column — a column that scrolls has to reserve a stable gutter (spec
+   §2.2), and 8px of reserved gutter on this side alone would leave the two
+   columns' content boxes disagreeing by that much. Overflow is handled one level
+   in, in each card's body, exactly as the object-detail panel does it. */
+.left-panel.placement-inputs > .panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.left-panel.placement-inputs > .panel > .panel-title {
+  flex-shrink: 0;
+}
+.left-panel.placement-inputs > .panel > .panel-body {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
+}
+
+/* The third card (§5.1) is three settled fields and no button, so it keeps its
+   natural height while the two cards above it absorb a short window in their own
+   scroll regions. Shrinking it would clip the fields that never move to make room
+   for the ones that do. */
+.left-panel.placement-inputs > .panel.placement-defaults {
+  flex-shrink: 0;
+}
+
+/* Right column: one card that fills the column, so its own footer can pin. */
+.sidebar.placement-review-col {
+  overflow: hidden;
+}
+
+.placement-review {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.placement-review > .panel-title {
+  flex-shrink: 0;
+}
+.placement-review > .panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
+}
+
+/* Apply and Close, pinned below the scroll region: a session with no visible
+   exit strands the app, and actions that flowed after four stat lines and two
+   warnings could scroll out of view on a short window (§5.1). */
+.placement-actions {
+  position: relative;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+/* The §5.1 close guard, anchored over the Close button that raised it — what it
+   asks about is the pool, and the viewport behind it still shows the scatter
+   that pool produced, so it dims nothing. */
+.placement-confirm {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin-bottom: 8px;
+  z-index: 5;
+  background: #20242b;
+  border: 1px solid #384252;
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+
+.placement-curve {
+  width: 100%;
+  height: 116px;
+  display: block;
+  margin: 4px 0 8px;
+  background: #14161a;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* A stale result is dimmed, not withdrawn (§5.1): the layout is still real, so
+   it stays readable and stays applicable — it is just no longer what the fields
+   above it would produce. */
+.placement-curve.stale {
+  opacity: 0.55;
+}
+
+.placement-curve .curve-line {
+  stroke: #c08bd0;
+  stroke-width: 1.5;
+}
+
+/* The value axis and its ticks, labelled in the axis's own unit — the reachable
+   rate, the same percentage the stats below quote (§5.2). Dimmer than the curve:
+   it is the frame, not the answer. */
+.placement-curve .curve-axis {
+  stroke: #3a4150;
+  stroke-width: 1;
+}
+
+.placement-curve .curve-tick {
+  fill: #7c8592;
+  font-size: 8px;
+  text-anchor: end;
+  dominant-baseline: middle;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The pool ceiling: what every built position together reaches. Dashed and
+   dimmer than the curve because it is a bound, not a result — it is what
+   separates "more cameras would not help" from "this pool is too small" (§5.2). */
+.placement-curve .curve-ceiling {
+  stroke: #5c6270;
+  stroke-width: 1;
+}
+
+.placement-curve .curve-dot {
+  fill: #c08bd0;
+}
+
+.placement-curve .curve-dot.knee {
+  fill: #8bd0c0;
+}
+
+.placement-curve .curve-dot.selected {
+  fill: #ffd23f;
+}
+
+/* The selected polyline vertex (§6.2): a heading with Extend opposite it, then
+   the numeric fields with insert/delete. Only one vertex is ever shown — the one
+   the viewport gizmo is attached to — so there is no selected-row state to mark;
+   the heading is what keeps the panel and the viewport agreeing about which
+   vertex a drag would move. */
+.vertex-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.vertex-head .panel-title.subhead {
+  margin: 0;
+}
+
+.vertex-count {
+  color: #7a828f;
+  font-weight: 400;
+}
+
+.vertex-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 4px;
+  padding: 1px 2px;
+}
+
+.vertex-row .row {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.vertex-actions {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
 }

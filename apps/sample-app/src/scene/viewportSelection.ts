@@ -11,13 +11,17 @@
  * (spec §5.5, §12.4, §13.8; `sampling_volumes.md` §4.1): a single value picks out
  * one entity, so selecting one deselects the others. Sections and zones are only
  * ever reachable via `hit` from the hierarchy (their bodies aren't pickable);
- * cameras, probes, and volumes are also pickable in the viewport. This module
- * doesn't care which caller produced `hit`, it just applies the click-vs-drag
- * decision.
+ * cameras, probes, volumes, and camera constraints are also pickable in the
+ * viewport (a constraint through its handles, `camera_placement.md` §6.1; a
+ * constraint *group* has no body, like a zone). This module doesn't care which
+ * caller produced `hit`, it just applies the click-vs-drag decision.
  */
 
 /** The unified selection: one entity across every type, or nothing (spec §5.5). */
-export type Selection = { kind: 'camera' | 'probe' | 'section' | 'zone' | 'volume'; id: string } | null;
+export type Selection = {
+  kind: 'camera' | 'probe' | 'section' | 'zone' | 'volume' | 'constraintGroup' | 'constraint';
+  id: string;
+} | null;
 
 /** Screen-space pointer position in CSS pixels. */
 export interface PointerPos {
@@ -47,4 +51,23 @@ export function selectionAfterClick(
 ): Selection {
   if (!isClick(down, up, threshold)) return current;
   return hit;
+}
+
+/**
+ * The vertex sub-selection after a viewport click (`camera_placement.md` §6.1) —
+ * the same decision as {@link selectionAfterClick}, one level down.
+ *
+ * `picked` is the vertex handle the ray hit, or `null` for a click that landed on
+ * the polyline's body or on something else entirely. A drag-tail click leaves the
+ * sub-selection alone: without that, orbiting away from a polyline with a vertex
+ * held would silently move the sub-selection to its last vertex.
+ */
+export function vertexAfterClick(
+  current: number | null,
+  picked: number | null,
+  down: PointerPos,
+  up: PointerPos,
+  threshold = DRAG_THRESHOLD_PX,
+): number | null {
+  return isClick(down, up, threshold) ? picked : current;
 }

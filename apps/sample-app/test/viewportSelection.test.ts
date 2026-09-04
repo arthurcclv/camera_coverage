@@ -4,6 +4,7 @@ import {
   DRAG_THRESHOLD_PX,
   isClick,
   selectionAfterClick,
+  vertexAfterClick,
   type Selection,
 } from '../src/scene/viewportSelection.ts';
 
@@ -40,4 +41,20 @@ test('drag-tail click leaves the selection unchanged (spec §5.2)', () => {
   assert.deepEqual(selectionAfterClick(cam('cam-1'), null, at(50, 50), at(200, 180)), cam('cam-1'));
   // Drag ending over a different gizmo must not switch selection.
   assert.deepEqual(selectionAfterClick(cam('cam-1'), cam('cam-2'), at(50, 50), at(200, 180)), cam('cam-1'));
+});
+
+test('a genuine click sets the vertex sub-selection it hit (`camera_placement.md` §6.1)', () => {
+  assert.equal(vertexAfterClick(null, 2, at(50, 50), at(51, 50)), 2);
+  // Vertex 0 is a vertex like any other: the falsy index must survive.
+  assert.equal(vertexAfterClick(3, 0, at(50, 50), at(50, 50)), 0);
+  // A click on the polyline's body, or on anything else, resolves to no vertex —
+  // which §6.1 then reads as "its last one".
+  assert.equal(vertexAfterClick(2, null, at(50, 50), at(52, 51)), null);
+});
+
+test('a drag-tail click leaves the vertex sub-selection alone (§6.1)', () => {
+  // Orbiting away from a polyline with a vertex held must not move the
+  // sub-selection to its last vertex.
+  assert.equal(vertexAfterClick(2, null, at(50, 50), at(200, 180)), 2);
+  assert.equal(vertexAfterClick(2, 4, at(50, 50), at(200, 180)), 2);
 });

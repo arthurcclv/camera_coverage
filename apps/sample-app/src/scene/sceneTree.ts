@@ -1,8 +1,9 @@
 /**
  * App-level scene hierarchy model (spec §5.5).
  *
- * A generic tree that holds cameras (§5), probes (§12), sections (§13), and
- * sampling zones/volumes (`sampling_volumes.md` §4), structured so future entity
+ * A generic tree that holds cameras (§5), probes (§12), sections (§13),
+ * sampling zones/volumes (`sampling_volumes.md` §4), and camera-constraint
+ * groups/constraints (`camera_placement.md` §7), structured so future entity
  * types (lights, meshes, …) slot in as new `SceneNode` variants and sibling
  * groups. Nodes carry hierarchy + identity only; entity payload stays in the
  * canonical arrays — cameras in `CameraConfig[]`, probes in `Probe[]`, sections
@@ -20,6 +21,13 @@ import { cameraLabel, type SceneCamera } from '../cameras/camera.ts';
 import { probeLabel, type Probe } from './probeVisibility.ts';
 import { sectionLabel, type Section } from './sectionHeatmap.ts';
 import { zoneLabel, type SamplingVolume, type Zone } from './samplingVolumes.ts';
+import {
+  constraintLabel,
+  groupLabel,
+  type CameraConstraint,
+  type ConstraintGroup,
+} from '../placement/region.ts';
+import type { Selection } from './viewportSelection.ts';
 
 export type SceneNode =
   | { kind: 'group'; id: string; label: string; childIds: string[] }
@@ -27,17 +35,28 @@ export type SceneNode =
   | { kind: 'probe'; id: string; label: string; probeId: string }
   | { kind: 'section'; id: string; label: string; sectionId: string }
   | { kind: 'zone'; id: string; label: string; zoneId: string; childIds: string[] }
-  | { kind: 'volume'; id: string; label: string; volumeId: string };
+  | { kind: 'volume'; id: string; label: string; volumeId: string }
+  | {
+      kind: 'constraintGroup';
+      id: string;
+      label: string;
+      groupId: string;
+      childIds: string[];
+    }
+  | { kind: 'constraint'; id: string; label: string; constraintId: string };
 
 const CAMERA_GROUP_ID = 'group:cameras';
 const PROBE_GROUP_ID = 'group:probes';
 const SECTION_GROUP_ID = 'group:sections';
 const ZONES_GROUP_ID = 'group:zones';
+const CONSTRAINTS_GROUP_ID = 'group:constraints';
 const CAMERA_NODE_PREFIX = 'cam:';
 const PROBE_NODE_PREFIX = 'probe:';
 const SECTION_NODE_PREFIX = 'section:';
 const ZONE_NODE_PREFIX = 'zone:';
 const VOLUME_NODE_PREFIX = 'volume:';
+const CONSTRAINT_GROUP_NODE_PREFIX = 'cg:';
+const CONSTRAINT_NODE_PREFIX = 'con:';
 
 /** Stable tree-node id for a camera (namespaced to avoid collisions). */
 export function nodeIdForCamera(cameraId: string): string {
@@ -99,9 +118,63 @@ export function volumeIdForNode(nodeId: string): string | null {
     : null;
 }
 
-/** A node's child ids (groups and zones have children; other kinds don't). */
+/** Stable tree-node id for a constraint group (namespaced to avoid collisions). */
+export function nodeIdForConstraintGroup(groupId: string): string {
+  return `${CONSTRAINT_GROUP_NODE_PREFIX}${groupId}`;
+}
+
+/** Inverse of {@link nodeIdForConstraintGroup}; null if the node id isn't a group. */
+export function constraintGroupIdForNode(nodeId: string): string | null {
+  return nodeId.startsWith(CONSTRAINT_GROUP_NODE_PREFIX)
+    ? nodeId.slice(CONSTRAINT_GROUP_NODE_PREFIX.length)
+    : null;
+}
+
+/** Stable tree-node id for a camera constraint (namespaced to avoid collisions). */
+export function nodeIdForConstraint(constraintId: string): string {
+  return `${CONSTRAINT_NODE_PREFIX}${constraintId}`;
+}
+
+/** Inverse of {@link nodeIdForConstraint}; null if the node id isn't a constraint. */
+export function constraintIdForNode(nodeId: string): string | null {
+  return nodeId.startsWith(CONSTRAINT_NODE_PREFIX)
+    ? nodeId.slice(CONSTRAINT_NODE_PREFIX.length)
+    : null;
+}
+
+/**
+ * The tree node a selection highlights, or null when nothing is selected (spec §5.5).
+ *
+ * Keyed by an exhaustive `Record` over the selection kinds rather than a ternary
+ * chain: the chain this replaced ended in `: null`, so `constraintGroup` and
+ * `constraint` — added to `Selection` later — resolved to no node and their rows
+ * never highlighted, even though both kinds are selectable
+ * (`camera_placement.md` §7) and the row renders a highlight for whatever is
+ * selected. The `Record` makes the next kind added to `Selection` a compile error
+ * until it names its node here.
+ */
+export function nodeIdForSelection(selection: Selection): string | null {
+  if (!selection) return null;
+  const nodeIdFor: Record<NonNullable<Selection>['kind'], (id: string) => string> = {
+    camera: nodeIdForCamera,
+    probe: nodeIdForProbe,
+    section: nodeIdForSection,
+    zone: nodeIdForZone,
+    volume: nodeIdForVolume,
+    constraintGroup: nodeIdForConstraintGroup,
+    constraint: nodeIdForConstraint,
+  };
+  return nodeIdFor[selection.kind](selection.id);
+}
+
+/**
+ * A node's child ids. Groups, zones, and constraint groups have children; other
+ * kinds don't.
+ */
 function childIdsOf(node: SceneNode): string[] {
-  return node.kind === 'group' || node.kind === 'zone' ? node.childIds : [];
+  return node.kind === 'group' || node.kind === 'zone' || node.kind === 'constraintGroup'
+    ? node.childIds
+    : [];
 }
 
 /**
@@ -117,6 +190,8 @@ export function buildSceneTree(
   sections: Section[] = [],
   zones: Zone[] = [],
   volumes: SamplingVolume[] = [],
+  constraintGroups: ConstraintGroup[] = [],
+  constraints: CameraConstraint[] = [],
 ): SceneNode[] {
   const cameraNodes: SceneNode[] = cameras.map((c) => ({
     kind: 'camera',
@@ -196,6 +271,40 @@ export function buildSceneTree(
     nodes.push(zonesGroup, ...zoneNodes, ...volumeNodes);
   }
 
+  // The Constraints umbrella + group subtrees appear once any constraint group
+  // exists — including an empty one (`camera_placement.md` §7), exactly as the
+  // Zones umbrella does. Root order is Cameras → Probes → Sections → Zones →
+  // Constraints, fixed (spec §5.5.1).
+  if (constraintGroups.length > 0) {
+    const groupNodes: SceneNode[] = [];
+    const constraintNodes: SceneNode[] = [];
+    for (const g of constraintGroups) {
+      const own: SceneNode[] = constraints
+        .filter((c) => c.groupId === g.id)
+        .map((c) => ({
+          kind: 'constraint',
+          id: nodeIdForConstraint(c.id),
+          label: constraintLabel(c),
+          constraintId: c.id,
+        }));
+      groupNodes.push({
+        kind: 'constraintGroup',
+        id: nodeIdForConstraintGroup(g.id),
+        label: groupLabel(g),
+        groupId: g.id,
+        childIds: own.map((n) => n.id),
+      });
+      constraintNodes.push(...own);
+    }
+    const umbrella: SceneNode = {
+      kind: 'group',
+      id: CONSTRAINTS_GROUP_ID,
+      label: 'Constraints',
+      childIds: groupNodes.map((n) => n.id),
+    };
+    nodes.push(umbrella, ...groupNodes, ...constraintNodes);
+  }
+
   return nodes;
 }
 
@@ -233,4 +342,31 @@ export function flattenVisible(nodes: SceneNode[], collapsedIds: Set<string>): R
   };
   for (const id of rootIds) visit(id, 0);
   return rows;
+}
+
+/**
+ * What clicking a row selects, or `null` when the row only expands (§4.1).
+ *
+ * Keyed as an exhaustive `Record<SceneNode['kind'], …>` rather than written as
+ * an if/else chain, for the reason `ui/entityMenu.ts` records: a trailing `else`
+ * silently claims every kind added to the union afterwards. Here it claimed
+ * `constraint`, so a node kind added next would have been selected *as* a
+ * constraint — with `node.constraintId` undefined — and the row would have gone
+ * quiet rather than failing. This way the next kind is a compile error.
+ *
+ * `group` is the one kind that selects nothing: a group header toggles its own
+ * collapse instead.
+ */
+export function nodeSelection(node: SceneNode): Selection {
+  const pick: { [K in SceneNode['kind']]: (n: Extract<SceneNode, { kind: K }>) => Selection } = {
+    group: () => null,
+    camera: (n) => ({ kind: 'camera', id: n.cameraId }),
+    probe: (n) => ({ kind: 'probe', id: n.probeId }),
+    section: (n) => ({ kind: 'section', id: n.sectionId }),
+    zone: (n) => ({ kind: 'zone', id: n.zoneId }),
+    volume: (n) => ({ kind: 'volume', id: n.volumeId }),
+    constraintGroup: (n) => ({ kind: 'constraintGroup', id: n.groupId }),
+    constraint: (n) => ({ kind: 'constraint', id: n.constraintId }),
+  };
+  return (pick[node.kind] as (n: SceneNode) => Selection)(node);
 }

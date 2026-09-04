@@ -12,8 +12,10 @@ the way of the 3D viewport.
 
 ## Color
 
-Defined ad hoc in `index.css` (no CSS custom properties yet — if you find
-yourself repeating a value, promote it to a `:root` variable).
+Defined ad hoc in `index.css`, with one exception: the subtle border recurred
+sixteen times and is now `--border-subtle` on `:root`. That is the rule, not a
+one-off — if you find yourself repeating a value, promote it to a `:root`
+variable.
 
 ### Surfaces & structure
 | Role | Hex | Used for |
@@ -22,7 +24,7 @@ yourself repeating a value, promote it to a `:root` variable).
 | Sidebar / left panel | `#1b1e24` | side columns |
 | Panel card | `#20242b` | `.panel` |
 | Row hover / menu | `#262b33` | tree/probe row hover, popover menus |
-| Border (subtle) | `#2a2e36` | panel/column borders, `.btn.secondary` |
+| Border (subtle) | `#2a2e36` (`var(--border-subtle)`) | panel/column borders, `.btn.secondary` |
 | Border / control (raised) | `#384252` | scrollbar thumb, divider grip, disabled btn, menu border |
 | Border hover | `#55606f` | scrollbar/divider hover |
 
@@ -74,6 +76,10 @@ readout beside it is what carries absolute value.
 | Sightline (probe → visible camera) | `0x4de08a` (green), opacity 0.9 | spec §12.4 |
 | Sampling-volume box (edges + faint fill) | `0x8bd0c0` (teal) | `scene/samplingVolumeGizmos.ts` |
 | Volume selected / disabled-zone volume | edges `0xffd23f` (yellow) / dimmed to opacity 0.25 | |
+| Camera-constraint handles + bodies | `0xc08bd0` (violet); handles opaque, every fill 0.16 selected / 0.10 / 0.04 disabled | `scene/constraintGizmos.ts` |
+| Constraint / vertex selected, disabled constraint | `0xffd23f` (yellow) / opacity 0.35 | `camera_placement.md` §6.1 |
+| Placement pool scatter | violet ramped 0.35→1.0 by the position's own reachable count; chosen positions `0xffd23f`. **4 px screen-space dots** (`sizeAttenuation: false`) drawn as an instanced **sprite**, not `THREE.Points` — WebGPU point primitives are fixed at 1 px, and a world-space size small enough for a 6 m room is sub-pixel on the 1120 m site | `camera_placement.md` §5.2 |
+| Draft polyline (armed draw mode) | `0xffd23f`: a 7 px screen-space dot per clicked vertex plus a solid line between them, both `depthTest: false` at `RenderOrder.draftOverlay`. Solid rather than dashed because two dashed constructions rendered nothing under this WebGPU backend (`CONVENTIONS.md`) | `camera_placement.md` §6.2 |
 | Coverage overlay fog | user hue, default **red** (hue 0), `hsl(h,100%,50%)` | `scene/coverageOverlay.ts` |
 
 The **frustum wireframe renders for the selected camera only** (spec §5.3); every
@@ -109,6 +115,14 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   between/within pair above. The gap *is* the grouping: no divider rule, so nothing
   extra is painted over the 3D scene. Add a tool by putting it in the group it
   belongs to, or opening a new group — never by hanging a margin off one button.
+- **Button row** (`.row.button-row`): the primary button takes the row's width
+  (`flex: 1`) while a secondary beside it keeps its own — the placement mode's
+  Build and Analyze, each with a Cancel that appears only while it runs, so the
+  primary is the same width whether or not it is running. Separated from the
+  fields above it by a `#2a2e36` rule with `10px` either side, the same divider
+  the pinned action footer uses: the fields are what the button spends, so the
+  line marks where reading settings ends and pressing begins. `.btn.block`
+  remains the full-width form for a button that is alone in its column.
 - **Radius:** `4px` (inputs, menu items, small chips) · `6px` (buttons, rows,
   banners, menus) · `8px` (panel cards) · `999px` (pill badges).
 - **Layout:** three columns in a full-viewport flex row — left inspector `340px`
@@ -116,6 +130,22 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   `row-resize` divider), center viewport (`flex: 1`, `min-width: 0`) with absolute
   top-left and top-right icon toolbars, right sidebar `340px`. Side columns
   scroll; the app shell never scrolls (`overflow: hidden`).
+- **Placement mode** (`camera_placement.md` §5): the same three columns, with both
+  side columns' *contents* replaced — nothing about the shell changes, because
+  the mode's claim is exclusion, not screen space. The left column
+  (`.left-panel.placement-inputs`) drops the hierarchy/detail divider and simply
+  stacks two cards. **Neither column scrolls at the column level**: a scrolling
+  column reserves a stable gutter, and reserving one on a single side would leave
+  the two columns' content boxes disagreeing by its width. Both put the scroll
+  one level in, in a card's `.panel-body` (`scrollbar-gutter: stable`,
+  `padding-right: 6px`), which is the object-detail panel's idiom. The right (`.sidebar.placement-review-col`) holds one card
+  that fills the column: a fixed title, a scrolling `.panel-body`, and a
+  `.placement-actions` footer above a `#2a2e36` rule, so **Close** is on screen
+  however far the review has been scrolled. `.placement-confirm` — the close
+  guard, the app's only dialog — is a `.panel`-surfaced card anchored over that
+  footer with a `0 8px 24px rgb(0 0 0 / 45%)` lift, dimming nothing: the viewport
+  behind it is live and is what the user is judging. A stale result is dimmed
+  (`.placement-curve.stale`, `opacity: 0.55`) rather than withdrawn.
 - **Scrollbars:** custom 8 px thin thumbs (`#384252`, hover `#55606f`), WebKit via
   `::-webkit-scrollbar` and Firefox via a `@supports` block — kept apart
   deliberately (see the comment in `index.css`). Scroll containers reserve space
@@ -128,16 +158,26 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   and scroll only `.panel-body`. `.panel-title.subhead` is a subsection heading
   inside a body (12 px top margin); `.panel-title .badge` trails the title text
   (8 px left). A `.stat-line.spaced` sets a stat row off from the controls above
-  it (8 px top). No inline spacing styles — spacing lives in `index.css`.
+  it (8 px top). `.hint.readout` is a result stated directly under a card's title,
+  above the controls that produced it (the placement mode's pool and analysis
+  readouts) — set off by a `#2a2e36` rule *below* it, since the title already
+  separates it from above. No inline spacing styles — spacing lives in `index.css`.
 - **Row** (`.row`): label left, control right, space-between, 12 px label.
   `Slider.tsx` is the reusable control for bounded scalars (plain range, plus a
   `.spectrum` rainbow variant with a white thumb for hue) — e.g. FOV, Range,
   resolution. Its value readout is a `.slider-value` **editable text input** (same
   dark boxed chrome as the vector fields — 56 px, `#14161a` field, `#2a2e36` border,
   right-aligned tabular-nums, blue `#3a5ba0` focus border), replacing the old
-  read-only `.value-chip`. When the row is too narrow for the label + slider + value,
+  read-only `.value-chip`. A `NumberInput` standing **alone** as a row's only
+  control (a constraint group's Aspect and Near, the placement mode's Size and
+  strategy fields) takes `.number-field`, which shares that rule — the component
+  renders a `type="text"` input, so one with neither class matches no rule and
+  falls back to the browser's default white box. When the row is too narrow for the label + slider + value,
   the **slider shrinks** (the range carries `min-width: 0`); the label and value box
-  keep their size, so the row never overflows the panel horizontally.
+  keep their size, so the row never overflows the panel horizontally. A label carrying a
+  **unit most users will not know** (`Knee (pp)`) takes `Slider`'s `title`, which becomes
+  both the hover text and the field's `aria-label` — the explanation reaches a pointer and a
+  screen reader by one string rather than two.
 - **Vector field** (`.vec-row`, `Vec3Field.tsx`): the editor for X/Y/Z and
   yaw/pitch/roll triplets (position, rotation, size) — a **fixed 58 px group label**
   (`.vec-group-label`, keeps the field grids aligned across Position / Rotation /
@@ -154,9 +194,21 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   `.segmented` groups buttons into an equal-width segmented control.
 - **Armed viewport tool:** a toolbar button that puts the viewport into a
   click-to-act mode carries `.active` + `aria-pressed`, and the viewport itself
-  changes cursor — `.viewport.placing canvas { cursor: crosshair }` for "Place on
-  surface". Two signals, one in the toolbar and one under the pointer, because the
-  toolbar is not where the user is looking when the mode matters.
+  changes cursor — `.viewport.placing canvas` for "Place on surface",
+  `.viewport.drawing canvas` for the polyline draw mode and **Extend**
+  (`../specs/camera_placement.md` §6.2), both `cursor: crosshair`. Two signals, one
+  in the toolbar and one under the pointer, because the toolbar is not where the
+  user is looking when the mode matters. Two exceptions, both in
+  `camera_placement.md` §6.2: **Extend**'s button lives in the *panel* of the
+  polyline it grows (same `.active` + `aria-pressed` pair, just not in the
+  toolbar), and the **draw mode** has no button at all — armed from the hierarchy's
+  "+" menu, it is the one armed tool whose only signal is the crosshair.
+- **Selected polyline vertex** (`.vertex-head`, `.vertex-row`,
+  `../specs/camera_placement.md` §6.2): a subhead naming the vertex
+  (`Vertex 3` with a muted `of 8` in `.vertex-count`) with **Extend** opposite it,
+  then the coordinate row with `+` / `−` `.icon-btn`s. One vertex, never a list:
+  the panel shows what the viewport gizmo is attached to, so there is no
+  selected-row state to mark and no scrolling to find the vertex being held.
 - **Layer menu** (`.layer-menu`, a `.menu` popover): the top-right eye button
   (`.icon-btn`) opens a checklist of layer-visibility rows (`.layer-menu-row`:
   checkbox + glyph + label). Toggling keeps the menu open; it closes on
@@ -199,7 +251,25 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   "Restrict coverage to zones" toggle.
 - **Menu** (`.menu`): popover for the add-entity menu and the right-click
   Duplicate/Delete context menu — dark surface, shadow `0 6px 20px rgba(0,0,0,.45)`,
-  blue hover.
+  blue hover. The three hierarchy popovers (add menu, its submenu, the context menu)
+  are **`position: fixed` at a fixed `width: 160px`**, placed from their anchor's
+  measured rect (`ui/menuPopover.ts`). Fixed width, not content-driven: the add menu
+  and its submenu then line up as one assembly instead of each sizing to its own
+  longest label, and the open direction can be resolved before the popover renders.
+  Fixed position because all three open **outward**, away from the panel, and
+  `.left-panel`'s `overflow: hidden` clips an absolutely positioned child at the panel
+  edge. The viewport's own `.layer-menu` / `.view-menu` keep their content-driven
+  widths — they are not part of this assembly.
+  - **Submenu** (`.menu li.has-submenu` + a nested `.menu.submenu`): a parent row
+    carries a right-aligned `▸` caret in the faint text colour (`#7a828f`, going white
+    on hover / while open) and opens its child popover on hover or click, to the row's
+    **right** and 4 px above its top — flush with the parent popover's padding, so the
+    two read as one surface. It flips to the row's left only when the right side would
+    leave the **window** (the panel is resizable, so the room to the right varies).
+    Placement and width are the shared hierarchy-popover rules above. The parent row
+    stays highlighted while its submenu is open, so the trail from "+" to the chosen
+    entry is visible at a glance. The child otherwise reuses `.menu` chrome unchanged,
+    so nesting adds a position, not a new surface.
 - **Spinner** (`.spinner`): 12 px ring, blue top border, 0.7 s spin.
 - **Error banner** (`.error-banner`): dark-red surface + border, for engine
   errors.
@@ -253,6 +323,23 @@ fraction (Coverage mode) or is flat (Blind-spots mode).
   non-essential.
 
 ## When adding UI
+
+**Violet is the constraint family's own hue**, chosen so a constraint is never mistaken
+for a sampling volume (teal) in the hierarchy or the viewport. The two look alike — a
+named container over child regions, both with enabled checkboxes — but a volume changes
+*what is counted* while a constraint only *generates cameras* (`camera_placement.md`
+§1.1), and the colour is the first place that distinction is legible.
+
+The **reachable-vs-count curve** (`.placement-curve`) draws the curve in violet, the knee
+dot in teal, the selected count in yellow, and the pool ceiling as a dim dashed
+asymptote (`#5c6270`) — dimmer than the curve because it is a bound, not a result. It
+carries a drawn **value axis** (`.curve-axis`, `#3a4150`) with three ticks labelled as
+reachable percentages (`.curve-tick`, `#7c8592`, 8 px, tabular-nums) — the same percentage
+the stats below quote, so a curve is never a shape without a scale — and dimmer still than
+the ceiling, being the frame rather than the answer. The plot keeps **at least a tenth of its
+height empty above the highest value** (`CURVE_HEADROOM = 0.1`, taken in value space so it
+survives a height change): the ceiling sits at or near the top of the range, and flush
+against the frame it would read as a border rather than as the bound the curve approaches.
 
 Reuse the palette and the `.panel` / `.row` / `.btn` / `.badge` / `Slider`
 primitives rather than introducing new colors, fonts, or bespoke controls. New

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  SCENE_FILE_FORMAT_VERSION,
   isSafeAssetPath,
   parseSceneFile,
   resolveSectionFootprints,
@@ -10,7 +11,7 @@ import {
 
 function validDoc(): SceneFileJSON {
   return {
-    formatVersion: 2,
+    formatVersion: 3,
     geometry: [
       {
         kind: 'room',
@@ -39,7 +40,18 @@ function validDoc(): SceneFileJSON {
       },
     ],
     cameras: [
-      { id: 'cam-1', position: [-6, 5.4, -9.6], rotation: [0, 0, 0, 1], fov: 60, aspect: 1.7778, near: 0.1, far: 30 },
+      // Bound to con-1 (`camera_placement.md` §6.3) — provenance plus the clamp,
+      // and the reference the reader checks once the constraints are parsed.
+      {
+        id: 'cam-1',
+        position: [-6, 5.4, -9.6],
+        rotation: [0, 0, 0, 1],
+        fov: 60,
+        aspect: 1.7778,
+        near: 0.1,
+        far: 30,
+        constraintId: 'con-1',
+      },
     ],
     probes: [{ id: 'probe-1', position: [0, 1, 0] }],
     sections: [
@@ -63,8 +75,122 @@ function validDoc(): SceneFileJSON {
       { id: 'volume-1', zoneId: 'zone-1', position: [3, 1.5, -2], rotation: [0, 0.259, 0, 0.966], size: [4, 3, 6] },
     ],
     useZones: true,
+    constraintGroups: [
+      {
+        id: 'cg-1',
+        name: 'Dock',
+        enabled: true,
+        fov: 60,
+        far: 30,
+        namePrefix: 'Dock',
+        poolSize: 200,
+        maxCount: 10,
+        trials: 1000,
+        epsilon: 1,
+        seed: 1,
+      },
+    ],
+    constraints: [
+      {
+        id: 'con-1',
+        groupId: 'cg-1',
+        name: 'Gantry rail',
+        enabled: true,
+        kind: 'polyline',
+        distance: 0.4,
+        points: [
+          [-9, 5.4, -9],
+          [-9, 5.4, 9],
+          [9, 5.4, 9],
+        ],
+      },
+      {
+        id: 'con-2',
+        groupId: 'cg-1',
+        name: 'North wall',
+        enabled: true,
+        kind: 'plane',
+        distance: 0.3,
+        position: [0, 4, -9.6],
+        rotation: [0, 0, 0, 1],
+        size: [18, 3],
+      },
+    ],
   };
 }
+
+// --- camera placement (`camera_placement.md` §9) -----------------------------
+
+test('constraint groups and constraints round-trip, strategy included (§9)', () => {
+  const parsed = parseSceneFile(validDoc());
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const [group] = parsed.scene.constraintGroups;
+  // The pool size and the whole strategy persist, which is the point of a seeded analysis: a
+  // file that records the output without its inputs cannot be re-run (§9).
+  assert.equal(group.poolSize, 200);
+  assert.equal(group.trials, 1000);
+  assert.equal(group.seed, 1);
+  assert.equal(group.far, 30);
+  assert.equal(parsed.scene.constraints.length, 2);
+  assert.equal(parsed.scene.cameras[0].constraintId, 'con-1');
+});
+
+test('parseSceneFile rejects a constraint whose groupId references no group (§14.8)', () => {
+  const doc = validDoc();
+  doc.constraints = [{ ...doc.constraints[0], groupId: 'cg-999' }];
+  assert.equal(parseSceneFile(doc).ok, false);
+});
+
+test('parseSceneFile rejects a camera bound to a constraint that does not exist (§14.8)', () => {
+  // A dangling binding would read as an unclamped camera the user believes is
+  // on a rail — silently, since nothing else about it looks wrong (§6.3).
+  const doc = validDoc();
+  doc.cameras = [{ ...doc.cameras[0], constraintId: 'con-999' }];
+  assert.equal(parseSceneFile(doc).ok, false);
+});
+
+test('parseSceneFile rejects a malformed constraint or strategy (§9)', () => {
+  const bad = (mutate: (doc: SceneFileJSON) => void) => {
+    const doc = validDoc();
+    mutate(doc);
+    return parseSceneFile(doc).ok;
+  };
+  assert.equal(bad((d) => { d.constraints[0] = { ...d.constraints[0], kind: 'blob' as never }; }), false);
+  assert.equal(bad((d) => { d.constraints[0] = { ...d.constraints[0], distance: -1 }; }), false);
+  assert.equal(bad((d) => { d.constraints[0] = { ...d.constraints[0], kind: 'polyline', points: [[0, 0, 0]] } as never; }), false);
+  assert.equal(bad((d) => { d.constraints[1] = { ...d.constraints[1], kind: 'plane', size: [0, 3] } as never; }), false);
+  assert.equal(bad((d) => { d.constraintGroups[0] = { ...d.constraintGroups[0], fov: 200 }; }), false);
+  assert.equal(bad((d) => { d.constraintGroups[0] = { ...d.constraintGroups[0], far: 0 }; }), false);
+  assert.equal(bad((d) => { d.constraintGroups[0] = { ...d.constraintGroups[0], poolSize: 0 }; }), false);
+  assert.equal(bad((d) => { d.constraintGroups[0] = { ...d.constraintGroups[0], seed: 1.5 }; }), false);
+  assert.equal(bad((d) => { d.constraintGroups[0] = { ...d.constraintGroups[0], id: 'cg-1', name: 'dup' }; }), true);
+});
+
+test("a group's legacy aspect/near are read past, not validated or kept (§9)", () => {
+  // Both were persisted before they became placement-wide constants
+  // (`camera_placement.md` §3.1.1). A file written by the older build must still
+  // load — including with values the old reader would have rejected — and the
+  // group it produces must carry neither key back out.
+  const doc = validDoc();
+  doc.constraintGroups[0] = { ...doc.constraintGroups[0], aspect: 0, near: 40 } as never;
+  const result = parseSceneFile(doc);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const group = result.scene.constraintGroups[0];
+  assert.equal('aspect' in group, false);
+  assert.equal('near' in group, false);
+  assert.equal(group.far, 30);
+  const written = serializeScene(result.scene).constraintGroups[0] as Record<string, unknown>;
+  assert.equal('aspect' in written, false);
+  assert.equal('near' in written, false);
+});
+
+test('duplicate constraint ids are rejected (§14.8)', () => {
+  const doc = validDoc();
+  doc.constraints = [doc.constraints[0], { ...doc.constraints[1], id: 'con-1' }];
+  assert.equal(parseSceneFile(doc).ok, false);
+});
 
 test('parseSceneFile accepts a well-formed document (spec §14.3 sketch)', () => {
   const result = parseSceneFile(validDoc());
@@ -167,8 +293,27 @@ test('parseSceneFile rejects non-object JSON', () => {
 });
 
 test('parseSceneFile rejects an unknown/newer formatVersion (spec §14.8)', () => {
-  const result = parseSceneFile({ ...validDoc(), formatVersion: 3 });
+  const result = parseSceneFile({ ...validDoc(), formatVersion: 4 });
   assert.equal(result.ok, false);
+  assert.equal(parseSceneFile({ ...validDoc(), formatVersion: 0 }).ok, false);
+});
+
+test('parseSceneFile reads a v2 document with no constraint groups (§14.8)', () => {
+  // v2 predates camera placement, so both arrays read empty
+  // (`camera_placement.md` §9) — the same back-compat rule v1 got for zones.
+  const doc = validDoc();
+  const v2: Record<string, unknown> = {
+    ...doc,
+    formatVersion: 2,
+    cameras: doc.cameras.map(({ constraintId: _drop, ...rest }) => rest),
+  };
+  delete v2.constraintGroups;
+  delete v2.constraints;
+  const result = parseSceneFile(v2);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.scene.constraintGroups, []);
+  assert.deepEqual(result.scene.constraints, []);
 });
 
 test('parseSceneFile reads a v1 document with empty zones/volumes, useZones false (§14.8)', () => {
@@ -185,12 +330,15 @@ test('parseSceneFile reads a v1 document with empty zones/volumes, useZones fals
   assert.equal(result.scene.useZones, false);
 });
 
-test('serializeScene always writes formatVersion 2 (§14.3)', () => {
+test('serializeScene always writes the current formatVersion (§14.3)', () => {
+  // A v1 file read and written back comes out at the current version: the writer
+  // has one output format, so an old file is upgraded rather than preserved.
   const doc = validDoc();
   const parsed = parseSceneFile({ ...doc, formatVersion: 1, zones: undefined, volumes: undefined, useZones: undefined });
   assert.equal(parsed.ok, true);
   if (!parsed.ok) return;
-  assert.equal(serializeScene(parsed.scene).formatVersion, 2);
+  assert.equal(serializeScene(parsed.scene).formatVersion, SCENE_FILE_FORMAT_VERSION);
+  assert.equal(SCENE_FILE_FORMAT_VERSION, 3);
 });
 
 test('parseSceneFile rejects a volume whose zoneId references no zone (§14.8)', () => {

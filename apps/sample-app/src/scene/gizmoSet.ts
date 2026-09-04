@@ -109,13 +109,24 @@ export abstract class PickableGizmoSet<E> extends GizmoSet<E> implements GizmoPi
   protected abstract pickTargetOf(entry: E): THREE.Object3D;
 
   /**
+   * Whether the pick body is a group whose descendants must be tested too.
+   *
+   * False for the sets whose body is a single mesh (a camera body, a probe
+   * marker, a volume's fill). A camera constraint's body is several meshes — a
+   * polyline's per-segment tubes and per-vertex handles (`camera_placement.md`
+   * §6.1) — so that set opts into the recursive test rather than every set
+   * paying for it.
+   */
+  protected pickRecursive = false;
+
+  /**
    * Nearest hit id + its ray distance, or null. The distance lets a caller pick
    * the single nearest hit across every pickable set (spec §5.2, `pick.ts`).
    */
   pickHit(raycaster: THREE.Raycaster): GizmoHit | null {
     let best: GizmoHit | null = null;
     for (const [id, entry] of this.entries) {
-      const hits = raycaster.intersectObject(this.pickTargetOf(entry), false);
+      const hits = raycaster.intersectObject(this.pickTargetOf(entry), this.pickRecursive);
       if (hits.length > 0 && (!best || hits[0].distance < best.distance)) {
         best = { id, distance: hits[0].distance };
       }

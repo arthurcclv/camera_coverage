@@ -6,7 +6,9 @@ import type { SamplingVolume, Zone } from '../src/scene/samplingVolumes.ts';
 import {
   insertionTargetAt,
   moveBefore,
+  moveConstraintBefore,
   moveVolumeBefore,
+  moveWithinParentBefore,
   siblingRows,
   type RowBox,
 } from '../src/scene/reorder.ts';
@@ -234,4 +236,34 @@ test('insertionTargetAt reports the sibling run’s depth for the line inset', (
 test('insertionTargetAt ignores rows it has no measurement for', () => {
   const rows = flattenVisible(buildSceneTree([cam('cam-1'), cam('cam-2')], [], [], [], []), new Set());
   assert.equal(insertionTargetAt(10, rows, new Map(), 'cam:cam-1'), null);
+});
+
+// --- camera constraints (`camera_placement.md` §7) --------------------------
+
+test('moveConstraintBefore reorders within a group and never reparents', () => {
+  const constraints = [
+    { id: 'con-1', groupId: 'cg-1' },
+    { id: 'con-2', groupId: 'cg-2' },
+    { id: 'con-3', groupId: 'cg-1' },
+  ];
+  // A flat array interleaves groups (new constraints append), and a reorder must
+  // leave every other group's slots exactly where they were.
+  const moved = moveConstraintBefore(constraints, 'con-3', 'con-1');
+  assert.deepEqual(moved.map((c) => c.id), ['con-3', 'con-2', 'con-1']);
+  assert.equal(moved[1], constraints[1]);
+
+  // Across groups, and an unknown target, are both no-ops.
+  assert.equal(moveConstraintBefore(constraints, 'con-2', 'con-1'), constraints);
+  assert.equal(moveConstraintBefore(constraints, 'con-1', 'con-404'), constraints);
+  assert.equal(moveConstraintBefore(constraints, 'con-404', null), constraints);
+});
+
+test('moveWithinParentBefore appends when beforeId is null', () => {
+  const items = [
+    { id: 'a', parent: 'p1' },
+    { id: 'b', parent: 'p2' },
+    { id: 'c', parent: 'p1' },
+  ];
+  const moved = moveWithinParentBefore(items, 'a', null, (i) => i.parent);
+  assert.deepEqual(moved.map((i) => i.id), ['c', 'b', 'a']);
 });

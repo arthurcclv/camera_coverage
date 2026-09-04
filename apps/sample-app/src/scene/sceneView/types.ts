@@ -26,4 +26,12 @@ export type TransformChange =
       maxA: number;
       minB: number;
       maxB: number;
-    };
+    }
+  /**
+   * A camera constraint moved as a whole (`camera_placement.md` §6.1). `rotation`
+   * and `size` are absent for a point, which is Move-only, and `size` is the
+   * plane rectangle's two in-plane edges.
+   */
+  | { kind: 'constraint'; id: string; position: Vec3; rotation?: Quat; size?: [number, number] }
+  /** One polyline vertex dragged by its handle (`camera_placement.md` §6.2). */
+  | { kind: 'constraintVertex'; id: string; vertex: number; position: Vec3 };

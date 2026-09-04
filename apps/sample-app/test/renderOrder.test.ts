@@ -26,6 +26,12 @@ test('draw order is plane < fog < fill so the depth writer goes first', () => {
     RenderOrder.coverageFog < RenderOrder.volumeFill,
     'fog must draw before the volume fill',
   );
+  // The draft is what the user is doing right now, so it draws above all three
+  // (`camera_placement.md` §6.2; its materials switch off `depthTest` to match).
+  assert.ok(
+    RenderOrder.volumeFill < RenderOrder.draftOverlay,
+    'the draw-mode draft must draw above every scene layer',
+  );
 });
 
 test('volumetric renderer applies setRenderOrder and keeps it across reallocation', () => {

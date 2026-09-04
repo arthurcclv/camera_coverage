@@ -26,6 +26,7 @@ import {
   type Vec3,
 } from '@linkervision/camera-coverage-sdk';
 import type { RunCameras } from './runCameras.ts';
+import { applyQuat, applyQuatConj } from './quatMath.ts';
 
 // --- Entities (§2.1) ---------------------------------------------------------
 
@@ -82,27 +83,6 @@ export function zoneLabel(zone: Zone): string {
 }
 
 // --- OBB math (§2.3, §7.1) ---------------------------------------------------
-
-/** Rotate vector `v` by quaternion `q` (xyzw): v' = q·v·q⁻¹. */
-function applyQuat(q: Quat, v: Vec3): Vec3 {
-  const [x, y, z, w] = q;
-  const [vx, vy, vz] = v;
-  // t = 2 * cross(q.xyz, v)
-  const tx = 2 * (y * vz - z * vy);
-  const ty = 2 * (z * vx - x * vz);
-  const tz = 2 * (x * vy - y * vx);
-  // v' = v + w*t + cross(q.xyz, t)
-  return [
-    vx + w * tx + (y * tz - z * ty),
-    vy + w * ty + (z * tx - x * tz),
-    vz + w * tz + (x * ty - y * tx),
-  ];
-}
-
-/** Rotate `v` by the conjugate of `q` — into the box-local frame (§2.3). */
-function applyQuatConj(q: Quat, v: Vec3): Vec3 {
-  return applyQuat([-q[0], -q[1], -q[2], q[3]], v);
-}
 
 /** World point `p` inside oriented box `v`? (§2.3). */
 export function inVolume(p: Vec3, v: SamplingVolume): boolean {

@@ -45,6 +45,21 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
   `fullValidVoxels` snapshots the full-volume valid count at init/re-init (the
   "% of full" denominator, `sampling_volumes.md` §6.3/§7.4); the box-restricted
   `setSampling` of an active run updates `samplingStats` but not it.
+- **`App.tsx` `ensureLoaded`** owns the engine's load. It is the single entry to
+  `initAndLoad`, called from a `[room]` effect (mount, and every import/reset) *and*
+  from `handleRun`. `engineLoadAction` in `useEngine.ts` — a pure helper, tested in
+  `test/engineLoad.test.ts` — decides between `satisfied` / `join` / `start` from the
+  `(epoch, room, voxelSize)` triple the engine holds, the one in flight, and the one
+  requested, which is what keeps the load single-flight when a run fires in the same
+  tick as the scene-load effect. **`epoch`** is `useEngine`'s worker-instance counter
+  (bumped whenever it creates a worker, which also resets `EngineState`): a load is a
+  fact about one worker, so StrictMode's dev remount must neither join the terminated
+  worker's unsettled `init` nor inherit its "loaded" state. **The engine loads on scene load, not on the first
+  run** (spec §8): a pool build drives `compute()` without passing the Run gate, so
+  its readiness check has to be satisfiable before any run has happened. Loading is
+  not computing — coverage still waits for a Run or an auto-run tick. A `voxelSize`
+  change stays lazy (spec §6): it is re-initialized by the next run, since it gates
+  nothing and re-voxelizing is the session's costliest call.
 - **`App.tsx` `handleRun`** re-inits when voxel size changed **or** `room` (the
   built geometry) was replaced since the last init — a scene-file import (spec
   §14.4) always forces a fresh `loadScene`/workspace even at the same voxel
@@ -99,11 +114,22 @@ effect re-requests it through `engine.reaggregate` whenever it changes, which is
 what makes a zone move or a section drag cost no recompute (spec §3.3). All of that, plus two derived `useMemo`s
 (`clipBand`, `sightlines`), is bundled into one immutable `sceneViewState`
 (`useMemo`) and pushed to `SceneView.sync()` in a single effect — SceneView diffs
-each field by reference, so an expensive op runs only on its own change. The only
-`useRef`s left are the async run/handler path: `roomRef`, `initializedRoomRef`,
-`bvhRef`, and **one `stateRef` mirroring the whole reducer state** so `handleRun`
-reads the live document across awaits (it replaced the ~7 per-field mirrors and
-`samplingDirtyRef`; the run-generation guard moved onto `coverageRun`). **Auto-run**
+each field by reference, so an expensive op runs only on its own change. The
+`useRef`s fall into three groups. The **async run/handler path**: `roomRef`,
+`initializedRoomRef`, `initializedVoxelSizeRef`, `engineLoadRef` (the in-flight
+load, keyed by what it loads), `bvhRef`, and **one `stateRef` mirroring the whole
+reducer state** so `handleRun` reads the live document across awaits (it replaced
+the ~7 per-field mirrors and `samplingDirtyRef`; the run-generation guard moved
+onto `coverageRun`). **DOM handles** for the gestures and panels (`containerRef`,
+`leftPanelRef`, `detailPanelRef`, `dividerDragRef`, `viewRef`). And the largest
+group, added with the aim optimizer and camera placement: **getter mirrors** —
+`camerasRef`, `constraintsRef`, `markedFilterRef`, `engineReadyRef`,
+`samplingPendingRef` and their peers — each mirroring one value so the session
+hooks can read it live through a thunk without re-creating their callbacks on
+every edit (see `usePlacement`'s `UsePlacementArgs`). That group is why the ref
+count is now ~28 rather than the six above; it is a second mirroring mechanism
+living beside `stateRef`, and consolidating the two onto `stateRef` is the
+obvious next simplification if the argument list grows again. **Auto-run**
 is a 10 Hz
 `setInterval` that fires `handleRun` when inputs are stale and the engine is idle
 and error-free (spec §8.1 throttle).
@@ -223,12 +249,15 @@ default" — see DECISIONS.md).
   is *not* that set, since the `camera` view is perspective too), the labels,
   `isOrthographic`/`orbitEnabled`/`navigationEnabled`, `fitOrtho` for the ortho
   auto-fit, and `fitCameraView` for the Selected view's rendered FOV + guide rect.
-- `gizmoSet.ts` — the shared spine the four per-entity gizmo sets extend.
+- `gizmoSet.ts` — the shared spine the five per-entity gizmo sets extend.
   `GizmoSet<E>` owns the keyed `entries` map, the group, the create/update/sweep
   `reconcile` loop, `getAttachTarget`, and `dispose`; subclasses supply
   `createEntry`/`disposeEntry`/`attachTargetOf` and their own `update` signature.
   `PickableGizmoSet<E>` adds the nearest-hit `pickHit` for the viewport-pickable
-  three (sections are hierarchy-selected only, spec §13.8). `GizmoPicker` /
+  four (sections are hierarchy-selected only, spec §13.8), plus a `pickRecursive`
+  flag: three of them have a single-mesh body, while a camera constraint's is
+  several meshes, so that set opts in rather than every set paying for it.
+  `GizmoPicker` /
   `GizmoAttachable` are the minimal interfaces `SceneView` holds the sets behind
   in its pick and attach registries. See DECISIONS.md's GizmoSet entry.
 - `cameraGizmos.ts` — per-camera frustum wireframe + pickable "body" sphere;
@@ -287,17 +316,24 @@ default" — see DECISIONS.md).
   `sectionHeatmap.ts`'s output (including its rotation/sign math), owns no
   aggregation logic. Extends the plain (non-pickable) `GizmoSet` — sections are
   selected from the hierarchy row, never the viewport (spec §13.8).
-- `sceneTree.ts` — `SceneNode` union (camera/probe/section + zone/volume) +
-  `buildSceneTree` / `flattenVisible`. Zone nodes are both selectable and
-  expandable (their volume children); `flattenVisible` treats any node with a
-  non-empty `childIds` as expandable, not just groups.
+- `sceneTree.ts` — `SceneNode` union (camera/probe/section + zone/volume +
+  constraintGroup/constraint) + `buildSceneTree` / `flattenVisible`, the
+  `nodeIdFor*` / `*IdForNode` namespaced id pair per kind, and
+  `nodeIdForSelection` — the selection → highlighted-row mapping, an exhaustive
+  `Record` over `Selection['kind']` (it replaced a ternary chain ending in `: null`,
+  which left the two constraint kinds with no node and so no highlight). Zone nodes
+  are both selectable and expandable (their volume children); `flattenVisible`
+  treats any node with a non-empty `childIds` as expandable, not just groups.
 - `reorder.ts` — pure drag-reorder logic (spec §5.5.1). Two halves: `siblingRows` /
   `insertionTargetAt` turn a pointer Y plus measured row extents into "insert before
   this sibling" (or null → illegal drop), and `moveBefore` / `moveVolumeBefore` do
-  the array splice the reducer applies. `moveVolumeBefore` is the subtle one — the
-  global `volumes` array interleaves zones, so it permutes a zone's volumes among
-  the slots they already occupy and leaves every other element identical. Both
-  splices return the *input array reference* on a no-op, which is how the reducer
+  the array splice the reducer applies. The subtle one is
+  `moveWithinParentBefore` — the flat `volumes` array interleaves zones (and
+  `constraints` interleaves groups), so it permutes one parent's children among the
+  slots they already occupy and leaves every other element identical.
+  `moveVolumeBefore` (parent `zoneId`) and `moveConstraintBefore` (parent `groupId`)
+  are one-line wrappers over it rather than two copies of that reasoning. Every
+  splice returns the *input array reference* on a no-op, which is how the reducer
   stays a cheap identity for illegal drops. No DOM here; the pointer plumbing lives
   in `SceneHierarchy.tsx`.
 - `entityDuplication.ts` — pure "Duplicate" context-menu logic (spec §5.5):
@@ -306,8 +342,13 @@ default" — see DECISIONS.md).
   fresh id. Zone duplication also clones the zone's child volumes; app-level side
   effects (selection, camera disabled-state inheritance, stale-marking) stay in
   `App.tsx`.
+- `quatMath.ts` — `applyQuat`/`applyQuatConj` over plain `Vec3`/`Quat` tuples, shared by
+  `samplingVolumes.ts`'s box-local frame and `placement/region.ts`'s plane-local one. It
+  exists because the pair shipped twice, byte-identical, from two different specs. Not
+  Three.js, so the pure modules and their tests reach it without a renderer.
 - `samplingVolumes.ts` — the region-of-interest core (`sampling_volumes.md`): the
-  `Zone`/`SamplingVolume` types, OBB math (`inVolume`/`inZone`/`obbWorldAabb`),
+  `Zone`/`SamplingVolume` types, OBB math (`inVolume`/`inZone`/`obbWorldAabb`, over
+  `quatMath.ts`),
   `buildSceneBvh` + `extractZonesAndVolumes` (BVH two-level seeding via the SDK's
   public `cleanMesh`/`buildBvh`), `regionsFromVolumes` (SDK `box` regions from OBB
   world AABBs), and `summaryFromAccum` (a `ZoneSummary` from one SDK `RegionAccum`).
@@ -324,11 +365,40 @@ default" — see DECISIONS.md).
   root object maps 1:1 to `{position, quaternion, scale}` so TransformControls
   (translate/rotate/scale) writes them straight back; pickable, dims the volumes of
   disabled zones. Extends `PickableGizmoSet`.
-- `viewportSelection.ts` — pure click-vs-drag + unified selection decision.
+- `constraintGizmos.ts` — per-constraint handles plus the **exact** dilation: a plane's
+  is the core slab *and* four edge cylinders *and* four corner spheres, because the
+  bounding box would claim corners the region does not contain and a bare slab would deny
+  the rim it does — a gizmo that disagrees with `inRegion` teaches the wrong shape. The
+  meshes are rebuilt only on a **shape-signature** change; every other update is a
+  transform write. **Fills are marked, not inferred:** `fillMaterial()` sets
+  `userData.fill`, and the styling pass gives every marked material the one `fillOpacity`
+  ramp. It used to infer translucency from being parented under the dilation group, which
+  forced a plane's rectangle — a fill that is not a dilation — fully opaque
+  (`test/constraintGizmos.test.ts`). Also holds `PlacementOverlay` (the pool scatter and the draft
+  polyline with its clicked vertices), since both are the placement tool's picture and share
+  its layer toggle. Both dot sets are one `ScreenDots` (instanced `Sprite`, screen-space
+  size); the draft draws at `RenderOrder.draftOverlay` with `depthTest: false`, since its
+  vertices are coplanar with the surface they were clicked on.
+- `polylineDraw.ts` — the armed draw mode's pure state and the vertex-editing rules:
+  append, backspace, cursor, the commit rule (one vertex commits as a *point* constraint —
+  that is what the user drew), `drawClickAction` (whether one viewport click appends or
+  commits — a double-click contributes no vertex of its own, `draftAfterDoubleClick`
+  taking back the one its first click appended), and the committed
+  polyline's rules: `effectiveVertex` (a polyline always has one vertex selected, defaulting
+  to its last — one clamp that also covers a delete), `insertMidpoint` (the panel's `+`,
+  null on the last vertex), and `extendEnd`/`extendInsertAt` (vertex 1 prepends, any other
+  appends), plus `segmentPairs`, which turns the draft's vertices into the explicit endpoint
+  pairs its `LineSegments` draws (solid: two dashed constructions rendered nothing under
+  this app's WebGPU backend, see `CONVENTIONS.md`). A repeating variant of `placement.ts`'s
+  tool, reusing every rule of spec §2.4.2. Tested in `test/polylineDraw.test.ts`.
+- `viewportSelection.ts` — pure click-vs-drag + unified selection decision, plus
+  `vertexAfterClick`, the same decision one level down for a polyline's vertex
+  sub-selection.
 - `transformSpace.ts` — pure local/global ↔ Three.js space mapping + icon/tooltip.
 - `placement.ts` — pure "Place on surface" tool logic (spec §2.4.2): the
-  `PLACEABLE_KINDS` list (the one place the supported kinds are named), the
-  `canPlace` narrowing predicate over it, and the button tooltip.
+  `PLACEABLE_KINDS` list (the one place the supported kinds are named),
+  `placeTarget` resolving a selection **plus a polyline vertex sub-selection** to
+  one `PlaceTarget`, `canPlace` over it, and the button tooltip.
 
 **Cameras (`cameras/`)**
 - `camera.ts` — the `SceneCamera` entity (`CameraConfig` + editable `name`), its
@@ -377,6 +447,70 @@ holds but **never** to the scene, so `chunkSizeFor` reserves their slots
 unconditionally (opening a session must not re-init), the display descriptor carries a
 `cameras` mask that hides them, and auto-run is suspended for the duration.
 
+**Camera placement (`placement/`, `camera_placement.md`)**
+
+The same layering, and the same reason for it: the lower half is pure, so the search can
+be tested without a GPU. What differs is *where* the expensive step sits — the aim
+optimizer captures once per camera and then searches orientations for free, while
+placement builds once per **mount point** and then searches layouts for free (see
+DECISIONS.md). Read it bottom-up:
+
+- `region.ts` — the entities and their geometry. A constraint's region is the Minkowski
+  sum of its primitive with a ball, so membership is a **distance** (`dist ≤ distance`)
+  rather than a box test — which is why a polyline gets round joints and caps and a plane
+  a rounded rim for free. Also owns `primitiveMeasure` (the pool-split weight),
+  `projectIntoRegion` (the drag clamp), the entity defaults, and the
+  `constraintProblem`/`groupProblem` validators the **scene-file reader and the panels
+  share**, so an imported constraint and a hand-edited one are rejected identically.
+- `halton.ts` — the deterministic low-discrepancy sequence the pool is drawn from, its
+  ball map, and the per-constraint offsets. Five dimensions per position **always**, so
+  the index→position mapping is independent of kind and tolerance; that is what makes the
+  draw prefix-stable across an edit, and prefix-stability is what makes extending a pool
+  cost only the new build steps.
+- `leafSet.ts` — the cached reachable set as the SDK's merged cubes, plus the
+  `VoxelBitset` a trial rasterizes into. `add()` returns the **marginal** contribution,
+  which is what makes a prefix curve exact.
+- `assign.ts` — the Apply plan: a minimum-total-distance assignment (Hungarian) between
+  the group's bound cameras and the chosen positions, resolved into moves / creates /
+  disables. Pure. Nothing it emits removes scene data — the surplus is switched off where
+  it stands — but it is still the module that decides which of a site's cameras move
+  where, so its optimality is pinned against brute force rather than against a
+  hand-computed answer.
+- `analyze.ts` — the trial loop, the prefix curve, and the knee. No engine, no React. The
+  PRNG is counter-based on `(seed, trialIndex)`, so trial *t* is the same layout however
+  the run was chunked — a cancelled-and-resumed analysis is identical to an uninterrupted
+  one. Named for the button, and the button named for the act: it searches layouts and
+  measures nothing, which is why the axis it feeds says *reachable*.
+- `pool.ts` — the SDK-shaped half: the measure-weighted split, the draw plan, the build-step
+  camera list and descriptor, the rejection budget, the fingerprint, and the blockers. Its
+  build-step descriptor carries the marked filter **handed over from
+  `scene/aggregateSpec.ts`**, for the identical reason `optimize/session.ts` does.
+- `curvePlot.ts` — the score-vs-count plot's geometry: the value range and its headroom,
+  the count→x and score→y maps the polyline is drawn with, and `countAtFraction`, the
+  inverse a click uses. Pure, and separate from the panel because the drawing and the
+  click handler have to agree — when they disagree the plot renders perfectly and simply
+  selects the wrong count, which is invisible until someone counts the dots.
+- `mode.ts` — the placement **mode**'s panel decisions, all pure. The lifecycle is a
+  reducer: open, requestClose, keepOpen, confirmClose, applied, groupGone → the next state
+  plus at most one `closeSession` effect, carrying two rules worth testing without React —
+  a running build step is not closeable (Cancel stops it), and a built pool asks before it
+  is dropped, minutes of GPU against a keystroke. Beside it, `buildAction`/`buildLabel` turn
+  (pool, fingerprint, size) into **Build / Extend to N / Truncate to N / Rebuild**, and
+  `analysisStamp` is the comparison that marks a result stale. `usePlacement.ts` owns the
+  session; this owns when it closes and what the buttons say.
+- `usePlacement.ts` — **the only module here that calls the engine.** Owns the session,
+  the pool, the analysis loop's batching, Apply/Discard, and Reposition. It is also where
+  the three Build cases become build steps: an extension carries the pool forward and plans
+  only the new draws, a truncation carries a prefix and plans none, a rebuild starts over.
+  Carrying forward needs two numbers per constraint, not one — `kept` counts against the
+  share while `nextSeq` has already moved past whatever was rejected.
+
+Two invariants span the layers. The pool's **fingerprint** covers the geometry, the voxel
+size, the marked set, and the group's range — and deliberately *not* the cameras, because
+a reachable set cannot depend on them; that is what makes place → aim → measure →
+re-search cheap. And the six capture slots are the **same six** the aim optimizer uses, so
+the two sessions are mutually exclusive rather than each reserving its own.
+
 **UI (`ui/`, presentational React)**
 - `SceneFileControls.tsx` — the "Scene" panel (Load / Save / Save As… plus the
   save-target status line, spec §14.7) atop the left panel, above the hierarchy;
@@ -395,6 +529,42 @@ unconditionally (opening a session must not re-init), the display descriptor car
   sidebar** below `SamplingVolumeControls`, not in the left inspector: it is a tool (one
   entry point has no selection at all, the other only *reads* one), and a 2:1 heatmap
   above the camera editor's numeric fields would push them out of view.
+- `CandidatePositionsPanel.tsx` / `StrategyPanel.tsx` / `NewCameraDefaultsPanel.tsx` — the
+  placement **mode**'s left column, three cards: the two *draw* inputs `Size` and `Seed` +
+  **Build**; the two strategy fields + **Analyze**; and the camera template (`Name prefix`,
+  `FOV`, `Range`) with no button at all. The split is by *when a field is read*, not by
+  topic. A draw input decides which positions get built, so it is spent on the GPU and
+  resolves into Build's own label; a strategy field re-runs for free over the pool in hand;
+  and the knee tolerance is read *after* the trials, so it is in the review column instead.
+  Separate files because each of the first two cards owns one button's feedback — its
+  progress line, its readout, its blocker, its Cancel — and the file boundary is what keeps
+  that beside the button instead of drifting into a shared status area. Build and Analyze
+  stay separate because their costs differ by three orders of magnitude.
+  `NewCameraDefaultsPanel` is **last** in the column, under both buttons: its three fields
+  are set once per group and then left alone, so putting the settled card first would push
+  Build and Analyze down the column for the whole of every session. Having no button of its
+  own is what lets it sit below two that do. `Range` is also a build-step input, and its cost
+  is stated where it is paid — Build's label two cards up flips to **Rebuild**.
+- `PlacementReviewPanel.tsx` — the mode's right column: the group's name,
+  the reachable-vs-count curve with its knee and pool-ceiling asymptote, the **count** and
+  **knee-tolerance** sliders, the layout's numbers, and **Apply**/**Close** pinned below the
+  scroll region so the exit cannot scroll out of view. The tolerance is here, not in
+  `StrategyPanel`, because it reads the *finished* curve: `epsilon` enters the trial loop
+  nowhere, so the knee is derived per render and a tolerance edit costs a scan (see
+  DECISIONS.md). The mode targets one group, fixed at open, so there is no group selector —
+  that dropdown was a second selection model beside the hierarchy's, and it only existed
+  because a sidebar panel had no other way to know which group the user meant. Its axis says
+  **reachable**, never coverage (see DECISIONS.md).
+- `ConstraintGroupPanel.tsx` — selected group: name, constraint count, and **Place
+  cameras**, the mode's only entry point, disabled with its reason when the group cannot be
+  searched. The camera **template** is *not* here — it is the mode's third card, because it
+  is an input to a placement run rather than a description of the group, and out here it
+  cost this panel a heading and a second thought. The **strategy** is persisted on the group
+  and shown only in the mode for the same reason.
+- `ConstraintPanel.tsx` — selected constraint: kind, group, tolerance, geometry, and for a
+  polyline **only the selected vertex** — its coordinates plus Insert / Delete / Extend
+  (`PolylineVertex`, in the same file). The panel half of the draw mode; a rail's dozens of
+  vertices as a list would bury the one the user is holding in the viewport.
 - `ProbePanel.tsx` — probe position (grouped text field) + visibility readout + stale hint.
 - `SectionPanel.tsx` — orientation / thickness / aggregation editor for the
   selected section (thickness keeps the section's center fixed; position only
@@ -405,10 +575,12 @@ unconditionally (opening a session must not re-init), the display descriptor car
   stats (whether the zone is enabled is controlled by the zone row's checkbox, not here).
 - `OverlayControls.tsx` — resolution slider + overlay mode / color / intensity.
 - `ViewportLayerMenu.tsx` — the top-right eye-button dropdown (§2.4): a checklist
-  of viewport-only layer toggles (Coverage / Sections / Cameras / Zones). Owns its
-  own popover open/close (outside-click + Escape) and layer glyphs; App wires each
-  checkbox to the backing visibility state. "Zones" drives the sampling-volume
-  gizmos' `group.visible` — purely visual, independent of `useZones`.
+  of viewport-only layer toggles (Coverage / Sections / Cameras / Zones / Constraints).
+  Owns its own popover open/close (outside-click + Escape) and layer glyphs; App wires
+  each checkbox to the backing visibility state. "Zones" drives the sampling-volume
+  gizmos' `group.visible` — purely visual, independent of `useZones`. "Constraints" drives
+  the constraint gizmos **and** the placement pool scatter together, since both are the
+  placement tool's picture.
 - `HeatmapLegend.tsx` — the **presentational** legend/colorbar: it renders whatever
   `LegendScale` it is handed (caption + `scale.gradient` + ticks), owning no mode
   logic. Rendered as a **floating `.viewport-legend` overlay at the viewport
@@ -430,7 +602,8 @@ unconditionally (opening a session must not re-init), the display descriptor car
 - `RunBar.tsx` — run button, auto-run, backend / stale / error indicators.
 - `Slider.tsx` — reusable labeled range slider (optional gradient track); its value
   readout is an editable `NumberInput` (§5.2.1). `integer` sliders (octree levels)
-  round the committed value.
+  round the committed value. An optional `title` spells out a label whose unit is
+  jargon (`Knee (pp)`), riding on both the hover text and the field's `aria-label`.
 - `NumberInput.tsx` — the shared numeric text input behind both field kinds (§5.2.1):
   commits on blur/Enter, reverts on Escape, and holds the raw string while focused so a
   gizmo drag / Euler round-trip / slider drag can't stomp the caret. A `seed` prop picks
@@ -442,11 +615,29 @@ unconditionally (opening a session must not re-init), the display descriptor car
   for field behavior (`test/numberField.test.ts`).
 - `leftPanelSplit.ts` — pure clamp + `localStorage` (de)serialization for the
   draggable divider.
+- `menuPopover.ts` — placement for the hierarchy's popovers (spec §5.5): the pure
+  `'right' | 'left'` choice (`popoverSide`) plus `MENU_WIDTH_PX`. The "+" menu and its
+  Constraint submenu both open **outward** and are both `position: fixed`, placed by
+  `SceneHierarchy`'s `placeOutward` from the anchor's measured rect — absolute
+  positioning is what `.left-panel`'s `overflow: hidden` clips. The width is fixed (not
+  content-driven) so the two line up as one assembly and the side can be resolved
+  before the popover renders; `MENU_WIDTH_PX` mirrors `index.css`, and
+  `test/menuPopover.test.ts` reads the stylesheet and fails if they drift. The side is
+  measured rather than constant because the left panel is resizable.
+- `entityMenu.ts` — the hierarchy context menu's per-kind routing: `DeletableKind`,
+  the `EntityMenuHandlers` bundle `SceneHierarchyProps` extends, and
+  `deleteHandlers` / `duplicateHandlers`, which return
+  `Record<DeletableKind, (id) => void>`. The record is load-bearing, not stylistic —
+  it replaced two if/else chains whose trailing `else` assumed `volume`, so the
+  constraint kinds added later were routed to `onDeleteVolume`/`onDuplicateVolume`
+  and did nothing at all. Tested in `test/entityMenu.test.ts`.
 
 ## Selection model
 
 A single unified selection: `Selection = { kind: 'camera' | 'probe' | 'section' |
-'zone' | 'volume', id } | null` (`scene/viewportSelection.ts`). A viewport click
+'zone' | 'volume' | 'constraintGroup' | 'constraint', id } | null`
+(`scene/viewportSelection.ts`). Every kind highlights its hierarchy row, via
+`sceneTree.ts`'s `nodeIdForSelection`. A viewport click
 picks the nearest hit across cameras, probes, and **volumes** (`SceneView`
 raycasts each set in its three-set pickable registry, arbitration by the pure
 `scene/sceneView/pick.ts` `nearestHit`, then the click-vs-drag decision
@@ -464,12 +655,15 @@ selection — driven by a per-zone **enabled checkbox** in the hierarchy row
 (independent per zone, like cameras/sections), not by selecting a zone.
 
 The selection also gates the **Place on surface** tool (spec §2.4.2): the kinds
-that carry a `position` — camera and probe — are named once in
-`scene/placement.ts`'s `PLACEABLE_KINDS`, and `canPlace` narrows `Selection` to
-them, so App's placement handler switches exhaustively and widening the list is a
-compile error until every consumer handles the new kind. While the tool is armed
-(`SceneViewState.placing`) the gizmo detaches and a viewport click is consumed for
-placement instead of selection: it raycasts only `room.group`, resolves through
-`surfaceHit`, and comes back to App as an `onPlace(point)` that App applies with
-the ordinary `changeCamera`/`changeProbe` action — so the tool inherits each kind's
-existing stale semantics rather than restating them.
+that carry a placeable point — camera, probe, and a polyline constraint's
+**selected vertex** (`camera_placement.md` §6.2) — are named once in
+`scene/placement.ts`'s `PLACEABLE_KINDS`, and `placeTarget` resolves the selection
+(plus the vertex sub-selection, since a polyline has no `position` of its own) to
+one `PlaceTarget`, so App's placement handler switches exhaustively and widening
+the union is a compile error until every consumer handles the new target. While
+the tool is armed (`SceneViewState.placing`) the gizmo detaches and a viewport
+click is consumed for placement instead of selection: it raycasts only
+`room.group`, resolves through `surfaceHit`, and comes back to App as an
+`onPlace(point)` that App applies with the ordinary
+`changeCamera`/`changeProbe`/`moveConstraintVertex` action — so the tool inherits
+each target's existing clamp and stale semantics rather than restating them.

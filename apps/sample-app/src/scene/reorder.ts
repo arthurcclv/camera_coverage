@@ -17,10 +17,17 @@
  * the entities among the slots that zone's volumes already occupy**, leaving every
  * other element — including other zones' volumes — exactly where it was.
  */
-import type { RenderRow } from './sceneTree.ts';
+import { nodeSelection, type RenderRow } from './sceneTree.ts';
 
 /** Kinds whose rows can be dragged to reorder (spec §5.5.1 — group headers cannot). */
-export type ReorderableKind = 'camera' | 'probe' | 'section' | 'zone' | 'volume';
+export type ReorderableKind =
+  | 'camera'
+  | 'probe'
+  | 'section'
+  | 'zone'
+  | 'volume'
+  | 'constraintGroup'
+  | 'constraint';
 
 /** The vertical extent of one rendered row, in the scroll container's client space. */
 export interface RowBox {
@@ -55,23 +62,15 @@ function reorderableKindOf(row: RenderRow): ReorderableKind | null {
   return kind === 'group' ? null : kind;
 }
 
-/** The entity id behind a node (cameraId/probeId/…), or null for a group header. */
+/**
+ * The entity id behind a node (cameraId/probeId/…), or null for a group header.
+ *
+ * Deferred to `nodeSelection` rather than switched over again here: this was the
+ * same per-kind unwrapping written a second time, and its `default: return null`
+ * would have quietly handed a kind added later the group header's answer.
+ */
 function entityIdOf(row: RenderRow): string | null {
-  const n = row.node;
-  switch (n.kind) {
-    case 'camera':
-      return n.cameraId;
-    case 'probe':
-      return n.probeId;
-    case 'section':
-      return n.sectionId;
-    case 'zone':
-      return n.zoneId;
-    case 'volume':
-      return n.volumeId;
-    default:
-      return null;
-  }
+  return nodeSelection(row.node)?.id ?? null;
 }
 
 /**
@@ -219,20 +218,48 @@ export function moveVolumeBefore<T extends { id: string; zoneId: string }>(
   id: string,
   beforeId: string | null,
 ): T[] {
-  const target = volumes.find((v) => v.id === id);
-  if (!target) return volumes;
+  return moveWithinParentBefore(volumes, id, beforeId, (v) => v.zoneId);
+}
 
-  // The slots this zone's volumes occupy, in array order.
+/**
+ * Reorder `id` among the siblings that share its parent, leaving every other
+ * item's array slot untouched — the general form of {@link moveVolumeBefore}.
+ *
+ * The same rule serves sampling volumes (parent = `zoneId`) and camera
+ * constraints (parent = `groupId`, `camera_placement.md` §7): both interleave
+ * parents in one flat array because new children always append, and both
+ * round-trip that interleaving verbatim (§14.3).
+ */
+export function moveWithinParentBefore<T extends { id: string }>(
+  items: T[],
+  id: string,
+  beforeId: string | null,
+  parentOf: (item: T) => string,
+): T[] {
+  const target = items.find((v) => v.id === id);
+  if (!target) return items;
+  const parent = parentOf(target);
+
+  // The slots this parent's children occupy, in array order.
   const slots: number[] = [];
-  for (const [i, v] of volumes.entries()) if (v.zoneId === target.zoneId) slots.push(i);
+  for (const [i, v] of items.entries()) if (parentOf(v) === parent) slots.push(i);
 
-  const within = slots.map((i) => volumes[i]);
-  if (beforeId !== null && !within.some((v) => v.id === beforeId)) return volumes; // other zone / unknown
+  const within = slots.map((i) => items[i]);
+  if (beforeId !== null && !within.some((v) => v.id === beforeId)) return items; // other parent / unknown
 
   const reordered = moveBefore(within, id, beforeId);
-  if (reordered === within) return volumes;
+  if (reordered === within) return items;
 
-  const next = volumes.slice();
+  const next = items.slice();
   for (const [k, slot] of slots.entries()) next[slot] = reordered[k];
   return next;
+}
+
+/** Reorder a constraint among its group's siblings (`camera_placement.md` §7). */
+export function moveConstraintBefore<T extends { id: string; groupId: string }>(
+  constraints: T[],
+  id: string,
+  beforeId: string | null,
+): T[] {
+  return moveWithinParentBefore(constraints, id, beforeId, (c) => c.groupId);
 }
