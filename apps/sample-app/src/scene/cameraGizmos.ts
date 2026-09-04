@@ -57,7 +57,10 @@ export class CameraGizmoSet extends PickableGizmoSet<GizmoEntry> {
       // frustum outright (spec §2.4.1, §5.3). Still coloured/scaled below so the
       // state is already correct when the view is left.
       const suppressed = cam.id === suppressedId;
-      camObj.visible = !suppressed;
+      // A disabled camera draws nothing (spec §2.4.3) — unless it is the
+      // selection, the one moment it is on screen, where the dimmed body below is
+      // what tells it apart from an enabled one.
+      camObj.visible = !suppressed && (cam.enabled || selected);
       const bodyColor = flagged ? FLAGGED_BODY_COLOR : selected ? SELECTED_BODY_COLOR : DEFAULT_BODY_COLOR;
       const helperColor = flagged ? FLAGGED_HELPER_COLOR : selected ? SELECTED_HELPER_COLOR : DEFAULT_HELPER_COLOR;
       (body.material as THREE.MeshBasicMaterial).color.setHex(bodyColor);

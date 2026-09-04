@@ -266,10 +266,20 @@ default" — see DECISIONS.md).
   is *not* that set, since the `camera` view is perspective too), the labels,
   `isOrthographic`/`orbitEnabled`/`navigationEnabled`, `fitOrtho` for the ortho
   auto-fit, and `fitCameraView` for the Selected view's rendered FOV + guide rect.
+- `entityVisibility.ts` — the two *derived* sets behind spec §2.4.3's hiding rule:
+  `drawableGroupIds` (the enabled groups plus the one placement mode is open on) and
+  `visibleZoneIds` (the enabled zones union every drawable group's target `zoneIds`).
+  Neither is a property of a single entity — a constraint's visibility depends on its
+  group, a volume's on whichever groups target its zone — which is why they live here
+  rather than in a gizmo set. Pure; App feeds both into `SceneViewState`.
 - `gizmoSet.ts` — the shared spine the five per-entity gizmo sets extend.
   `GizmoSet<E>` owns the keyed `entries` map, the group, the create/update/sweep
   `reconcile` loop, `getAttachTarget`, and `dispose`; subclasses supply
   `createEntry`/`disposeEntry`/`attachTargetOf` and their own `update` signature.
+  `pickHit` also enforces **hidden is unpickable** (spec §2.4.3) by walking the
+  ancestor chain — Three's raycaster does not skip invisible objects — which covers
+  a disabled entity and a switched-off layer with one rule, so SceneView carries no
+  per-layer pick guard of its own.
   `PickableGizmoSet<E>` adds the nearest-hit `pickHit` for the viewport-pickable
   four (sections are hierarchy-selected only, spec §13.8), plus a `pickRecursive`
   flag: three of them have a single-mesh body, while a camera constraint's is
@@ -380,8 +390,9 @@ default" — see DECISIONS.md).
   hierarchy read it, so the two can't report different rates for one camera. Pure.
 - `samplingVolumeGizmos.ts` — per-volume wireframe box (edges + faint fill) whose
   root object maps 1:1 to `{position, quaternion, scale}` so TransformControls
-  (translate/rotate/scale) writes them straight back; pickable, dims the volumes of
-  disabled zones. Extends `PickableGizmoSet`.
+  (translate/rotate/scale) writes them straight back; pickable, and hides the
+  volumes of zones outside the visible set (spec §2.4.3) unless selected. Extends
+  `PickableGizmoSet`.
 - `constraintGizmos.ts` — per-constraint handles plus the **exact** dilation: a plane's
   is the core slab *and* four edge cylinders *and* four corner spheres, because the
   bounding box would claim corners the region does not contain and a bare slab would deny

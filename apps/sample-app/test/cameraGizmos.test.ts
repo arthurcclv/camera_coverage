@@ -131,3 +131,49 @@ test('suppression is independent of selection and enabled state (spec §2.4.1)',
   assert.equal(helperFor(gizmos, 'cam-9').visible, true, 'selected elsewhere still draws its frustum');
   gizmos.dispose();
 });
+
+// --- Disabled cameras are hidden (spec §2.4.3) ------------------------------
+
+/** The `PerspectiveCamera` a camera's body hangs under, by id. */
+function camObjFor(gizmos: CameraGizmoSet, id: string): THREE.PerspectiveCamera {
+  return gizmos.getAttachTarget(id) as THREE.PerspectiveCamera;
+}
+
+test('a disabled camera draws nothing, and returns as the selection (spec §2.4.3)', () => {
+  const gizmos = new CameraGizmoSet();
+  const off: SceneCamera = { ...cam(30), enabled: false };
+
+  gizmos.update([off], null);
+  assert.equal(camObjFor(gizmos, 'cam-1').visible, false, 'disabled and unselected: gone');
+
+  // Selection is the one exception — it is what keeps a disabled camera editable
+  // without re-ticking its box first, so TransformControls has a visible target.
+  gizmos.update([off], 'cam-1');
+  const camObj = camObjFor(gizmos, 'cam-1');
+  assert.equal(camObj.visible, true, 'disabled and selected: back');
+  const body = camObj.children.find((c): c is THREE.Mesh => c instanceof THREE.Mesh)!;
+  assert.equal((body.material as THREE.MeshBasicMaterial).opacity, 0.3, 'at the selected-disabled tier');
+  assert.equal(helperFor(gizmos, 'cam-1').visible, true, 'frustum follows selection, disabled or not');
+
+  // Deselecting puts it away again.
+  gizmos.update([off], null);
+  assert.equal(camObjFor(gizmos, 'cam-1').visible, false);
+
+  gizmos.dispose();
+});
+
+test('an enabled camera draws opaque whether or not it is selected (spec §2.4.3)', () => {
+  const gizmos = new CameraGizmoSet();
+
+  gizmos.update([cam(30)], null);
+  const camObj = camObjFor(gizmos, 'cam-1');
+  const body = camObj.children.find((c): c is THREE.Mesh => c instanceof THREE.Mesh)!;
+  assert.equal(camObj.visible, true);
+  assert.equal((body.material as THREE.MeshBasicMaterial).opacity, 1);
+
+  gizmos.update([cam(30)], 'cam-1');
+  assert.equal(camObj.visible, true);
+  assert.equal((body.material as THREE.MeshBasicMaterial).opacity, 1);
+
+  gizmos.dispose();
+});

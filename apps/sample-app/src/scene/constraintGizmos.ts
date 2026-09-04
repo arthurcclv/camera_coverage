@@ -49,6 +49,13 @@ interface ConstraintEntry {
   signature: string;
   /** False when the selected group's mount filter excludes this constraint (§4.1.1). */
   mountable: boolean;
+  /**
+   * The constraint's own `enabled` **and** its group's (`spec.md` §2.4.3). False
+   * hides it — unless it is the selection, where it takes the selected-disabled
+   * tier — and drives the opacity ramp, which is why it is stored rather than
+   * recomputed per material in `place`.
+   */
+  live: boolean;
 }
 
 
@@ -117,14 +124,19 @@ function fillMaterial(): THREE.MeshBasicMaterial {
  *
  * `mountable` is false for a constraint that a selected group's mount filter
  * excludes entirely (`camera_placement.md` §3.1.2, §4.1.1): it is *there*, and
- * editable, but no draw can land on it. Dimming it to the disabled level is what
+ * editable, but no draw can land on it. Dimming it to the selected-disabled level
+ * is what
  * makes a wall with no zone overlap look different from a good one **before**
  * Build is pressed, rather than after minutes of GPU.
  */
 export function fillOpacity(selected: boolean, enabled: boolean, mountable = true): number {
   if (!mountable) return selected ? 0.06 : 0.03;
-  if (selected) return 0.16;
-  return enabled ? 0.1 : 0.04;
+  // A disabled constraint is not drawn at all (`spec.md` §2.4.3), so the ramp's
+  // old bottom rung — a 0.04 disabled fill — is gone. It reappears only as the
+  // selection, and takes the same 0.06 a selected mount-excluded constraint does:
+  // both mean *selected, and contributing nothing*.
+  if (selected) return enabled ? 0.16 : 0.06;
+  return 0.1;
 }
 
 export class ConstraintGizmoSet extends PickableGizmoSet<ConstraintEntry> {
@@ -132,8 +144,14 @@ export class ConstraintGizmoSet extends PickableGizmoSet<ConstraintEntry> {
   protected override pickRecursive = true;
 
   /**
-   * Sync the gizmos to the current constraints. A disabled constraint dims: it
-   * contributes no pool positions (§4.1) but is still there to be edited.
+   * Sync the gizmos to the current constraints.
+   *
+   * A constraint draws only when it is **live** — its own `enabled` and its
+   * group's, since a disabled group is skipped whole by the search (§3.1) and so
+   * hides its constraints whatever their own checkboxes say (`spec.md` §2.4.3).
+   * A non-live constraint reappears as the selection alone, at the
+   * selected-disabled tier, which is what keeps it editable without re-ticking a
+   * box first.
    */
   update(
     constraints: readonly CameraConstraint[],
@@ -144,10 +162,20 @@ export class ConstraintGizmoSet extends PickableGizmoSet<ConstraintEntry> {
      * dim. Empty means no filter, which is the ordinary case.
      */
     unmountable: ReadonlySet<string> = NO_UNMOUNTABLE,
+    /**
+     * Group ids whose constraints may draw: every enabled group, plus the group
+     * placement mode is open on, which counts as selected (§5.1). A constraint of
+     * any other group is hidden (`spec.md` §2.4.3). `null` means "no group
+     * filter" — every group draws — which is what the tests and any caller
+     * without group state get.
+     */
+    drawableGroupIds: ReadonlySet<string> | null = null,
   ): void {
     this.reconcile([...constraints], (entry, c) => {
       const selected = c.id === selectedId;
       entry.mountable = !unmountable.has(c.id);
+      entry.live = c.enabled && (drawableGroupIds === null || drawableGroupIds.has(c.groupId));
+      entry.root.visible = entry.live || selected;
       const signature = shapeSignature(c);
       if (entry.signature !== signature) {
         this.rebuild(entry, c);
@@ -211,7 +239,7 @@ export class ConstraintGizmoSet extends PickableGizmoSet<ConstraintEntry> {
     const dilation = new THREE.Group();
     root.add(dilation);
     this.group.add(root);
-    return { root, transformTarget: root, handles: [], dilation, signature: '', mountable: true };
+    return { root, transformTarget: root, handles: [], dilation, signature: '', mountable: true, live: true };
   }
 
   protected disposeEntry(entry: ConstraintEntry): void {
@@ -352,12 +380,12 @@ export class ConstraintGizmoSet extends PickableGizmoSet<ConstraintEntry> {
       // primitive body like a plane's rectangle — a constraint should read as
       // see-through the way the point constraint's ball does. Handles and lines are
       // the crisp part and stay opaque.
-      if (mat.userData.fill === true) mat.opacity = fillOpacity(selected, c.enabled, entry.mountable);
+      if (mat.userData.fill === true) mat.opacity = fillOpacity(selected, entry.live, entry.mountable);
       else if ('color' in mat) {
         (mat as THREE.MeshBasicMaterial).color.setHex(color);
         // A constraint no draw can land on reads like a disabled one, because
         // for a placement run that is exactly what it is (§4.1.1).
-        const live = c.enabled && entry.mountable;
+        const live = entry.live && entry.mountable;
         mat.opacity = live ? 1 : 0.35;
         mat.transparent = !live;
       }

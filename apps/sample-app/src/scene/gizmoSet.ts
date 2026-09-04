@@ -122,15 +122,35 @@ export abstract class PickableGizmoSet<E> extends GizmoSet<E> implements GizmoPi
   /**
    * Nearest hit id + its ray distance, or null. The distance lets a caller pick
    * the single nearest hit across every pickable set (spec §5.2, `pick.ts`).
+   *
+   * **Hidden is unpickable** (spec §2.4.3). An entry whose pick body is not drawn
+   * is skipped before the raycast, which is the only place the rule needs to live:
+   * it covers an entity hidden by its own `enabled` flag and a whole layer hidden
+   * by its group's `visible` (the §2.4 toggles) with the same walk, so SceneView
+   * needs no per-layer guard of its own.
    */
   pickHit(raycaster: THREE.Raycaster): GizmoHit | null {
     let best: GizmoHit | null = null;
     for (const [id, entry] of this.entries) {
-      const hits = raycaster.intersectObject(this.pickTargetOf(entry), this.pickRecursive);
+      const target = this.pickTargetOf(entry);
+      if (!drawn(target)) continue;
+      const hits = raycaster.intersectObject(target, this.pickRecursive);
       if (hits.length > 0 && (!best || hits[0].distance < best.distance)) {
         best = { id, distance: hits[0].distance };
       }
     }
     return best;
   }
+}
+
+/**
+ * Whether `obj` actually renders: its own `visible` and every ancestor's up to the
+ * scene root. Three.js's raycaster does **not** skip invisible objects, so this is
+ * what turns "hidden" into "unpickable" (spec §2.4.3).
+ */
+export function drawn(obj: THREE.Object3D): boolean {
+  for (let o: THREE.Object3D | null = obj; o !== null; o = o.parent) {
+    if (!o.visible) return false;
+  }
+  return true;
 }

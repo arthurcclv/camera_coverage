@@ -83,8 +83,12 @@ export interface SceneViewState {
   flaggedCameras: ReadonlySet<string>;
   /** Per-section computed cell grids (spec §13.4); `useMemo` in App. */
   sectionCellGrids: ReadonlyMap<string, SectionCellGrid | null>;
-  /** Ids of enabled zones — dims volumes of disabled zones (spec §5); `useMemo`. */
-  enabledZoneIds: ReadonlySet<string>;
+  /**
+   * Ids of the zones whose volumes draw — the enabled zones union every enabled
+   * group's target `zoneIds` (`spec.md` §2.4.3, `camera_placement.md` §3.1.2). A
+   * volume outside the set is hidden unless selected. `useMemo` in App.
+   */
+  visibleZoneIds: ReadonlySet<string>;
   overlayOptions: OverlayOptions;
   transformMode: 'translate' | 'rotate' | 'scale';
   transformSpace: TransformSpace;
@@ -115,6 +119,13 @@ export interface SceneViewState {
    * whenever no group is selected or the group has no mount filter.
    */
   unmountableConstraints: ReadonlySet<string>;
+  /**
+   * Group ids whose constraints may draw — every enabled group plus the group
+   * placement mode is open on, which counts as selected (`camera_placement.md`
+   * §5.1). A constraint of any other group is hidden (`spec.md` §2.4.3). `useMemo`
+   * in App.
+   */
+  drawableGroupIds: ReadonlySet<string>;
   /** Constraints layer visibility — gizmos and the pool scatter (`spec.md` §2.4). */
   constraintsVisible: boolean;
   /** The built pool's positions, shaded by their own reachable count (§5.2). */
@@ -150,6 +161,7 @@ const camId = (s: Selection): string | null => (s?.kind === 'camera' ? s.id : nu
 const probeId = (s: Selection): string | null => (s?.kind === 'probe' ? s.id : null);
 const volumeId = (s: Selection): string | null => (s?.kind === 'volume' ? s.id : null);
 const constraintId = (s: Selection): string | null => (s?.kind === 'constraint' ? s.id : null);
+const sectionId = (s: Selection): string | null => (s?.kind === 'section' ? s.id : null);
 
 export class SceneView {
   private readonly viewport: Viewport;
@@ -293,11 +305,12 @@ export class SceneView {
       if (this.prev?.activeView === 'camera') return;
       this.setRayFromEvent(ev);
       // Nearest hit across cameras, probes, and volumes (spec §5.2, §12.4;
-      // `sampling_volumes.md` §5). Hidden camera gizmos are not clickable (spec
-      // §2.4). Zones/sections have no viewport body.
+      // `sampling_volumes.md` §5). Hidden gizmos are not clickable — a whole layer
+      // switched off (spec §2.4) or a single disabled entity (§2.4.3) — and
+      // `pickHit` enforces both from the object's own visibility, so there is no
+      // per-layer guard here. Zones/sections have no viewport body.
       const candidates: PickCandidate[] = [];
       for (const { kind, set } of this.pickableSets) {
-        if (kind === 'camera' && !this.prev?.gizmosVisible) continue;
         const hit = set.pickHit(this.raycaster);
         if (hit) candidates.push({ selection: { kind, id: hit.id }, distance: hit.distance });
       }
@@ -450,13 +463,20 @@ export class SceneView {
     }
 
     // --- section gizmos (spec §13.4): [sections, cellGrids, sectionsVisible, stale] ---
-    if (!prev || prev.sections !== next.sections || prev.sectionCellGrids !== next.sectionCellGrids || prev.sectionsVisible !== next.sectionsVisible || prev.stale !== next.stale) {
-      this.sectionGizmos.update(next.sections, next.sectionCellGrids, next.sectionsVisible, next.stale);
+    if (
+      !prev ||
+      prev.sections !== next.sections ||
+      prev.sectionCellGrids !== next.sectionCellGrids ||
+      prev.sectionsVisible !== next.sectionsVisible ||
+      prev.stale !== next.stale ||
+      sectionId(prev.selection) !== sectionId(next.selection)
+    ) {
+      this.sectionGizmos.update(next.sections, next.sectionCellGrids, next.sectionsVisible, next.stale, sectionId(next.selection));
     }
 
     // --- volume gizmos (spec §5, §7.3): [volumes, selectedVolumeId, enabledZoneIds] ---
-    if (!prev || prev.volumes !== next.volumes || volumeId(prev.selection) !== volumeId(next.selection) || prev.enabledZoneIds !== next.enabledZoneIds) {
-      this.volumeGizmos.update(next.volumes, volumeId(next.selection), next.enabledZoneIds);
+    if (!prev || prev.volumes !== next.volumes || volumeId(prev.selection) !== volumeId(next.selection) || prev.visibleZoneIds !== next.visibleZoneIds) {
+      this.volumeGizmos.update(next.volumes, volumeId(next.selection), next.visibleZoneIds);
     }
 
     // --- constraint gizmos (`camera_placement.md` §6.1): [constraints,
@@ -466,13 +486,15 @@ export class SceneView {
       prev.constraints !== next.constraints ||
       constraintId(prev.selection) !== constraintId(next.selection) ||
       prev.selectedVertex !== next.selectedVertex ||
-      prev.unmountableConstraints !== next.unmountableConstraints
+      prev.unmountableConstraints !== next.unmountableConstraints ||
+      prev.drawableGroupIds !== next.drawableGroupIds
     ) {
       this.constraintGizmos.update(
         next.constraints,
         constraintId(next.selection),
         next.selectedVertex,
         next.unmountableConstraints,
+        next.drawableGroupIds,
       );
     }
 

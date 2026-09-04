@@ -316,16 +316,20 @@ heatmap legend at its bottom-right (§13.6):
     camera body plus the selected camera's frustum wireframe.
     Independent of per-camera enable/disable (§5.4): a camera stays
     enabled/selectable from the camera list while the layer is hidden — it's
-    just not drawn or clickable in the viewport. Defaults to visible.
+    just not drawn or clickable in the viewport. The layer toggle and the
+    per-camera flag hide independently; §2.4.3 covers the flag. Defaults to
+    visible.
   - **Zones** — shows/hides all sampling-volume gizmos (`sampling_volumes.md` §5)
     at once. Purely visual and independent of the `useZones` compute setting
     (`sampling_volumes.md` §6.3) and per-zone enabled state: hiding the gizmos
-    does not change the coverage result or the overlay's zone filtering.
-    Defaults to visible.
+    does not change the coverage result or the overlay's zone filtering. The
+    layer toggle and the per-zone flag hide independently; §2.4.3 covers the
+    flag. Defaults to visible.
   - **Constraints** — shows/hides all camera-constraint gizmos and the placement
     tool's pool scatter (`camera_placement.md` §6.1, §5.2) at once. Purely visual:
     constraints are not analysis inputs (`camera_placement.md` §1.1), so hiding them
-    cannot change any number. Defaults to visible.
+    cannot change any number. The layer toggle and the per-constraint/per-group
+    flag hide independently; §2.4.3 covers the flag. Defaults to visible.
 
 The eye button renders as an icon button in a top-right toolbar strip and is
 highlighted ("active") while the dropdown is open.
@@ -536,6 +540,75 @@ applies again so that an aim drag places nothing.
 Whether the tool is armed is **transient viewport state**, like the transform mode
 and the layer toggles: never written to the scene file (§14), and never armed on
 load.
+
+---
+
+### 2.4.3 Disabled entities
+
+`enabled: false` — on a camera (§5.4), a section (§13.1), a zone
+(`sampling_volumes.md` §6.2), or a constraint / constraint group
+(`camera_placement.md` §3.1) — means the entity **draws nothing in the viewport**.
+Before this rule each kind chose its own answer: sections vanished, cameras and
+zones and constraints dimmed. A large layout disables in **bulk** — Apply parks its
+surplus cameras with this very flag (`camera_placement.md` §9.4) — and a dimmed body
+is still a body: at ninety-odd cameras the dim ramp is clutter that reads as a
+rendering fault rather than as an off switch. One rule, five kinds.
+
+**Selection wins.** While an entity is the current selection it draws anyway, at a
+**selected-disabled** tier between selected and gone. Selection is now the only
+moment a disabled entity is on screen, so it is the moment that must carry the cue;
+finding it indistinguishable from an enabled one would leave re-enabling to
+guesswork. It is also what keeps a disabled entity editable without a round trip
+through its checkbox: its hierarchy row (§5.5) selects it, it appears,
+`TransformControls` attaches to something visible, and it goes again on deselect.
+
+| entity | enabled | selected | selected-disabled | disabled |
+|---|---|---|---|---|
+| camera body | opacity 1 | 1, scale ×1.4 | 0.3 | hidden |
+| camera frustum | not drawn | drawn | drawn | hidden |
+| section | heatmap + outlines | same | outlines only, opacity 0.35 | hidden |
+| zone volume edges | 0.85 | 1 | 0.4 | hidden |
+| zone volume fill | 0.10 | 0.18 | 0.06 | hidden |
+| constraint fill | 0.10 | 0.16 | 0.06 | hidden |
+| constraint handles + lines | 1 | 1 | 0.35 | hidden |
+
+A selected disabled **section** draws its box outlines and *not* its heatmap: the
+outline is what a drag needs to see, while the heatmap is measured data the section
+is excluded from reporting. This also settles a standing defect — a disabled section
+was invisible yet still had `TransformControls` attached (§13.8), so it could be
+dragged blind. The constraint's selected-disabled fill (0.06) is deliberately the
+same value a selected but **mount-excluded** constraint takes
+(`camera_placement.md` §4.1.1): both mean *selected, and contributing nothing*, and
+separate values would be a distinction with no decision behind it.
+
+**A disabled group hides its constraints.** A group's `enabled: false` skips the
+whole group in the search (`camera_placement.md` §3.1), so every constraint under it
+is inert whatever its own checkbox says — and hides, whatever its own checkbox says.
+The unticked parent row sits directly above the ticked child in the hierarchy, so
+the tree still explains the viewport. The group **placement mode is open on** counts
+as selected for this rule (`camera_placement.md` §5.1): its constraints draw at the
+selected-disabled tier, so Build never scatters candidate dots over rails that
+aren't there.
+
+**A group's target zones stay drawn.** A non-empty `zoneIds` overrides each zone's
+own `enabled` (`camera_placement.md` §3.1.2), so a globally-disabled zone a group
+targets is still the region the pool is built into. The set the volume gizmos
+consult is therefore not the enabled zones but the **visible zones** — the enabled
+zones **union** every *drawable* group's target `zoneIds`, drawable being the same
+set as above (enabled, plus the group placement mode is open on). The zone row stays
+unticked while its box draws; that mismatch is the point, and it is the same
+override the group panel already reports.
+
+**Hidden is unpickable.** Three.js raycasts invisible objects, so hiding a gizmo
+does not stop a click from selecting it. The rule is enforced once, in the shared
+`pickHit` of the pickable gizmo sets (§5.2): an entry whose pick target is invisible
+— by its own flag or any ancestor's — is skipped. This **subsumes** the per-layer
+case the **Cameras** toggle needed (§2.4), which no longer needs its own guard.
+
+**No new state.** No "hide disabled" toggle, no layer-menu row, no `scene.json`
+field, no viewport badge counting what is hidden. The hierarchy (§5.5) is the
+authoritative list, and it already shows every disabled entity as a dimmed row with
+an unticked box.
 
 ---
 
@@ -868,8 +941,8 @@ renders a frustum wireframe** reflecting its `fov`/`aspect`/`far`, so that camer
 aim and coverage volume are visible; the frustum is highlighted and follows selection
 alone — it is drawn whenever the camera is selected, including a selected *disabled*
 camera (§5.4). A non-selected camera shows only its body, never a frustum, regardless
-of enabled or flagged (`CAMERA_INSIDE_GEOMETRY`) state. A disabled camera's body is
-dimmed (§5.4). A viewport-level toggle can hide/show the whole camera layer at once
+of enabled or flagged (`CAMERA_INSIDE_GEOMETRY`) state. A disabled camera draws nothing unless it is the
+selection, which dims its body to 0.3 and keeps its frustum (§2.4.3). A viewport-level toggle can hide/show the whole camera layer at once
 (§2.4).
 
 **Exception — rendering through the camera.** While the viewport renders *through*
@@ -884,8 +957,8 @@ visible.
 - Each **camera node** in the scene hierarchy (§5.5) has a **checkbox toggle** to
   enable/disable that camera, independent of selection. Toggling doesn't change the
   current selection.
-- Disabled cameras stay in the scene (dimmed body) and keep their
-  position/rotation/FOV editable. They **are** passed to `setCameras()`, carrying
+- Disabled cameras stay in the scene but **draw nothing in the viewport** unless
+  they are the selection (§2.4.3), and keep their position/rotation/FOV editable. They **are** passed to `setCameras()`, carrying
   `enabled: false` (SDK spec §5.2), so they keep their camera index but contribute
   nothing to `compute()` — their coverage rate is 0 and they can't be flagged as
   `CAMERA_INSIDE_GEOMETRY`.
@@ -1724,7 +1797,8 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
 
 ### 13.5 Rendering & colormap
 
-- Each enabled section draws its heatmap on the midpoint plane (§13.2),
+- Each enabled section draws its heatmap on the midpoint plane (§13.2) — a
+  disabled one draws nothing but its outlines, and only while selected (§2.4.3) —
   **double-sided**, with **nearest** texture filtering so cells read as crisp blocks
   rather than a smoothed gradient.
 - **Colormap.** Colored cells map their value through a single **global perceptual
@@ -1863,6 +1937,10 @@ section stats."*; retained run diverged from the live scene → the numbers plus
 
 ### 13.8 Viewport interaction & selection
 
+- A **disabled** section draws nothing (§2.4.3) — except while selected, when its box
+  outlines draw at opacity 0.35 so the `TransformControls` drag below has a visible
+  target. A disabled section used to be invisible *and* still attached, and so could be
+  dragged blind.
 - A section is **selected from its hierarchy row** (§5.5); the **heatmap plane is not a
   pick target**, so clicking it passes through to the cameras/probes (or empty space)
   behind it and the viewport pick (§5.2) is unchanged.

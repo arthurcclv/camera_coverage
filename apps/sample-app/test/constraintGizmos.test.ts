@@ -104,9 +104,15 @@ test('handles and polyline segments stay opaque — the fill rule leaves edges a
   gizmos.dispose();
 });
 
-test('fillOpacity: selected reads strongest, disabled weakest', () => {
+test('fillOpacity: selected reads strongest, selected-disabled weaker than enabled (spec §2.4.3)', () => {
   assert.ok(fillOpacity(true, true) > fillOpacity(false, true));
-  assert.ok(fillOpacity(false, true) > fillOpacity(false, false));
+  // A non-live constraint is only ever on screen as the selection, so its tier is
+  // the *selected*-disabled one, and it has to read weaker than a live constraint
+  // sitting unselected beside it.
+  assert.ok(fillOpacity(true, false) < fillOpacity(false, true));
+  assert.ok(fillOpacity(true, false) < fillOpacity(true, true));
+  // Selected-and-inert is one tier however it got there (§4.1.1).
+  assert.equal(fillOpacity(true, false), fillOpacity(true, true, false));
 });
 
 // --- The mount filter's dimming (`camera_placement.md` §5, §4.1.1) -----------
@@ -164,5 +170,57 @@ test('the mount filter names one constraint without touching its neighbours', ()
   assert.equal(first.opacity, fillOpacity(false, true), 'con-1 is untouched');
   assert.ok(second.opacity < first.opacity, 'con-2 is the one excluded');
 
+  gizmos.dispose();
+});
+
+// --- Disabled constraints and disabled groups (spec §2.4.3) -----------------
+
+/** The entry root for a constraint id — its `visible` is the hide switch. */
+function rootOf(gizmos: ConstraintGizmoSet, id: string): THREE.Object3D {
+  return gizmos.group.children.find((c) => c.name === id)!;
+}
+
+test('a disabled constraint draws nothing, and returns as the selection (spec §2.4.3)', () => {
+  const gizmos = new ConstraintGizmoSet();
+  const off = { ...plane('con-1'), enabled: false };
+
+  gizmos.update([off], null, null);
+  assert.equal(rootOf(gizmos, 'con-1').visible, false, 'disabled and unselected: gone');
+
+  gizmos.update([off], 'con-1', null);
+  assert.equal(rootOf(gizmos, 'con-1').visible, true, 'disabled and selected: back');
+  const disabledFill = fills(gizmos)[0].opacity;
+
+  gizmos.update([plane('con-1')], 'con-1', null);
+  assert.ok(fills(gizmos)[0].opacity > disabledFill, 'selected-disabled reads weaker than selected');
+
+  gizmos.dispose();
+});
+
+test("a disabled group hides its constraints, ticked or not (spec §2.4.3)", () => {
+  const gizmos = new ConstraintGizmoSet();
+  // The constraint's own checkbox stays ticked throughout: the group is what
+  // decides here, because a disabled group is skipped whole by the search (§3.1).
+  const con = plane('con-1');
+
+  gizmos.update([con], null, null, undefined, new Set(['cg-1']));
+  assert.equal(rootOf(gizmos, 'con-1').visible, true, 'group enabled: drawn');
+
+  gizmos.update([con], null, null, undefined, new Set<string>());
+  assert.equal(con.enabled, true, "the constraint's own flag never moved");
+  assert.equal(rootOf(gizmos, 'con-1').visible, false, 'group disabled: hidden');
+
+  // The group placement mode is open on is in the drawable set (§5.1), so its
+  // constraints stay drawn under the pool scatter even while it is disabled.
+  gizmos.update([con], null, null, undefined, new Set(['cg-1']));
+  assert.equal(rootOf(gizmos, 'con-1').visible, true, 're-enabled: back');
+
+  gizmos.dispose();
+});
+
+test('no group filter draws every group — the default for callers without group state', () => {
+  const gizmos = new ConstraintGizmoSet();
+  gizmos.update([plane('con-1')], null, null);
+  assert.equal(rootOf(gizmos, 'con-1').visible, true);
   gizmos.dispose();
 });

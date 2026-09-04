@@ -6,6 +6,54 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## A disabled entity is hidden, and selection is the only way back
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4.3.
+
+**Why.** Five entity kinds carry an `enabled` flag and each had picked its own
+answer for what "off" looks like: sections vanished, cameras dimmed their body to
+0.3, zone volumes dropped to 0.25/0.03, constraints to 0.04. Nothing chose those
+independently — they accumulated. The real site is 96 cameras, and Apply parks its
+surplus ones with this very flag (`camera_placement.md` §9.4), so disabling happens
+in bulk; at that scale a dim ramp is not an off switch, it is clutter that reads as
+a rendering fault.
+
+**Decision.** `enabled: false` draws nothing, for all five kinds. Selection is the
+single exception, at a **selected-disabled** tier: it is what keeps a disabled
+entity editable without a round trip through its checkbox, and — since selection is
+now the *only* moment a disabled entity is on screen — it is the moment that has to
+carry the cue, so the ramp gained a tier rather than losing one.
+
+**Two inheritance rules, and why they point opposite ways.** A disabled *group*
+hides its constraints even where their own boxes are ticked, because the search
+skips the group whole. But a disabled *zone* that a group targets stays **drawn**,
+because a group's `zoneIds` overrides each zone's `enabled` — that zone is the
+region the pool is being built into, and hiding it would leave Build scattering
+dots through a box nothing draws. Both derive from the same question ("is this
+entity still doing work?"), which is why they live together in
+`scene/entityVisibility.ts` rather than inside the gizmo sets.
+
+**Hidden had to be made unpickable explicitly.** Three.js's raycaster does *not*
+skip invisible objects, so hiding a gizmo would otherwise leave it swallowing
+clicks meant for the geometry behind it. The guard went into the shared
+`PickableGizmoSet.pickHit` as an ancestor-chain walk, which subsumed the per-layer
+special case SceneView had been carrying for the Cameras toggle — one rule replaced
+a rule plus an exception.
+
+**Why no toggle.** A "hide disabled" checkbox in the layer menu was the obvious
+alternative and was rejected: it adds a spec section, a menu row, and a piece of
+state, to make optional a behavior that is right by default. The scene hierarchy
+already lists every disabled entity as a dimmed row with an unticked box, so
+nothing is unaccounted for; a viewport badge counting hidden items was rejected for
+the same reason.
+
+**Consequence to keep in mind.** A disabled entity cannot be picked in the
+viewport, so the hierarchy row is the only way to select one. Any future entity
+kind that gains an `enabled` flag inherits this rule and should be added to §2.4.3's
+tier table rather than inventing a fourth dimming ramp.
+
+---
+
 ## Black faces on loaded scenes are fixed with fill light, not an environment map
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.3.1.

@@ -35,6 +35,7 @@ import {
   type SamplingVolume,
   type Zone,
 } from './scene/samplingVolumes.ts';
+import { drawableGroupIds, visibleZoneIds } from './scene/entityVisibility.ts';
 import {
   DEFAULT_TRANSFORM_SPACE,
   spaceIconKind,
@@ -350,8 +351,6 @@ export function App() {
   // (`sampling_volumes.md` §2.2); otherwise the full-volume fallback applies.
   const samplingActive = useZones && volumes.length > 0;
 
-  // Enabled zone ids — for dimming volumes of disabled zones in the viewport (§5).
-  const enabledZoneIds = useMemo(() => new Set(zones.filter((z) => z.enabled).map((z) => z.id)), [zones]);
   // Master show/hide-all for the section heatmap layer (viewport toolbar, spec §2.4).
   const [sectionsVisible, setSectionsVisible] = useState(true);
   const [overlayOptions, setOverlayOptions] = useState<OverlayOptions>({
@@ -1027,6 +1026,16 @@ export function App() {
   );
   const placementOpen = placementMode !== null && placementGroup !== null;
 
+  /** Which constraints and volumes the viewport draws (`spec.md` §2.4.3). */
+  const drawableGroups = useMemo(
+    () => drawableGroupIds(constraintGroups, placementGroup?.id ?? null),
+    [constraintGroups, placementGroup],
+  );
+  const visibleZones = useMemo(
+    () => visibleZoneIds(zones, constraintGroups, drawableGroups),
+    [constraintGroups, drawableGroups, zones],
+  );
+
   /**
    * Open the mode on a group (§5.1).
    *
@@ -1181,7 +1190,8 @@ export function App() {
       selection: placementOpen ? null : selection,
       flaggedCameras: engine.state.flaggedCameras,
       sectionCellGrids,
-      enabledZoneIds,
+      visibleZoneIds: visibleZones,
+      drawableGroupIds: drawableGroups,
       overlayOptions,
       transformMode,
       transformSpace,
@@ -1211,7 +1221,7 @@ export function App() {
     [
       room, previewCameras, placementPreviewCameras, probes, sections, volumes, selection, placementOpen,
       engine.state.flaggedCameras,
-      sectionCellGrids, enabledZoneIds, overlayOptions, transformMode,
+      sectionCellGrids, visibleZones, drawableGroups, overlayOptions, transformMode,
       transformSpace, activeView, gizmosVisible, zonesVisible, sectionsVisible, stale,
       voxelSize, clipBand, sightlines, placing,
       constraints, activeVertex, constraintsVisible, poolPositions, chosenPoolIndices,

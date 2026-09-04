@@ -70,15 +70,16 @@ readout beside it is what carries absolute value.
 | Camera frustum helper (default) | `0x7fb8e6`, opacity 0.85 | |
 | Camera selected (body + helper) | `0xffd23f` (yellow), body scaled ×1.4 | |
 | Camera flagged "inside geometry" | `0xe0524f` (red) | |
-| Camera disabled | body opacity 0.3 (frustum still follows selection) | |
+| Camera disabled | **not drawn** — except as the selection, where the body takes opacity 0.3 and the frustum still follows selection (spec §2.4.3) | |
+| Section disabled | **not drawn** — except as the selection, where its box outlines draw at opacity 0.35 with no heatmap, so the drag has a visible target (spec §2.4.3, §13.8) | `scene/sectionGizmos.ts` |
 | Probe marker | `0xff9d3f` (amber diamond) | `scene/probeGizmos.ts` |
 | Probe selected | `0xffd23f` | |
 | Sightline (probe → visible camera) | `0x4de08a` (green), opacity 0.9 | spec §12.4 |
 | Sampling-volume box (edges + faint fill) | `0x8bd0c0` (teal) | `scene/samplingVolumeGizmos.ts` |
-| Volume selected / disabled-zone volume | edges `0xffd23f` (yellow) / dimmed to opacity 0.25 | |
-| Camera-constraint handles + bodies | `0xc08bd0` (violet); handles opaque, every fill 0.16 selected / 0.10 / 0.04 disabled | `scene/constraintGizmos.ts` |
+| Volume selected / hidden-zone volume | edges `0xffd23f` (yellow) / **not drawn**; as the selection, edges 0.4 and fill 0.06 — the selected-disabled tier (spec §2.4.3) | |
+| Camera-constraint handles + bodies | `0xc08bd0` (violet); handles opaque, every fill 0.16 selected / 0.10 enabled / 0.06 selected-disabled. A disabled constraint — or any constraint of a disabled group — is **not drawn** (spec §2.4.3) | `scene/constraintGizmos.ts` |
 | Constraint outside a group's mount zones | fill 0.06 selected / 0.03, edges at 0.35 — the disabled treatment, because for a placement run that is what it is. Never the only cue: the group panel spells out the overlap percentages (`camera_placement.md` §3.1.2, §4.1.1) | `scene/constraintGizmos.ts` |
-| Constraint / vertex selected, disabled constraint | `0xffd23f` (yellow) / opacity 0.35 | `camera_placement.md` §6.1 |
+| Constraint / vertex selected, selected-disabled constraint | `0xffd23f` (yellow) / handles and lines at opacity 0.35 | `camera_placement.md` §6.1 |
 | Placement pool scatter | violet ramped 0.35→1.0 by the position's own reachable count; chosen positions `0xffd23f`. **4 px screen-space dots** (`sizeAttenuation: false`) drawn as an instanced **sprite**, not `THREE.Points` — WebGPU point primitives are fixed at 1 px, and a world-space size small enough for a 6 m room is sub-pixel on the 1120 m site | `camera_placement.md` §5.2 |
 | Draft polyline (armed draw mode) | `0xffd23f`: a 7 px screen-space dot per clicked vertex plus a solid line between them, both `depthTest: false` at `RenderOrder.draftOverlay`. Solid rather than dashed because two dashed constructions rendered nothing under this WebGPU backend (`CONVENTIONS.md`) | `camera_placement.md` §6.2 |
 | Coverage overlay fog | user hue, default **red** (hue 0), `hsl(h,100%,50%)` | `scene/coverageOverlay.ts` |
@@ -360,9 +361,12 @@ this rig, check the asset's metalness before touching the lights.
   probe visibility uses a ✓/– `.mark` glyph alongside color, and the compute/render
   backend is a labeled badge. Keep the redundant text/glyph cue when you add color.
   **The rule covers opacity too**: a constraint excluded by a group's mount filter
-  dims to the *same* ramp as a disabled one, so the group panel spells out its
-  overlap percentage in words rather than leaving the viewport to be interpreted
-  (`camera_placement.md` §5).
+  dims to the *same* ramp as a selected-disabled one, so the group panel spells out
+  its overlap percentage in words rather than leaving the viewport to be
+  interpreted (`camera_placement.md` §5). It covers **absence** most of all — a
+  disabled entity is not drawn at all (spec §2.4.3), so the scene hierarchy's
+  dimmed row and unticked box are what say it is still there; never let the
+  viewport be the only place an entity is accounted for.
 - **Contrast:** primary text `#e6e8eb` on the dark surfaces is high-contrast;
   muted greys (`#7c8592`, `#7a828f`) are for secondary/hint text only, not primary
   reading content — don't push important text into them.

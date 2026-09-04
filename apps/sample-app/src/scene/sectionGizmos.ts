@@ -84,9 +84,12 @@ export class SectionGizmoSet extends GizmoSet<SectionEntry> {
     cellGrids: ReadonlyMap<string, SectionCellGrid | null>,
     masterVisible: boolean,
     stale: boolean,
+    /** The selected section, which draws even when disabled (spec §2.4.3). */
+    selectedId: string | null = null,
   ): void {
     this.reconcile(sections, (entry, section) => {
-      this.updateEntry(entry, section, cellGrids.get(section.id) ?? null, masterVisible, stale);
+      const grid = cellGrids.get(section.id) ?? null;
+      this.updateEntry(entry, section, grid, masterVisible, stale, section.id === selectedId);
     });
   }
 
@@ -162,6 +165,7 @@ export class SectionGizmoSet extends GizmoSet<SectionEntry> {
     cellGrid: SectionCellGrid | null,
     masterVisible: boolean,
     stale: boolean,
+    selected: boolean,
   ): void {
     const { collapseAxis, axisA, axisB } = axisMapping(section.orientation);
     // The heatmap plane spans the footprint (spec §13.2). When a run is retained,
@@ -213,14 +217,25 @@ export class SectionGizmoSet extends GizmoSet<SectionEntry> {
 
     entry.attachTarget.position.set(...pos);
 
-    const visible = masterVisible && section.enabled;
+    // A disabled section draws nothing, except while selected — the one state in
+    // which it must be visible, since TransformControls is attached to it and a
+    // drag on an invisible box is a drag in the dark (spec §2.4.3, §13.8). What it
+    // draws then is its **outlines only**: the outline is what the drag needs to
+    // see, while the heatmap is measured data this section is excluded from
+    // reporting.
+    const outlinesOnly = !section.enabled && selected;
+    const visible = masterVisible && (section.enabled || selected);
     entry.group.visible = visible;
     entry.attachTarget.visible = visible;
     if (!visible) return;
+    entry.heatmapMesh.visible = !outlinesOnly;
 
     const opacity = stale ? STALE_OPACITY : NORMAL_OPACITY;
     entry.heatmapMaterial.opacity = opacity;
-    entry.outlineMaterial.opacity = stale ? OUTLINE_OPACITY * 0.5 : OUTLINE_OPACITY;
+    // The selected-disabled tier is the full outline opacity (spec §2.4.3): the
+    // box is the only thing drawn, so dimming it further would defeat the point.
+    entry.outlineMaterial.opacity = !outlinesOnly && stale ? OUTLINE_OPACITY * 0.5 : OUTLINE_OPACITY;
+    if (outlinesOnly) return;
 
     if (cellGrid) {
       const data = sectionHeatmapTextureData(cellGrid, section.aggregation);

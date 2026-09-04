@@ -879,6 +879,12 @@ shows the scatter and the constraint gizmos (`spec.md` §2.4). It claims no capt
 itself: the first build step opens the session (§3.4), so a mode entered and left again costs
 nothing and marks nothing stale.
 
+**The mode's group counts as selected** for the disabled-entity rule (`spec.md` §2.4.3).
+Nothing stops the mode being entered on a group whose own checkbox is off, and its
+constraints would then be hidden — leaving Build to scatter a pool of candidate dots over
+rails that are not drawn. Treating the open group as selected keeps them on screen at the
+selected-disabled tier, and reuses §2.4.3's one exception rather than adding a second.
+
 ```
 ┌─ 340 ──────────────────┬──────────────────────┬─ 340 ────────────────┐
 │ CANDIDATE POSITION POOL │                      │ Dock rail            │
@@ -1257,10 +1263,18 @@ the handles are what the pointer hits.
 **Every filled body is translucent, primitive or dilation.** A constraint marks out where
 cameras may go; drawn opaque it hides the geometry the user is placing them against, which
 is the one thing they need to see at the same time. So a plane's rectangle takes the same
-opacity ramp as a dilation — 0.16 selected, 0.10 enabled, 0.04 disabled
+opacity ramp as a dilation — 0.16 selected, 0.10 enabled, 0.06 selected-disabled
 (`VISUAL_DESIGN.md`) — and only the crisp parts, the vertex/point handles and a polyline's
 segments, draw opaque. This is what "a translucent rectangle" above means: the rectangle
 is a fill, not just an outline, and it reads the way the point constraint's ball does.
+
+**A disabled constraint is not drawn at all**, nor is any constraint of a disabled
+group (`spec.md` §2.4.3) — the ramp's old bottom rung, a 0.04 disabled fill, is gone.
+A disabled constraint reappears only as the selection, at the 0.06 selected-disabled
+fill with its handles and lines at 0.35, which is the same pair a selected but
+**mount-excluded** constraint takes (§4.1.1): both mean *selected, and contributing
+nothing*. Selection is the only way to see a disabled constraint, which is also the
+only way to edit one without re-ticking its box first.
 
 **No normal indicator is drawn**, and this is deliberate. An earlier draft of the table
 gave the plane "a normal tick" — a stub along its local +Y — to make the orientation of a

@@ -326,8 +326,10 @@ Zones                         (group umbrella — passive; expand/collapse only)
 
 - **Gizmo.** Each volume renders as a **wireframe box** (edges + faint translucent
   fill) at its `position`/`rotation`/`size` via a new `SamplingVolumeGizmoSet`
-  (`scene/samplingVolumeGizmos.ts`). Volumes of **enabled** zones render normally;
-  volumes of disabled zones are dimmed. The
+  (`scene/samplingVolumeGizmos.ts`). Volumes of **visible** zones render normally —
+  the enabled zones union every drawable group's target `zoneIds`
+  (`camera_placement.md` §3.1.2, `spec.md` §2.4.3). A volume outside that set draws nothing unless it
+  is the selection (`spec.md` §2.4.3). The
   selected volume is highlighted. Boxes are **pickable** like camera/probe bodies —
   the viewport pick (`spec.md` §5.2) returns the nearest hit across cameras,
   probes, **and volumes**. Zones themselves have no viewport body (selected from
@@ -495,6 +497,13 @@ disabling all marks nothing. **Toggling a zone never triggers a recompute** — 
 which regions the marked-set group and the slab/`leafCounts` filters name, and the app
 re-reduces the retained masks through `aggregateRetained` (`spec.md` §3.3), like
 changing a section's orientation. Overlay/sections **dim** when the retained run is stale, as today.
+
+**Counting and drawing part company here.** The enabled union governs what is
+*counted*, as above. What is *drawn* follows the **visible** set of `spec.md` §2.4.3 —
+the enabled zones union every drawable group's target `zoneIds` — so a disabled zone a
+group targets contributes no voxels to the overlay yet keeps its box on screen, which
+is the region that group's pool is being built into (`camera_placement.md` §3.1.2).
+Without that union a Build would scatter candidate dots through a box nothing draws.
 
 - **Sections (`spec.md` §13.3).** Voxels **outside the enabled union** are **skipped
   first**, not blacked. Among the **in-union** voxels, if any is invalid the cell is

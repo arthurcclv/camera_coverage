@@ -107,3 +107,45 @@ test('pickHit returns the nearest hit and null on a miss (spec §5.2)', () => {
   const above = new THREE.Raycaster(new THREE.Vector3(-10, 50, 0), new THREE.Vector3(1, 0, 0));
   assert.equal(s.pickHit(above), null);
 });
+
+// --- Hidden is unpickable (spec §2.4.3) -------------------------------------
+//
+// Three.js's raycaster does *not* skip invisible objects, so without the guard in
+// `pickHit` a hidden gizmo would still swallow the click that was meant for the
+// geometry behind it. The two tests below are the two ways a gizmo goes hidden:
+// its own flag (a disabled entity) and an ancestor's (a whole layer switched off).
+
+test('pickHit skips an entry hidden by its own flag (spec §2.4.3)', () => {
+  const s = new TestSet();
+  s.sync([{ id: 'far', x: 5 }, { id: 'near', x: 1 }]);
+  s.group.updateMatrixWorld(true);
+  const ray = () => new THREE.Raycaster(new THREE.Vector3(-10, 0, 0), new THREE.Vector3(1, 0, 0));
+
+  assert.equal(s.pickHit(ray())?.id, 'near');
+
+  // Hiding the nearer body hands the pick to the one behind it, rather than
+  // returning an invisible hit or nothing at all.
+  s.group.getObjectByName('near')!.visible = false;
+  assert.equal(s.pickHit(ray())?.id, 'far');
+
+  s.group.getObjectByName('far')!.visible = false;
+  assert.equal(s.pickHit(ray()), null);
+});
+
+test('pickHit skips an entry hidden by an ancestor — the layer toggles (spec §2.4)', () => {
+  const s = new TestSet();
+  s.sync([{ id: 'a', x: 1 }]);
+  s.group.updateMatrixWorld(true);
+  const ray = () => new THREE.Raycaster(new THREE.Vector3(-10, 0, 0), new THREE.Vector3(1, 0, 0));
+
+  assert.equal(s.pickHit(ray())?.id, 'a');
+
+  // This is exactly what a layer checkbox does — and what lets SceneView drop its
+  // own per-layer guard: the body's own `visible` is still true here.
+  s.group.visible = false;
+  assert.equal(s.group.getObjectByName('a')!.visible, true);
+  assert.equal(s.pickHit(ray()), null);
+
+  s.group.visible = true;
+  assert.equal(s.pickHit(ray())?.id, 'a');
+});

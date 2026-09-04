@@ -5,9 +5,10 @@
  * translucent fill) at its `position`/`rotation`/`size`. A unit cube is scaled by
  * `size`, so the entry's root object maps 1:1 to `{position, quaternion, scale}`
  * — `TransformControls` (translate / rotate / **scale**) writes them straight
- * back with no conversion (§5). Volumes of **enabled** zones render normally;
- * volumes of disabled zones are dimmed; the selected volume is highlighted. The
- * fill is **pickable** like camera/probe bodies.
+ * back with no conversion (§5). Volumes of **visible** zones render normally;
+ * volumes outside that set draw nothing unless selected (`spec.md` §2.4.3); the
+ * selected volume is highlighted. The fill is **pickable** like camera/probe
+ * bodies.
  *
  * The keyed entry map, reconcile loop, pickHit, getAttachTarget, and dispose are
  * the shared `PickableGizmoSet` spine; this file owns the volume entry shape and
@@ -33,9 +34,12 @@ const FILL_COLOR = 0x8bd0c0;
 export class SamplingVolumeGizmoSet extends PickableGizmoSet<VolumeEntry> {
   /**
    * Sync the gizmos to the current volumes. A volume renders normally when its
-   * zone is in `enabledZoneIds`; volumes of disabled zones are dimmed (§5, §7.3).
+   * zone is in `visibleZoneIds` — the enabled zones union every enabled group's
+   * target `zoneIds`, which override a zone's own flag (`camera_placement.md`
+   * §3.1.2). A volume outside that set draws nothing at all unless it is the
+   * selection, when it takes the selected-disabled tier (`spec.md` §2.4.3, §5).
    */
-  update(volumes: SamplingVolume[], selectedId: string | null, enabledZoneIds: ReadonlySet<string>): void {
+  update(volumes: SamplingVolume[], selectedId: string | null, visibleZoneIds: ReadonlySet<string>): void {
     this.reconcile(volumes, (entry, v) => {
       const { root, fill, edges } = entry;
       root.position.set(...v.position);
@@ -43,12 +47,17 @@ export class SamplingVolumeGizmoSet extends PickableGizmoSet<VolumeEntry> {
       root.scale.set(v.size[0], v.size[1], v.size[2]);
 
       const selected = v.id === selectedId;
-      const enabled = enabledZoneIds.has(v.zoneId);
+      const visible = visibleZoneIds.has(v.zoneId);
+      root.visible = visible || selected;
+      if (!root.visible) return;
       const edgeMat = edges.material as THREE.LineBasicMaterial;
       edgeMat.color.setHex(selected ? SELECTED_EDGE_COLOR : EDGE_COLOR);
-      edgeMat.opacity = selected ? 1 : enabled ? 0.85 : 0.25;
+      // Four tiers, not three (spec §2.4.3): a hidden volume that is *selected*
+      // sits between selected and gone, so selecting it to edit it still reads as
+      // "this zone is off".
+      edgeMat.opacity = selected ? (visible ? 1 : 0.4) : 0.85;
       const fillMat = fill.material as THREE.MeshBasicMaterial;
-      fillMat.opacity = selected ? 0.18 : enabled ? 0.1 : 0.03;
+      fillMat.opacity = selected ? (visible ? 0.18 : 0.06) : 0.1;
     });
   }
 
