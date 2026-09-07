@@ -6,6 +6,85 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## A greedy pass beside the trials, with separation as the objective's second key
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §1.2, §4.4.
+
+**Why.** The union objective penalizes a clustered layout only while the clustered
+mounts' reachable sets overlap. Past saturation an extra camera adds *zero*
+voxels wherever it goes, so the objective ranks every remaining position equally
+and the layout that wins is whichever one random sampling drew — which is what
+made the tail of a large layout look bunched. Best-of-T is also not a spread
+optimizer in the first place: uniform random *k*-subsets clump, and with
+`trials` ≪ C(pool, k) the winner is whichever clumpy sample topped a field of
+near-ties. Raising the trial ceiling narrows that band and never breaks it.
+
+**Decision.** Two changes, one small and one large. Layouts are ordered on
+`(score, sep)` where `sep(L)` is the closest pair in metres — a tie-break with no
+parameter, which is why it is not the minimum-separation knob §1.2 still
+declines. And an analysis now runs a deterministic **greedy pass** before the
+trials: pick by largest gain against the union so far, ties broken by distance to
+the nearest camera already picked. Where coverage still pays that spreads by
+construction (a neighbour of a picked mount has little the union lacks); where it
+no longer pays every gain is `0` and the tie-break *is* farthest-point sampling,
+so the tail comes out evenly spaced instead of arbitrary. One rule covers both
+regimes, which is why it was chosen over a spread-biased draw or a `δ` tolerance
+that would have let a worse score win.
+
+**What it also bought.** A bound: greedy is prefix-consistent and the objective is
+submodular, so `best[k]` is within `1 − 1/e` of the pool's best at *every* count.
+That retires a real ambiguity — a flat stretch of the curve used to be
+unreadable, since too few trials at large `k` looks exactly like more cameras not
+helping. And `maxCount = 1` reposition (§4.6) is now literally greedy's first
+pick, so two rules became one.
+
+**What it costs.** A pass is at worst `poolSize` trials' work, paid before the
+first trial. Lazy re-evaluation (gains only fall, so a stale gain is an upper
+bound) usually collapses that, but the saving is instance-dependent and is not
+claimed as a number anywhere. So the pass gets its own progress phase — `choosing
+12/64 cameras` — shares the one Cancel, and runs **first**, which is what makes an
+early cancel leave the layout with the guarantee on it rather than a handful of
+random draws.
+
+**Why the trials stayed.** `1 − 1/e` is a floor, not a description: greedy is
+myopic and a random layout can beat it on a given pool. The tests keep an
+instance of each — one where a trial misses the position greedy takes first, and
+one seed where the trial happens to find it.
+
+---
+
+## The trial ceiling is 100,000, and it buys wall-clock rather than GPU
+
+Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §5.1.
+
+**Why.** `Trials` carried a bare `max={20000}` — the same undocumented, untested
+kind of literal `Size` had before it. Search quality in a random layout search is
+set almost entirely by how many layouts the search sees, and a site wanting ~100
+cameras out of thousands of candidates is not searched out in a couple of thousand
+draws, so 20,000 capped real runs rather than typos.
+
+**Decision.** `TRIALS_MAX = 100_000` lives in `placement/analyze.ts` beside the
+trial loop it bounds, and `StrategyPanel` reads it. Scene-file import validation
+is unchanged (`trials ≥ 1`), so a scene authored elsewhere is not rejected by a UI
+affordance — the same line the pool ceiling drew.
+
+**What the raise rests on.** Unlike the pool ceiling it spends no GPU and no
+memory: a trial is one shuffle and one rasterize into a bitset that is already
+allocated. What it spends is wall-clock — tens of minutes at the top — which is
+affordable to ask for only because it is affordable to abandon, so the raise rests
+on `advanceAnalysis`'s chunking: the batched loop keeps Cancel and the progress
+line live, and a cancel keeps every trial already run. The tests pin the two
+properties that make the top of the range worth having — trial *t* is seeded from
+*t* alone, so layouts just under the ceiling are still fresh rather than repeats,
+and a full 100,000-trial run is chunk-invariant, not just a 20-trial one.
+
+**Not done.** The loop still runs on the main thread between `setTimeout(0)`
+yields, so a ceiling run ties the tab to a 50-trial batch cadence for tens of
+minutes. A Web Worker is the honest home for it; the ceiling was raised without
+waiting for one because the work is already interruptible and loses nothing.
+
+---
+
 ## The pool ceiling is a named constant at 10,000, not a literal in the panel
 
 Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §5.1.

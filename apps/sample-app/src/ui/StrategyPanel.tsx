@@ -17,6 +17,7 @@
  *
  * What is left is exactly the two fields a press of **Analyze** consumes.
  */
+import { TRIALS_MAX } from '../placement/analyze.ts';
 import type { ConstraintGroup } from '../placement/region.ts';
 import type { PlacementSession } from '../placement/usePlacement.ts';
 import { NumberInput } from './NumberInput.tsx';
@@ -30,7 +31,11 @@ export interface StrategyPanelProps {
 export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelProps) {
   const set = (patch: Partial<ConstraintGroup>) => onChangeGroup(group.id, patch);
   const pool = session.pool;
-  const analyzing = session.running && session.progress?.phase === 'analyzing';
+  // Both halves of an analysis (§4.4) share this card's progress line and its
+  // one Cancel, and the line names which is running: they stall differently, so
+  // a line that stopped moving has to say what is slow (§5.1).
+  const phase = session.progress?.phase;
+  const analyzing = session.running && (phase === 'choosing' || phase === 'analyzing');
   const hasResult = session.curve.some((b) => b !== null);
 
   return (
@@ -62,7 +67,7 @@ export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelPr
           label="Trials"
           value={group.trials}
           min={1}
-          max={20000}
+          max={TRIALS_MAX}
           disabled={session.running}
           onCommit={(trials) => set({ trials })}
         />
@@ -85,7 +90,9 @@ export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelPr
 
         {analyzing && session.progress && (
           <p className="hint">
-            analyzing {session.progress.done}/{session.progress.total} trials
+            {phase === 'choosing'
+              ? `choosing ${session.progress.done}/${session.progress.total} cameras`
+              : `analyzing ${session.progress.done}/${session.progress.total} trials`}
           </p>
         )}
         {!session.running && pool === null && (

@@ -41,6 +41,8 @@ import {
 import { DEFAULT_TEMPLATE, type CameraConstraint, type ConstraintGroup } from './region.ts';
 import {
   advanceAnalysis,
+  advanceGreedy,
+  greedyRemaining,
   kneeOf,
   selectedCount,
   newAnalysis,
@@ -55,7 +57,7 @@ import { describeError } from '../errorText.ts';
 const TRIAL_BATCH = 50;
 
 export interface PlacementProgress {
-  phase: 'building' | 'analyzing';
+  phase: 'building' | 'choosing' | 'analyzing';
   done: number;
   total: number;
   /** The constraint being sampled, while building. */
@@ -540,13 +542,29 @@ export function usePlacement({
       // whatever the user had dragged to over the last one (§5.2).
       countPinned: false,
       analyzedStamp: stamp,
-      progress: { phase: 'analyzing', done: 0, total: group.trials, label: '' },
+      progress: { phase: 'choosing', done: 0, total: analysis.maxCount, label: '' },
     }));
+
+    // The greedy pass first, one pick per yield: a step scans the whole pool
+    // (§2.3), and running it before the trials is what makes an early Cancel
+    // leave a layout with a bound on it rather than a few random draws (§5.1).
+    const picks = greedyRemaining(analysis, pool.positions.length);
+    for (let done = 0; done < picks; done++) {
+      if (abortRef.current) break;
+      advanceGreedy(analysis, pool.positions, bits, 1);
+      setState((s) => ({
+        ...s,
+        progress: { phase: 'choosing', done: analysis.greedy.picked.length, total: picks, label: '' },
+        // The greedy curve is shown as it fills: it is the answer with the
+        // guarantee on it, and a pass over a large pool is not instant.
+        curve: [...analysis.best],
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
 
     // Batched with a yield between batches, so Cancel lands and the progress
     // line ticks: a thousand trials is tens of seconds of pure CPU (§2.3).
-    for (let done = 0; done < group.trials; done += TRIAL_BATCH) {
-      if (abortRef.current) break;
+    for (let done = 0; done < group.trials && !abortRef.current; done += TRIAL_BATCH) {
       const batch = Math.min(TRIAL_BATCH, group.trials - done);
       advanceAnalysis(analysis, pool.positions, bits, batch);
       setState((s) => ({

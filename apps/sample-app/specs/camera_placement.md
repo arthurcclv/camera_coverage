@@ -96,6 +96,27 @@ the objective itself*. That is why this feature needs no minimum-separation knob
 overlap heuristic, and no distance proxy: the thing that would justify them is measured
 directly.
 
+**Where the union stops working, separation breaks the tie.** That penalty is real only
+while the clustered positions' reachable sets actually overlap. Past the point where the
+curve saturates, an added camera's marginal contribution is *zero* wherever it goes — so
+the objective ranks every remaining position equally, the
+layout that wins is whichever one the search happened to draw, and the tail of a large
+layout comes out bunched for no reason the objective can state. Layouts are therefore
+ordered on two keys rather than one:
+
+```
+L better than L'  ⇔  (score(L), sep(L)) > (score(L'), sep(L'))     lexicographic
+sep(L) = min { |p − q| : p ≠ q ∈ L },  and ∞ for a single camera
+```
+
+`sep(L)` is the layout's **separation** — the distance between its closest pair, in metres.
+This is still not a minimum-separation knob and still not a weighted term: it carries no
+parameter, it can never outrank a single voxel of coverage, and on two layouts the union
+can tell apart it changes nothing. It decides only what the union is indifferent to. What
+turns that into an evenly spread layout is that §4.4's greedy pass applies the same two
+keys *one camera at a time*: where coverage no longer separates the candidates, the pick is
+the position farthest from everything already placed.
+
 ### 1.3 What the objective does not model
 
 **Aim.** A real camera sees one frustum, not its whole reachable set, so `score(L)` is an
@@ -185,6 +206,16 @@ for a 200-position pool, once, with a progress line and Cancel (§5.1).
 counting newly-set bits, so it costs `Σ|R(p)|` writes — a few million, tens of
 milliseconds. Thousands of trials are affordable, which matters: the search quality of a
 random layout search is set almost entirely by how many layouts it sees.
+
+**The greedy pass costs at worst `poolSize` trials** (§4.4): `maxCount` steps, each scanning
+every pool position's cached set once, is `maxCount × Σ_p |R(p)|` bit tests against a
+trial's `Σ_{p ∈ L} |R(p)|`. That bound is a real cost on a 10,000-position pool and it is
+why the pass is *lazy*: gains only fall, so most steps re-evaluate a handful of candidates
+instead of all of them, and the first step re-evaluates none. The saving is
+instance-dependent and therefore not claimed as a number here — what is guaranteed is that
+the pass is chunked one camera per yield, reports `choosing 12/64 cameras`, and **Cancel**
+keeps what it has (§5.1), so an expensive pool is visible and abandonable rather than a
+hang.
 
 **Memory:** the cache holds merged cubes, not voxels — `camera-coverage-sdk` §9.5 measures
 2.7–5.0 bytes per voxel on a cluttered scene and 0.005 on a large sparse site, so a pool
@@ -519,8 +550,13 @@ the same six spare bits as a re-aim, on a scene of any size.
 ```ts
 interface PlacementResult {
   groupId: string;
-  /** Indexed by camera count 1..maxCount; entry k is the best layout found at k. */
-  best: { count: number; score: number; positions: PoolPosition[] }[];
+  /**
+   * Indexed by camera count 1..maxCount; entry k is the best layout found at k.
+   *
+   * `separation` is §1.2's `sep(L)` in metres — the closest pair in the layout,
+   * `Infinity` at one camera. It is the objective's second key, and §5.2 shows it.
+   */
+  best: { count: number; score: number; separation: number; positions: PoolPosition[] }[];
   /** Trials actually run (a cancel stops early). */
   trials: number;
   /** The §4.5 knee: the smallest count within `epsilon` of `best[maxCount]`. */
@@ -695,7 +731,62 @@ Build steps run one at a time with the same six slots, `incremental: true`, and 
 line; **Cancel** stops at the next build-step boundary and keeps the pool built so far,
 which is usable — a partial pool is a smaller pool, not a broken one.
 
-### 4.4 The analysis: trials and the prefix curve
+### 4.4 The analysis: the greedy pass, trials, and the prefix curve
+
+An analysis fills the **prefix curve**: `best[k]` is the best layout it found at `k`
+cameras, for every `k` in `1..maxCount`. **Two searches fill it**, and both contribute at
+every count — a deterministic greedy pass, then the random trials.
+
+#### The greedy pass
+
+It picks cameras one at a time, each time taking the position that adds the most voxels the
+layout does not already have:
+
+```
+U = ∅                                    # the union so far — one scratch bitset
+picked = []
+for k in 1..maxCount:
+  gain(p) = |R(p) \ U|                    # NEW voxels, not the position's total
+  sep(p)  = min { |p − q| : q ∈ picked }  # metres to the nearest camera picked; ∞ at k = 1
+  p* = argmax over p ∉ picked of (gain(p), sep(p), −index(p))     # lexicographic
+  picked += p*;  U ∪= R(p*);  offer picked as a candidate for best[k]
+```
+
+This is textbook **greedy maximum coverage**, and three of its properties are why it is
+here rather than a heuristic that merely looks sensible:
+
+- **It is within `1 − 1/e` (≈ 63%) of the best layout the pool admits, at every count.**
+  `score` is monotone and submodular in the layout — adding a camera never lowers the union
+  and never helps more in a bigger layout than in a smaller one — which is exactly the
+  condition that guarantee needs, and greedy is prefix-consistent, so its first `k` picks
+  *are* its `k`-camera answer. No random search offers a bound of any kind.
+- **It spreads by construction where coverage still pays.** A position beside one already
+  picked has little the union lacks, so its gain is small and it loses to a position across
+  the site. This is §1.2's union arithmetic steering the *choice* rather than only scoring
+  it afterwards.
+- **It spreads by tie-break where coverage no longer pays.** Past saturation every
+  remaining gain is `0`, the first key stops discriminating, and the second takes over: the
+  pick is the position farthest from every camera already placed. That is farthest-point
+  sampling, the standard greedy for the *k*-centre objective, so the tail of a saturated
+  layout comes out evenly spaced instead of arbitrary. This is the case §1.2's union cannot
+  see and the one a user notices first, because on a saturated curve it is the whole tail.
+
+**`gain` only ever falls, which is what makes the pass affordable.** `U` only grows, so a
+position's gain can never rise between steps (submodularity again). The pass keeps each
+position's last computed gain as an **upper bound** and, at each step, re-evaluates
+candidates in bound order only until the best fresh gain in hand is at least every
+remaining bound — Minoux's **lazy greedy**, which returns the identical layout to the naive
+scan rather than an approximation of it. Two consequences are worth naming: the first step
+evaluates nothing at all (`U = ∅`, so `gain(p) = p.count`, already cached by §4.3 — which
+is why the greedy layout at one camera *is* §4.6's highest-count position, by construction
+rather than by a second rule), and a position whose fresh gain is `0` is `0` forever, so it
+leaves the bound order for the separation-only tail and is never re-evaluated again.
+
+**The pass uses no PRNG.** It is a function of the pool alone, so `seed` still governs only
+which positions the pool holds (§4.1) and which layouts the trials draw — the greedy half
+of an analysis reproduces from the pool with no seed at all.
+
+#### Trials
 
 A **trial** draws `maxCount` distinct pool positions, in random order, and scores every
 prefix:
@@ -731,13 +822,43 @@ already-built reachable sets, and every number it produces is the aim-free upper
 Because the pool is drawn proportionally to measure (§4.1), a uniform draw *from the pool*
 is already measure-proportional; the trial needs no weighting of its own.
 
+**Trials are kept, and not replaced by the greedy pass**, because `1 − 1/e` is a floor and
+not a description: greedy is myopic — its first pick is locked in before it has seen what
+the second would have wanted — and a random layout can beat it on a given pool. Best-of-T
+is the cheap exploration that catches those, it is seeded and reproducible, and the trial
+loop is what makes `Trials` a field a user can spend (§5.1).
+
+#### One comparison rule for both
+
+`best[k]` keeps whichever candidate wins §1.2's two keys, with a last key for
+reproducibility:
+
+```
+better(a, b) = (a.score, sep(a), −maxIndex(a)) > (b.score, sep(b), −maxIndex(b))
+```
+
+**Score stays strictly first, and no tolerance is introduced to soften it.** The percentage
+§5.2 puts on the axis is the best reachable score the analysis found — not a compromise
+between coverage and tidiness — and a `δ` that let a lower score win would be the knob
+§1.2 declines to add, with a value nobody can pick from the site.
+
+**The residual is stated rather than hidden.** A trial layout that beats the greedy one by a
+single voxel wins that count and may be the clumpier of the two. Two things bound it: the
+comparison's second key means it can only happen on a *strictly* better score, never on an
+equal one, and the greedy pass is usually the winner outright on a large pool. §5.2 shows
+the selected layout's separation beside its score, so the case is legible when it happens.
+
 **The best-per-count curve cannot dip.** Every trial contributes a *nested* chain of
-layouts, and `best[k]` is the maximum over the same trials of a prefix score that is itself
-non-decreasing in `k` — so `best[k] ≥ best[k−1]` holds by construction, not by luck. This
-is worth stating because it means a flat stretch of the curve is **not** evidence that more
-cameras would not help: it may equally be evidence that too few layouts were tried at that
-count. The pool ceiling (§5.2) is what separates those two readings, which is why it is
-drawn.
+layouts, and so does the greedy pass; `best[k]` is the maximum over those chains of a
+prefix score that is itself non-decreasing in `k` — so `best[k] ≥ best[k−1]` holds by
+construction, not by luck.
+
+**A flat stretch is now bounded evidence rather than none.** It used to be unreadable: too
+few trials at large `k` looks exactly like more cameras not helping. The greedy chain alone
+puts `best[k]` within `1 − 1/e` of the best layout the pool admits at that count, so a flat
+stretch can no longer be an artefact of undersampling — it says the *pool* has little left
+to give, which is the reading the ceiling line (§5.2) was drawn to support and now
+corroborates rather than merely suggests.
 
 ### 4.5 The knee
 
@@ -773,7 +894,9 @@ A camera carrying `constraintId` (§6.3) has a **Reposition** action in its own 
 pools over **that one constraint** (its `poolSize` share scaled up to the group's
 `poolSize`, since it is the only constraint being sampled) and moves the camera to the
 highest-`count` position — a `maxCount = 1` search, which needs no trials at all because a
-one-camera layout's score is just that position's own `count`.
+one-camera layout's score is just that position's own `count`. It is also, exactly, the
+first pick of §4.4's greedy pass with an empty union, so the two agree by construction and
+not by two implementations of one rule.
 
 The camera's rotation, name, id, and intrinsics are untouched. Repositioning is the
 answer to "this camera is on the right rail but in the wrong place on it"; it does not
@@ -943,6 +1066,18 @@ asking for them is stated before it is paid — the button reads `Extend to 8000
 progress line counts the build steps (§3.3.1) — and an extend is the usual way up, so a
 large pool is reached by growing a small one, not by guessing the number first.
 
+**`Trials` accepts 1 – 100,000 layouts.** Like `Size`'s ceiling it guards a mistyped
+digit rather than the method, but what it guards against is wall-clock rather than GPU: a
+trial is tens of milliseconds of pure CPU (§2.3), so the top of the range is tens of
+minutes. That is a run a user may legitimately want — search quality is set almost
+entirely by how many layouts the search sees, and a site wanting ~100 cameras out of
+thousands of candidates is not searched out in a thousand draws — and it costs nothing but
+time, because trials need no GPU and hold no memory beyond one accumulating bitset. It is
+affordable to ask for because it is affordable to abandon: the loop runs in batches with a
+yield between them, the progress line counts `analyzing 6400/100000 trials`, and **Cancel**
+keeps every trial already run (§4.4). Nothing about a long run is unrecoverable, so the
+ceiling sits where a fat-fingered `1000000` still gets caught.
+
 **`Seed` is a draw input, not a search input**, which is what puts it in the first card. It
 picks *which* points get built — it offsets every constraint's sub-sequence (§4.1) — so it
 is spent on the GPU with Build, and it is the field that decides between an extend and a
@@ -989,8 +1124,15 @@ so the fields and the result they no longer describe cannot be read apart.
    a valid one, **Rebuild** once the fingerprint has moved. "Pool" is the right word in this
    spec and in the code, where its caching rules are the whole design; it is the wrong word
    on a button, where it names an intermediate the user has no reason to think about.
-2. **Analyze** — runs `trials` trials (§4.4) on the cached pool. Milliseconds to seconds,
-   with a progress line and Cancel; re-runnable at zero GPU cost after any strategy change.
+2. **Analyze** — runs the greedy pass and then `trials` trials (§4.4) on the cached pool.
+   No GPU either way, so it is re-runnable at zero GPU cost after any strategy change, and
+   both halves are chunked behind one progress line with one **Cancel**: `choosing 12/64
+   cameras` while greedy picks, then `analyzing 6400/100000 trials`. The two phases are
+   shown rather than merged into a percentage because they cost differently and stall
+   differently — a greedy step scans the whole pool (§2.3) and a trial does not — so a line
+   that stopped moving names the phase that is slow. **Cancel keeps whatever the curve
+   holds**, and the greedy pass runs first for that reason: cancelled early, an analysis
+   still returns the layout with a bound on it rather than a handful of random draws.
 3. **Review** — the curve, the slider, the scatter (§5.2), in the right column.
 4. **Apply** (§5.3) or **Close**, pinned below the right column's scroll region.
 
@@ -1049,7 +1191,7 @@ the pool can only be invalidated by leaving.
         ┗━━┬───┬───┬───┬───┬───┬───┬──
            1   2   3   4   6   8  10   cameras
 
-  count      [────────●────────]  8    score 94.1%  ·  pool ceiling 96.2%
+  count      [────────●────────]  8    score 94.1% · ceiling 96.2% · spacing 34.2 m
   knee (pp)  [──●──────────────]  1.0  ← moves the ◉, spends no trials
   [Apply 8 cameras]   [Close]          ← pinned below the scroll region
 ```
@@ -1080,6 +1222,16 @@ screen is a thing to keep in sync, not a thing to read.
   reads as a border rather than as the bound the curve is approaching. The headroom is taken
   in *value* space, not as a pixel pad, so it stays a tenth whatever height the plot is
   given.
+- **The stat row names the layout's spacing**, next to its score: `spacing 34.2 m` is
+  §1.2's `sep(L)` for the selected count — the closest pair in the layout on screen. It is
+  called *spacing* rather than *separation* because the row is read, not cited, and it
+  carries the tooltip/`aria-label` "The distance between the two closest cameras in this
+  layout." It earns its place for two reasons. It is the objective's **second key**, and a
+  key that decides which layout is shown while being invisible is one a user cannot argue
+  with; and it is the number that makes the slider legible past the knee — dragging into the
+  saturated tail leaves `score` all but still while `spacing` falls, which is precisely what
+  those extra cameras are buying. At one camera there is no pair, so the row reads
+  `spacing —` rather than `∞`.
 - **The pool ceiling** is drawn as a dashed asymptote. It is what *every* pool position
   together would reach, so it separates "more cameras would not help" from "this pool is
   too small" — two conclusions a bare curve conflates.
@@ -1648,7 +1800,9 @@ strings when present, with unknown ids dropped and duplicates collapsed;
 | **strategy** | the group's `maxCount`/`trials`: how the analysis searches the pool. `poolSize` and `seed` are not among them — they are the **draw inputs**, deciding which positions the pool holds rather than the search over it (§3.3.1, §5.1) — and neither is `epsilon`, which is read after the search — §3.1 |
 | **knee tolerance** | `epsilon`: a **review policy**, read off the finished curve rather than during the trials, so it moves the knee and never the search. The `Knee (pp)` slider of §5.2 — §3.1, §4.5 |
 | **build step** | one `compute()` over the capture rig at one position, producing that position's reachable set. What `aim_optimization.md` calls a *capture*; this feature says **build** throughout, because that is what its button says — §2.1, §4.3 |
-| **analysis** | the trial loop over a built pool, run by **Analyze**; produces the prefix curve, and measures no coverage — §4.4 |
+| **analysis** | the greedy pass plus the trial loop over a built pool, run by **Analyze**; produces the prefix curve, and measures no coverage — §4.4 |
+| **greedy pass** | the deterministic half of an analysis: cameras picked one at a time by largest new-voxel gain, ties broken by separation. Within `1 − 1/e` of the pool's best at every count — §4.4 |
+| **separation** (**spacing**, on screen) | `sep(L)`: the distance between a layout's closest pair, in metres; the objective's second key and what spreads a saturated layout — §1.2, §4.4, §5.2 |
 | **reachable set** | the counted voxels a mount point could see at *some* orientation — §1.2, `aim_optimization.md` §2 |
 | **layout** | a set of mount positions; the unit a trial scores — §1.2 |
 | **target zones** | a group's `zoneIds`: the sampling zones it plans for. With `restrictScoring` they define its **target set** (what §1.2 counts); with `restrictMounts` they also bound where it may mount — §3.1.2 |
@@ -1683,7 +1837,9 @@ src/placement/
                    its readout), `overlapSummary`, and §10's regenerate notice
   leafSet.ts       §2.1 LeafChunk/LeafSet from an AggregateResult, and the
                    `VoxelBitset` a trial rasterizes into (§4.4)
-  analyze.ts       §4.4, §4.5 the trial loop, the prefix curve, the knee — engine-free
+  analyze.ts       §4.4, §4.5 the greedy pass (lazy, with the separation tie-break),
+                   the trial loop, the two-key comparison, the prefix curve, the
+                   knee — engine-free
   mode.ts          §5, §5.1 the placement mode's lifecycle as a pure reducer —
                    open / requestClose / keepOpen / confirmClose / applied /
                    groupGone → next state + `closeSession`; and `buildAction`,
@@ -1830,7 +1986,16 @@ reachable sets and the CPU union. Both are pinned by outcome.
   — asked of the **curve** rather than of a live `AnalysisState`, since §5.2's panel holds
   only the curve and recomputes the knee from it on every tolerance edit (§4.5). Plus the
   §5.2 follow rule as a pure function: an unpinned count tracks the live knee, a pinned one
-  does not, and an analysis clears the pin.
+  does not, and an analysis clears the pin. Then §4.4's greedy pass, whose whole value is in
+  properties a screenshot cannot show: the **lazy** pass returns the layout a naive
+  all-candidates scan returns, on a pool built so the bounds actually go stale; a
+  constructed instance where random draws lose (one position covering a hall, the rest
+  covering slivers) is won by greedy at every count; a **saturated** pool — every position
+  reaching the same voxels — comes out evenly spaced rather than bunched, which is the
+  separation tie-break doing the only thing it can do; the greedy pass at one camera equals
+  §4.6's highest-`count` position; it is chunk-invariant per camera step and needs no seed;
+  and the two-key comparison keeps the higher score even when the loser is better spread,
+  since that is the residual §4.4 states rather than hides.
 - **`test/placementOverlay.test.ts`** — the §5.2 scatter, over real Three.js objects. Its
   two failure modes are both silent — no crash, no wrong number, just nothing on screen — so
   both are pinned: the scatter is an instanced **sprite**, never `THREE.Points` (WebGPU's
@@ -1995,7 +2160,8 @@ class it would have tested is never produced.
 the worker-side pool), `DECISIONS.md` (newest at top: per-group target zones override the global marked set;
 one zone list with two flags rather than two lists; the mount filter splits by an
 effective measure estimated with the sampler itself; regeneration clears target lists;
-placement is a mode; aim-free placement scoring; cached pool over per-trial runs; leaf
+placement is a mode; aim-free placement scoring; a greedy pass beside the trials, with
+separation as the objective's second key; cached pool over per-trial runs; leaf
 cubes over bitsets; tolerance over standoff; the strategy in the file), `CONVENTIONS.md` (`LeafCubes` and the bitset-rasterize idiom, and
 the pure-reducer-for-a-mode idiom), `STACK.md` (no new dependency), and the app's
 `VISUAL_DESIGN.md` (the constraint palette, the dilation translucency, the curve and scatter
@@ -2015,8 +2181,17 @@ pinned action footer).
 - **Redundancy-aware placement** — weighting a voxel by how many existing cameras already
   see it, as `aim_optimization.md` §1.1 does for aiming.
 - **Smarter search** — keeping good positions and re-scattering the weak ones (iterated
-  local search), greedy max-coverage over the pool, or any surrogate-model optimizer.
-  §4.4's independent trials are the deliberate simple baseline; `search.ts` is the seam.
+  local search), or any surrogate-model optimizer. Greedy max-coverage was the first item on
+  this list and is now §4.4's first half; what is still parked is anything that *revisits* a
+  pick, since neither the greedy pass nor an independent trial ever does.
+- **A separation floor as a hard constraint** — "no two cameras within 8 m" as a filter on
+  admissible layouts, rather than §1.2's tie-break. That is the minimum-separation knob, and
+  it needs a number a user can defend from the site; the tie-break was chosen because it
+  needs none.
+- **Per-constraint quotas** — forcing each constraint a share of the placed cameras
+  proportional to its effective measure, so three equal rails get equal camera counts.
+  Separation spreads a layout *in space*, which is not the same fairness, and a quota can
+  force a camera onto a rail that sees nothing new.
 - **Joint placement and aiming**, and optimizing `fov` or `far`.
 - **Relocating cameras across groups.** Apply re-arranges within one group's budget (§5.3);
   a camera bound to another group, or unbound, is never moved or disabled by it.

@@ -146,6 +146,22 @@ export class VoxelBitset {
     return ((this.bits[g >>> 5] >>> (g & 31)) & 1) === 1;
   }
 
+  /** Count the bits in the run of `len` from `start` that are **not** set. */
+  private countRun(start: number, len: number): number {
+    let missing = 0;
+    let i = start;
+    const end = start + len;
+    while (i < end) {
+      const w = i >>> 5;
+      const bit = i & 31;
+      const room = Math.min(32 - bit, end - i);
+      const mask = room === 32 ? 0xffffffff : (((1 << room) - 1) << bit) >>> 0;
+      missing += popcount32((~this.bits[w] & mask) >>> 0);
+      i += room;
+    }
+    return missing;
+  }
+
   /** Set the run of `len` bits from global index `start`; returns how many were new. */
   private setRun(start: number, len: number): number {
     let added = 0;
@@ -176,6 +192,22 @@ export class VoxelBitset {
    * test-and-sets.
    */
   add(set: LeafSet): number {
+    return this.rasterize(set, true);
+  }
+
+  /**
+   * What `add(set)` *would* return, without setting anything — the position's
+   * **gain** against the union so far (§4.4).
+   *
+   * The greedy pass asks this of many candidates per pick and commits one, so
+   * the read and the write have to walk the cubes identically or the layout it
+   * builds would not be the layout it scored. One walk, one flag.
+   */
+  gain(set: LeafSet): number {
+    return this.rasterize(set, false);
+  }
+
+  private rasterize(set: LeafSet, write: boolean): number {
     const [gnx, gny] = this.dims;
     let added = 0;
     for (const c of set.chunks) {
@@ -195,7 +227,7 @@ export class VoxelBitset {
         for (let dk = 0; dk < ez; dk++) {
           for (let dj = 0; dj < ey; dj++) {
             const g = i0 + li0 + gnx * (j0 + lj0 + dj + gny * (k0 + lk0 + dk));
-            added += this.setRun(g, ex);
+            added += write ? this.setRun(g, ex) : this.countRun(g, ex);
           }
         }
       }

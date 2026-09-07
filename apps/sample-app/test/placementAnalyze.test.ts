@@ -12,10 +12,13 @@ import assert from 'node:assert/strict';
 import { VoxelBitset, leafSetOf, type LeafChunk, type LeafSet } from '../src/placement/leafSet.ts';
 import {
   advanceAnalysis,
+  advanceGreedy,
+  greedyRemaining,
   bestScore,
   kneeOf,
   newAnalysis,
   selectedCount,
+  TRIALS_MAX,
   type AnalysisCandidate,
 } from '../src/placement/analyze.ts';
 
@@ -115,8 +118,14 @@ test('a grid too large for the scratch bitset is refused with a usable message',
  */
 function twoRoomPool(): AnalysisCandidate[] {
   const pool: AnalysisCandidate[] = [];
-  for (let n = 0; n < 5; n++) pool.push({ set: setOf([...rowCubes(0, 0, 0, 12), { at: [n, 1, 0] }]) });
-  for (let n = 0; n < 5; n++) pool.push({ set: setOf([...rowCubes(0, 8, 0, 6), { at: [n, 1, 8] }]) });
+  // Mounts stand a metre apart within a room and eight between them, so a
+  // layout's separation says which rooms it drew from (§1.2).
+  for (let n = 0; n < 5; n++) {
+    pool.push({ position: [n, 1, 0], set: setOf([...rowCubes(0, 0, 0, 12), { at: [n, 1, 0] }]) });
+  }
+  for (let n = 0; n < 5; n++) {
+    pool.push({ position: [n, 1, 8], set: setOf([...rowCubes(0, 8, 0, 6), { at: [n, 1, 8] }]) });
+  }
   return pool;
 }
 
@@ -181,6 +190,41 @@ test('chunking the trials cannot change the answer', () => {
   );
 });
 
+test('the trial stream is still fresh at the ceiling', () => {
+  // What the 100,000-trial ceiling (§5.1) rests on: trial t is seeded from t
+  // alone, so the last trials of a full run are new layouts rather than
+  // repeats of the first. Drawn one trial at a time from indices just under
+  // the ceiling, `best[2]` is exactly that trial's triple.
+  const pool = twoRoomPool();
+  const bits = new VoxelBitset(DIMS);
+  const layouts = new Set<string>();
+  for (let t = 0; t < 200; t++) {
+    const state = newAnalysis(pool.length, { maxCount: 3, seed: 4 });
+    state.trialsDone = TRIALS_MAX - 200 + t;
+    advanceAnalysis(state, pool, bits, 1);
+    layouts.add(state.best[2]!.indices.join(','));
+  }
+  assert.ok(layouts.size > 100, `only ${layouts.size} distinct layouts in 200 trials`);
+});
+
+test('a ceiling-length run is chunk-invariant', () => {
+  // The batching the panel's Cancel and progress line depend on (§4.4) is
+  // pinned at the top of the range, not just at 20 trials.
+  const pool = twoRoomPool();
+  const whole = newAnalysis(pool.length, { maxCount: 3, seed: 7 });
+  advanceAnalysis(whole, pool, new VoxelBitset(DIMS), TRIALS_MAX);
+
+  const chunked = newAnalysis(pool.length, { maxCount: 3, seed: 7 });
+  const bits = new VoxelBitset(DIMS);
+  for (let done = 0; done < TRIALS_MAX; done += 50) advanceAnalysis(chunked, pool, bits, 50);
+
+  assert.equal(chunked.trialsDone, TRIALS_MAX);
+  assert.deepEqual(
+    chunked.best.map((b) => `${b!.score}:${b!.indices.join(',')}`),
+    whole.best.map((b) => `${b!.score}:${b!.indices.join(',')}`),
+  );
+});
+
 test('maxCount is clamped to the pool size', () => {
   const pool = twoRoomPool().slice(0, 3);
   const state = newAnalysis(pool.length, { maxCount: 10, seed: 1 });
@@ -192,6 +236,168 @@ test('maxCount is clamped to the pool size', () => {
 test('an empty pool searches to nothing rather than throwing', () => {
   const state = newAnalysis(0, { maxCount: 5, seed: 1 });
   advanceAnalysis(state, [], new VoxelBitset(DIMS), 10);
+  assert.equal(bestScore(state.best), 0);
+});
+
+// --- The greedy pass (§4.4) --------------------------------------------------
+
+/** A pool of `n` mounts a metre apart along X, all reaching the same voxels. */
+function saturatedPool(n: number): AnalysisCandidate[] {
+  const set = setOf(rowCubes(0, 0, 0, 12));
+  return Array.from({ length: n }, (_, i) => ({ position: [i, 0, 0] as [number, number, number], set }));
+}
+
+/**
+ * §4.4's greedy pass with no laziness: every unpicked candidate re-evaluated
+ * every step. The reference the lazy pass must agree with — the bound order is
+ * an optimisation, and an optimisation that changed the answer would be a bug
+ * no assertion about the answer alone could catch.
+ */
+function naiveGreedy(pool: readonly AnalysisCandidate[], maxCount: number): number[] {
+  const bits = new VoxelBitset(DIMS);
+  const picked: number[] = [];
+  const taken = new Set<number>();
+  for (let k = 0; k < maxCount; k++) {
+    let pick = -1;
+    let bestGain = -1;
+    let bestSep = -1;
+    for (let i = 0; i < pool.length; i++) {
+      if (taken.has(i)) continue;
+      const gain = bits.gain(pool[i].set);
+      let sep = Infinity;
+      for (const q of picked) {
+        const [ax, ay, az] = pool[i].position;
+        const [bx, by, bz] = pool[q].position;
+        const d = Math.hypot(ax - bx, ay - by, az - bz);
+        if (d < sep) sep = d;
+      }
+      if (gain > bestGain || (gain === bestGain && sep > bestSep)) {
+        bestGain = gain;
+        bestSep = sep;
+        pick = i;
+      }
+    }
+    taken.add(pick);
+    picked.push(pick);
+    bits.add(pool[pick].set);
+  }
+  return picked;
+}
+
+function runGreedy(pool: readonly AnalysisCandidate[], maxCount: number, steps = 0) {
+  const state = newAnalysis(pool.length, { maxCount, seed: 1 });
+  const bits = new VoxelBitset(DIMS);
+  const total = greedyRemaining(state, pool.length);
+  if (steps === 0) advanceGreedy(state, pool, bits, total);
+  else for (let done = 0; done < total; done += steps) advanceGreedy(state, pool, bits, steps);
+  return state;
+}
+
+test('the lazy greedy pass picks what a naive all-candidates scan picks', () => {
+  // The two rooms plus a third set of mounts that start looking good and go
+  // stale — their gain collapses once the room they share is covered, which is
+  // the case the bound order has to survive.
+  const pool = twoRoomPool();
+  for (let n = 0; n < 4; n++) {
+    pool.push({ position: [n, 2, 4], set: setOf([...rowCubes(0, 0, 0, 10), { at: [n, 2, 4] }]) });
+  }
+  const state = runGreedy(pool, 5);
+  assert.deepEqual(state.greedy.picked, naiveGreedy(pool, 5));
+});
+
+test('the greedy pass beats trials on a pool random draws miss', () => {
+  // One mount sees a whole row; the rest see a voxel each. A trial of 3 out of
+  // 40 usually misses it — greedy takes it first, by construction rather than
+  // by luck. `seed: 1` is such a trial (`seed: 5` happens to draw it, which is
+  // why the guarantee is a floor and the trials are kept, §4.4).
+  const pool: AnalysisCandidate[] = [
+    { position: [0, 0, 0], set: setOf(rowCubes(0, 0, 0, 12)) },
+  ];
+  for (let n = 1; n < 40; n++) pool.push({ position: [n, 3, 3], set: setOf([{ at: [n % 16, 3, 3] }]) });
+
+  const withGreedy = newAnalysis(pool.length, { maxCount: 3, seed: 1 });
+  const bits = new VoxelBitset(DIMS);
+  advanceGreedy(withGreedy, pool, bits, greedyRemaining(withGreedy, pool.length));
+  advanceAnalysis(withGreedy, pool, bits, 1);
+
+  const trialsOnly = newAnalysis(pool.length, { maxCount: 3, seed: 1 });
+  advanceAnalysis(trialsOnly, pool, new VoxelBitset(DIMS), 1);
+
+  for (let k = 0; k < 3; k++) {
+    assert.ok(
+      withGreedy.best[k]!.score >= trialsOnly.best[k]!.score,
+      `greedy lost at ${k + 1} cameras`,
+    );
+  }
+  assert.ok(withGreedy.best[0]!.score > trialsOnly.best[0]!.score);
+  assert.equal(withGreedy.greedy.picked[0], 0);
+});
+
+test('a saturated pool comes out evenly spaced, not bunched', () => {
+  // Every position reaches the same voxels, so every gain after the first is 0
+  // and the separation tie-break is the only thing choosing: the picks walk to
+  // the ends and then to the middle (§4.4).
+  const state = runGreedy(saturatedPool(10), 3);
+  assert.deepEqual(state.greedy.picked, [0, 9, 4]);
+  assert.equal(state.best[2]!.separation, 4);
+  assert.equal(state.best[2]!.score, state.best[0]!.score, 'a saturated pool gains nothing');
+});
+
+test('the greedy pass at one camera is the highest-count position (§4.6)', () => {
+  const pool = twoRoomPool();
+  const state = runGreedy(pool, 4);
+  let top = 0;
+  for (let i = 1; i < pool.length; i++) if (pool[i].set.count > pool[top].set.count) top = i;
+  assert.equal(state.greedy.picked[0], top);
+  assert.equal(state.best[0]!.score, pool[top].set.count);
+  assert.equal(state.best[0]!.separation, Infinity, 'one camera has no pair');
+});
+
+test('the greedy pass is chunk-invariant and needs no seed', () => {
+  const pool = twoRoomPool();
+  const whole = runGreedy(pool, 6);
+  const stepwise = runGreedy(pool, 6, 1);
+  assert.deepEqual(stepwise.greedy.picked, whole.greedy.picked);
+  assert.deepEqual(
+    stepwise.best.map((b) => `${b!.score}:${b!.separation}:${b!.indices.join(',')}`),
+    whole.best.map((b) => `${b!.score}:${b!.separation}:${b!.indices.join(',')}`),
+  );
+
+  // Same pool, different seed: the pass reads no PRNG, so nothing moves.
+  const other = newAnalysis(pool.length, { maxCount: 6, seed: 99 });
+  advanceGreedy(other, pool, new VoxelBitset(DIMS), 6);
+  assert.deepEqual(other.greedy.picked, whole.greedy.picked);
+});
+
+test('separation decides equal scores, and never outranks a score', () => {
+  // Equal scores: a saturated pool's 2-camera layouts all score the same, so
+  // the curve keeps the widest pair rather than the first one offered.
+  const saturated = saturatedPool(10);
+  const spread = newAnalysis(saturated.length, { maxCount: 2, seed: 2 });
+  const bits = new VoxelBitset(DIMS);
+  advanceGreedy(spread, saturated, bits, 2);
+  advanceAnalysis(spread, saturated, bits, 200);
+  assert.equal(spread.best[1]!.separation, 9, 'a bunched pair of equal score won');
+
+  // A higher score with a worse spread still wins: the second key breaks ties,
+  // it does not trade coverage away (§4.4).
+  const pool: AnalysisCandidate[] = [
+    { position: [0, 0, 0], set: setOf([{ at: [0, 0, 0] }, { at: [1, 0, 0] }, { at: [2, 0, 0] }]) },
+    { position: [1, 0, 0], set: setOf([{ at: [3, 0, 0] }]) },
+    { position: [15, 0, 0], set: setOf([{ at: [0, 0, 0] }]) },
+  ];
+  const state = newAnalysis(pool.length, { maxCount: 2, seed: 4 });
+  const b2 = new VoxelBitset(DIMS);
+  advanceGreedy(state, pool, b2, 2);
+  advanceAnalysis(state, pool, b2, 200);
+  assert.equal(state.best[1]!.score, 4);
+  assert.equal(state.best[1]!.separation, 1);
+});
+
+test('an empty pool greedily picks nothing rather than throwing', () => {
+  const state = newAnalysis(0, { maxCount: 5, seed: 1 });
+  advanceGreedy(state, [], new VoxelBitset(DIMS), 5);
+  assert.equal(greedyRemaining(state, 0), 0);
   assert.equal(bestScore(state.best), 0);
 });
 

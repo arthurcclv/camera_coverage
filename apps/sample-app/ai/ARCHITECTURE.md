@@ -506,11 +506,17 @@ DECISIONS.md). Read it bottom-up:
   it stands — but it is still the module that decides which of a site's cameras move
   where, so its optimality is pinned against brute force rather than against a
   hand-computed answer.
-- `analyze.ts` — the trial loop, the prefix curve, and the knee. No engine, no React. The
-  PRNG is counter-based on `(seed, trialIndex)`, so trial *t* is the same layout however
-  the run was chunked — a cancelled-and-resumed analysis is identical to an uninterrupted
-  one. Named for the button, and the button named for the act: it searches layouts and
-  measures nothing, which is why the axis it feeds says *reachable*.
+- `analyze.ts` — the greedy pass, the trial loop, the prefix curve, and the knee. No
+  engine, no React. The PRNG is counter-based on `(seed, trialIndex)`, so trial *t* is the
+  same layout however the run was chunked — a cancelled-and-resumed analysis is identical
+  to an uninterrupted one. Named for the button, and the button named for the act: it
+  searches layouts and measures nothing, which is why the axis it feeds says *reachable*.
+  The **greedy pass** reads no PRNG at all: it picks by largest gain against the union so
+  far, breaking ties by distance to the nearest camera already picked, and it is lazy —
+  gains only fall as the union grows, so a stale gain is still an upper bound and a step
+  re-evaluates only candidates that could still win. Both halves offer their prefixes to
+  one two-key comparison (`score`, then `separation`), so a count holds the better layout
+  and not the later one.
 - `pool.ts` — the SDK-shaped half: the measure-weighted split, the draw plan, the build-step
   camera list and descriptor, the rejection budget, the fingerprint, and the blockers. Its
   build-step descriptor carries the marked filter **handed over from

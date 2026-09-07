@@ -43,6 +43,8 @@ import { Slider } from './Slider.tsx';
  * axis is ticked in — `top − epsilon·markedTotal/100` (§4.5) — not a fraction
  * of `top`; the two agree at a 94% ceiling and diverge at a low one.
  */
+const SPACING_HINT = 'The distance between the two closest cameras in this layout.';
+
 const KNEE_HINT =
   'How far below the best score found still counts as good enough, in percentage points of the reachable rate. Raise it to accept fewer cameras.';
 
@@ -177,6 +179,14 @@ export function PlacementReviewPanel({
               <span>{targetLabel === null ? 'Reachable' : `Reachable — ${targetLabel}`}</span>
               <b>{pct(layout?.score ?? 0, pool.markedTotal)}</b>
             </div>
+            {/* The objective's second key, on screen (§1.2, §5.2): a key that
+                decides which layout is shown while being invisible is one a
+                user cannot argue with — and past the knee it is the number
+                still moving while the score is not. */}
+            <div className="stat-line" title={SPACING_HINT}>
+              <span>Spacing</span>
+              <b>{metres(layout?.separation)}</b>
+            </div>
             <div className="stat-line">
               <span>Pool ceiling</span>
               <b>{pct(pool.poolCeiling, pool.markedTotal)}</b>
@@ -269,6 +279,15 @@ export function PlacementReviewPanel({
 
 function pct(value: number, total: number): string {
   return total > 0 ? `${((100 * value) / total).toFixed(1)}%` : '—';
+}
+
+/**
+ * §1.2's `sep(L)`. A one-camera layout has no pair, so its separation is
+ * `Infinity` — which is the honest value and an unreadable readout, hence the
+ * dash every other empty stat in this panel already uses.
+ */
+function metres(value: number | undefined): string {
+  return value === undefined || !Number.isFinite(value) ? '—' : `${value.toFixed(1)} m`;
 }
 
 /**
