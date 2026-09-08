@@ -963,6 +963,147 @@ button.tree-caret:focus-visible {
   }
 }
 
+/* --- Modal dialogs (spec §14.7) ---------------------------------------------
+
+   The app's only blocking surface. Everything else is a panel, a popover, or an
+   anchored guard (`.placement-confirm`, which deliberately dims nothing because
+   the live viewport behind it is what the user is judging). These two dialogs
+   settle which file on disk the scene is, and one of them can discard unsaved
+   work, so dimming the scene is honest rather than obstructive. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 55%);
+}
+/* A modal over a modal — only the overwrite confirmation (spec §14.7). The
+   backdrop beneath already dims the scene, so this one does not dim again:
+   55% over 55% reads as a rendering fault rather than as depth. */
+.modal-backdrop.stacked {
+  background: rgb(0 0 0 / 20%);
+  z-index: 41;
+}
+/* One width for both dialogs, set by the file list: a scene named for what
+   distinguishes it is the normal case, and 420px ellipsized those to uselessness. */
+.modal {
+  width: 520px;
+  max-width: calc(100vw - 24px);
+  /* Same lift as the anchored guard, so the two read as one family of cards. */
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+/* The body scrolls so a long file list moves while Cancel and the commit button
+   stay put — the pinned-footer idiom the placement review already uses. */
+.modal > .panel-body {
+  max-height: 60vh;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
+}
+
+/* The folder line both dialogs open with: the handle's leaf name (never a full
+   path — the API exposes none) and the button that re-picks it. */
+.modal-folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.modal-folder-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #e6e8eb;
+}
+
+/* The overwrite confirmation's body (spec §14.7): a couple of plain sentences,
+   no fields — the buttons are the whole interface. */
+.confirm-line {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #e6e8eb;
+}
+.confirm-line:last-child {
+  margin-bottom: 0;
+}
+
+/* Scene-file list (spec §14.4). */
+.scene-file-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.scene-file-list:focus-visible {
+  outline: 1px solid #2c66c9;
+}
+.scene-file-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.scene-file-row + .scene-file-row {
+  border-top: 1px solid var(--border-subtle);
+}
+.scene-file-row:hover:not(.invalid) {
+  background: #262b33;
+}
+.scene-file-row.selected {
+  background: #1f2a44;
+}
+/* The name takes the free space and the summary the remainder; both ellipsize
+   and both carry the full string as a `title`. The name is itself a flex row, so
+   a long file name eats into its *label* and leaves the `current` badge standing
+   — clipping the badge would drop the one thing the row asserts. */
+.scene-file-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: #e6e8eb;
+}
+.scene-file-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scene-file-name .badge {
+  flex-shrink: 0;
+}
+.scene-file-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #7c8592;
+  font-variant-numeric: tabular-nums;
+}
+/* A `*.json` that is not a loadable scene file is listed, not hidden: an
+   excluded file should be visibly excluded, with its reason, rather than
+   mysteriously absent (§14.4). Same treatment as a disabled button. */
+.scene-file-row.invalid {
+  cursor: not-allowed;
+}
+.scene-file-row.invalid .scene-file-name,
+.scene-file-row.invalid .scene-file-summary {
+  color: #384252;
+}
+
 /* --- Sampling zones (sampling_volumes.md §4, §5, §6) ------------------------ */
 
 /* Neutral badge (zone reference on the VolumePanel header). */

@@ -1,17 +1,21 @@
 /**
  * Import/export orchestration against the File System Access API (spec §14.4,
- * §14.5) — the only impure I/O layer for the scene-file feature. Validation and
- * (de)serialization logic lives in `sceneFile.ts` (pure, unit-tested); this
- * module just wires that logic to real file reads/writes and GLTFLoader asset
- * resolution, and is intentionally thin so there's as little untested surface
- * as possible (this app's tests target pure functions only — see
- * `ai/CONVENTIONS.md`).
+ * §14.5) — the only impure I/O layer for the scene-file feature. A scene file is
+ * addressed by the **save target**, the `{ folder, name }` pair (§14.5): a folder
+ * holds any number of scene files, so nothing here knows a default name.
+ *
+ * Every judgement lives in a pure module — validation and (de)serialization in
+ * `sceneFile.ts`, the Load list's ordering/rows/selection in `sceneFileList.ts`,
+ * the naming and target rules in `saveTarget.ts`, all unit-tested. This module
+ * only wires them to real file reads/writes and GLTFLoader asset resolution, and
+ * is deliberately kept that thin so there's as little untested surface as
+ * possible (this app's tests target pure functions only — `ai/CONVENTIONS.md`).
  */
 import { buildSceneGeometry, type GeometryBuild } from './sceneGeometryBuild.ts';
 import { parseSceneFile, resolveSectionFootprints, serializeScene } from './sceneFile.ts';
+import { describeSceneFileRow, planSceneFileList, type SceneFileEntry } from './sceneFileList.ts';
+import type { SaveTarget } from './saveTarget.ts';
 import type { Scene } from './sceneModel.ts';
-
-const SCENE_JSON_NAME = 'scene.json';
 
 /**
  * Walks a folder-relative asset path (spec §14.2, already validated safe on
@@ -50,8 +54,55 @@ function copyFailureReason(err: unknown): string {
 }
 
 /**
+ * Every `*.json` at a folder's root, as the Load dialog lists them (spec §14.4).
+ *
+ * The rows read and validate for their summaries — **parse only, no GLB is
+ * loaded**, which is what keeps opening the dialog cheap and why a row that
+ * summarizes fine can still fail its all-or-nothing import on a missing asset
+ * (§14.4). Which names are listed, in which order, and which are read at all is
+ * `planSceneFileList`'s decision; what each row says is `describeSceneFileRow`'s.
+ * Enumeration failures (folder renamed, unmounted, permission lost) throw, for
+ * the dialog to show and offer **Change…** against (§14.8).
+ */
+export async function listSceneFiles(dir: FileSystemDirectoryHandle): Promise<SceneFileEntry[]> {
+  const fileNames: string[] = [];
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind === 'file') fileNames.push(name);
+  }
+  const entries: SceneFileEntry[] = [];
+  for (const { name, parse } of planSceneFileList(fileNames)) {
+    // Unparsed rows list name-only and validate on selection (§14.4).
+    if (!parse) entries.push({ name, summary: null, error: null });
+    else entries.push({ name, ...describeSceneFileRow(await readTextAt(dir, name)) });
+  }
+  return entries;
+}
+
+/** One file's text, or `null` when it could not be read — never throws (§14.4). */
+async function readTextAt(dir: FileSystemDirectoryHandle, name: string): Promise<string | null> {
+  try {
+    return await (await dir.getFileHandle(name)).getFile().then((f) => f.text());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every file name at a folder's root — what the Save-as dialog checks a typed
+ * name against, so a collision is known in memory as the user types rather than
+ * probed on every keystroke (spec §14.5).
+ */
+export async function fileNamesIn(dir: FileSystemDirectoryHandle): Promise<Set<string>> {
+  const names = new Set<string>();
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind === 'file') names.add(name);
+  }
+  return names;
+}
+
+/**
  * Which of `srcs` the destination folder already holds — the asset half of the
- * overwrite confirmation (spec §14.5).
+ * replace warning (spec §14.5).
  */
 export async function findExistingAssets(dir: FileSystemDirectoryHandle, srcs: readonly string[]): Promise<string[]> {
   const existing: string[] = [];
@@ -69,7 +120,7 @@ export async function findExistingAssets(dir: FileSystemDirectoryHandle, srcs: r
 /**
  * Copies referenced assets from the scene's source folder into a Save As…
  * destination, at the same relative paths (spec §14.5). Runs **before**
- * `scene.json` is written, and throws `AssetCopyError` on the first failure so
+ * the scene file is written, and throws `AssetCopyError` on the first failure so
  * the caller can abandon the save with no scene file written — already-copied
  * bytes stay put, since undoing them could delete a file this copy legitimately
  * overwrote. Streams each file rather than buffering it, for large GLBs.
@@ -92,27 +143,33 @@ export async function copyAssets(
 }
 
 /**
- * Reads, validates, and builds a full `Scene` from a picked folder (spec
- * §14.4). All-or-nothing: every step (read `scene.json`, parse/validate, load
- * every referenced GLB, build the merged mesh) must succeed before this
- * resolves — nothing here touches app state, so a thrown error leaves the
- * caller free to leave the current scene completely untouched (§14.8).
+ * Reads, validates, and builds a full `Scene` from one named file in a picked
+ * folder (spec §14.4). All-or-nothing: every step (read the file,
+ * parse/validate, load every referenced GLB, build the merged mesh) must succeed
+ * before this resolves — nothing here touches app state, so a thrown error
+ * leaves the caller free to leave the current scene completely untouched (§14.8).
+ *
+ * The file is re-read here even when the Load dialog already parsed it for a
+ * summary, so this stays the single all-or-nothing validation path.
  */
-export async function importSceneFromDirectory(dir: FileSystemDirectoryHandle): Promise<{ scene: Scene; build: GeometryBuild }> {
+export async function importSceneFile(
+  target: SaveTarget<FileSystemDirectoryHandle>,
+): Promise<{ scene: Scene; build: GeometryBuild }> {
+  const { folder: dir, name } = target;
   let text: string;
   try {
-    const fileHandle = await dir.getFileHandle(SCENE_JSON_NAME);
+    const fileHandle = await dir.getFileHandle(name);
     const file = await fileHandle.getFile();
     text = await file.text();
   } catch {
-    throw new Error(`"${SCENE_JSON_NAME}" not found in the selected folder`);
+    throw new Error(`"${name}" not found in the selected folder`);
   }
 
   let json: unknown;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error(`"${SCENE_JSON_NAME}" is not valid JSON`);
+    throw new Error(`"${name}" is not valid JSON`);
   }
 
   const parsed = parseSceneFile(json);
@@ -126,13 +183,18 @@ export async function importSceneFromDirectory(dir: FileSystemDirectoryHandle): 
 }
 
 /**
- * Whether a folder already holds a `scene.json` — the overwrite check for a
- * freshly picked folder (spec §14.5). A folder we can't even probe (permission,
- * gone) reads as "no scene": the write that follows raises the real error.
+ * Whether a folder already holds a file of this name — what a plain **Save**
+ * checks before writing, since replacing a file is confirmed first (spec §14.5).
+ * The Save-as dialog needs no probe here: it already holds the folder's whole
+ * name set (`fileNamesIn`).
+ *
+ * A folder we cannot even probe (permission, gone) reads as "no file": raising a
+ * confirmation over a folder that may not exist would ask the wrong question,
+ * and the write that follows reports the real error (§14.8).
  */
-export async function sceneJsonExists(dir: FileSystemDirectoryHandle): Promise<boolean> {
+export async function fileExists(dir: FileSystemDirectoryHandle, name: string): Promise<boolean> {
   try {
-    await dir.getFileHandle(SCENE_JSON_NAME);
+    await dir.getFileHandle(name);
     return true;
   } catch {
     return false;
@@ -152,13 +214,17 @@ export async function ensureWritePermission(dir: FileSystemDirectoryHandle): Pro
 }
 
 /**
- * Serializes the current `Scene` to `scene.json` and writes it into the chosen
+ * Serializes the current `Scene` to the named file and writes it into the chosen
  * folder in place (spec §14.5) — asset bytes under `assets/` are referenced,
- * never written by export.
+ * never written by export, and are shared with every other scene file in the
+ * folder (§14.2).
  */
-export async function exportSceneToDirectory(dir: FileSystemDirectoryHandle, scene: Scene): Promise<void> {
+export async function exportSceneFile(
+  target: SaveTarget<FileSystemDirectoryHandle>,
+  scene: Scene,
+): Promise<void> {
   const json = serializeScene(scene);
-  const fileHandle = await dir.getFileHandle(SCENE_JSON_NAME, { create: true });
+  const fileHandle = await target.folder.getFileHandle(target.name, { create: true });
   const writable = await fileHandle.createWritable();
   try {
     await writable.write(JSON.stringify(json, null, 2));

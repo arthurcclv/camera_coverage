@@ -47,33 +47,37 @@ import { canPlace, placeTarget, placeTooltip } from './scene/placement.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
+import { serializeScene } from './scene/sceneFile.ts';
 import type { GeometryObject } from './scene/geometryModel.ts';
 import {
   buildStaticGeometrySync,
-  disposeGeometryBuild,
   type GeometryBuild,
 } from './scene/sceneGeometryBuild.ts';
 import {
   AssetCopyError,
   copyAssets,
   ensureWritePermission,
-  exportSceneToDirectory,
-  findExistingAssets,
-  importSceneFromDirectory,
-  sceneJsonExists,
+  exportSceneFile,
+  fileExists,
+  importSceneFile,
 } from './scene/sceneIO.ts';
 import {
+  DEFAULT_SCENE_FILE_NAME,
   SAVED_STATUS_MS,
   SCENE_PICKER_ID,
   describeAssetCopyFailure,
-  describeOverwritePrompt,
+  describeOverwriteConfirm,
   describeSaveFailure,
   describeSceneFileStatus,
+  describeUnsavedWarning,
   nextSaveTarget,
   planAssetCopy,
   resolveSaveAction,
+  resolveWriteAction,
+  type DestinationClashes,
   type LastSave,
   type SaveIntent,
+  type SaveTarget,
 } from './scene/saveTarget.ts';
 import { SceneView, type SceneViewState, type TransformChange } from './scene/sceneView/sceneView.ts';
 import { initSceneState, sceneReducer, type EntityKind } from './scene/sceneReducer.ts';
@@ -100,6 +104,9 @@ import { StatsPanel } from './ui/StatsPanel.tsx';
 import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
 import { RunBar } from './ui/RunBar.tsx';
 import { SceneFileControls } from './ui/SceneFileControls.tsx';
+import { ConfirmOverwriteDialog } from './ui/ConfirmOverwriteDialog.tsx';
+import { LoadSceneDialog } from './ui/LoadSceneDialog.tsx';
+import { SaveSceneAsDialog } from './ui/SaveSceneAsDialog.tsx';
 import { VolumePanel } from './ui/VolumePanel.tsx';
 import { ZonePanel } from './ui/ZonePanel.tsx';
 import { SamplingVolumeControls } from './ui/SamplingVolumeControls.tsx';
@@ -193,6 +200,15 @@ function unionLabel(state: { useZones: boolean; volumes: unknown[] }): string {
 function describeSceneError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/**
+ * The dirty-check snapshot (spec §14.4): the scene as its serialized bytes.
+ * Stored at every load and save and compared when the Load dialog opens, so a
+ * drag that ends where it started is not a change and editing pays nothing.
+ */
+function sceneSnapshot(scene: Scene): string {
+  return JSON.stringify(serializeScene(scene));
 }
 
 // Transform-mode toggle icons (spec §2.4): four-way arrows for Move (translate),
@@ -671,13 +687,33 @@ export function App() {
   // Scene-file import/export state (spec §14.7, §14.8).
   const [sceneError, setSceneError] = useState<string | null>(null);
   const [sceneIOBusy, setSceneIOBusy] = useState(false);
-  // The save target (spec §14.5): the folder the current scene was opened from
-  // (or last saved to via Save As…), so a plain Save round-trips back there
-  // instead of following the browser's last-used directory. Session-only — a
-  // reload returns to the boot scene with no target (§14.1).
-  const [saveTarget, setSaveTarget] = useState<FileSystemDirectoryHandle | null>(null);
+  // The save target (spec §14.5): the **file and folder** the current scene was
+  // opened from (or last saved to via Save As…), so a plain Save round-trips
+  // back there instead of following the browser's last-used directory. The name
+  // is the half that distinguishes a variant, since a folder holds any number of
+  // scene files sharing one `assets/` (§14.2). Session-only — a reload returns
+  // to the boot scene with no target (§14.1).
+  const [saveTarget, setSaveTarget] = useState<SaveTarget<FileSystemDirectoryHandle> | null>(null);
   const [lastSave, setLastSave] = useState<LastSave | null>(null);
   const savedStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Which dialog is open, and the folder it opened on (spec §14.7). Both are
+  // shown only once a folder is granted, so the picker runs from the button's
+  // own user activation rather than being chained inside the dialog (§14.5).
+  const [loadDialogFolder, setLoadDialogFolder] = useState<FileSystemDirectoryHandle | null>(null);
+  const [saveAsDialog, setSaveAsDialog] = useState<{ folder: FileSystemDirectoryHandle; name: string } | null>(null);
+  // The write waiting on its overwrite confirmation (spec §14.5). Held whole, so
+  // **Overwrite** commits exactly what was routed rather than re-deciding: the
+  // Save-as dialog may still be open underneath with an editable name.
+  const [confirmOverwrite, setConfirmOverwrite] = useState<{
+    target: SaveTarget<FileSystemDirectoryHandle>;
+    sameFolder: boolean;
+    lines: string[];
+  } | null>(null);
+  const [unsavedWarning, setUnsavedWarning] = useState<string | null>(null);
+  // The scene as it was last loaded or saved, serialized. Comparing snapshots
+  // rather than tracking edits means a drag that ends where it started is not a
+  // change, and costs nothing until a dialog asks (§14.4).
+  const sceneBaselineRef = useRef<string>(sceneSnapshot(initialScene));
   const fileSystemAccessAvailable = useMemo(() => typeof window !== 'undefined' && 'showDirectoryPicker' in window, []);
 
   const selectedCameraId = selection?.kind === 'camera' ? selection.id : null;
@@ -755,8 +791,7 @@ export function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<SceneView | null>(null);
   // Mirrors `room` for the mount effect's async IIFE (spec §2.3), which reads
-  // whatever geometry is current by the time the viewport finishes setting up,
-  // and for `applyScene`, which disposes the outgoing build.
+  // whatever geometry is current by the time the viewport finishes setting up.
   const roomRef = useRef(room);
   roomRef.current = room;
   // The `room` the engine was last `initAndLoad`-ed against; `handleRun` forces
@@ -1688,7 +1723,11 @@ export function App() {
       // and keeps collapse state). `coverageRun.clear()` (below) both wipes the
       // retained stores and bumps the generation so any in-flight compute discards
       // its results (spec §14.4).
-      disposeGeometryBuild(roomRef.current);
+      //
+      // The outgoing build is *not* disposed here: `useEffect` runs after paint,
+      // so freeing it now would leave the animation loop drawing released
+      // resources for a frame. `SceneView.sync` disposes it the moment it detaches
+      // the group (`swapGeometry`).
       setRoom(next.build);
       setGeometryObjects(next.geometry);
       // The cached BVH is invalidated (rebuilt lazily on the next Generate).
@@ -1746,144 +1785,240 @@ export function App() {
     }, SAVED_STATUS_MS);
   }, []);
 
-  const handleImportScene = useCallback(async () => {
-    let dir: FileSystemDirectoryHandle;
-    try {
-      // Anchored to the current target so Load opens where the scene lives, not
-      // wherever a picker was last used in this origin (§14.5).
-      dir = await window.showDirectoryPicker({ mode: 'read', id: SCENE_PICKER_ID, startIn: saveTarget ?? undefined });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return; // user cancelled (§14.8)
-      setSceneError(describeSceneError(err));
-      return;
-    }
-    setSceneIOBusy(true);
-    try {
-      const { scene: imported, build } = await importSceneFromDirectory(dir);
-      applyScene({
-        geometry: imported.geometry,
-        build,
-        cameras: imported.cameras,
-        probes: imported.probes,
-        sections: imported.sections,
-        clipSectionId: imported.clipSectionId,
-        zones: imported.zones,
-        volumes: imported.volumes,
-        useZones: imported.useZones,
-        constraintGroups: imported.constraintGroups,
-        constraints: imported.constraints,
-      });
-      // The scene now lives in this folder, so Save writes back here (§14.5).
-      setSaveTarget((target) => nextSaveTarget(target, { kind: 'imported', folder: dir }));
-      setLastSave(null);
-    } catch (err) {
-      // Nothing above this point touched app state — the current scene *and* the
-      // save target are left completely untouched on failure (spec §14.4, §14.8).
-      setSceneError(describeSceneError(err));
-    } finally {
-      setSceneIOBusy(false);
-    }
-  }, [applyScene, saveTarget]);
+  /** The scene exactly as a save would write it — also the dirty-check subject (§14.4). */
+  const currentScene = useCallback(
+    (): Scene => ({
+      geometry: geometryObjects,
+      cameras,
+      probes,
+      sections,
+      clipSectionId,
+      zones,
+      volumes,
+      useZones,
+      constraintGroups,
+      constraints,
+    }),
+    [geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones, constraintGroups, constraints],
+  );
 
   /**
-   * Save (spec §14.5): with a target, writes `scene.json` straight back into it;
-   * with none — or on Save As… — picks a folder first and adopts it. A picked
-   * folder that already holds a scene or referenced assets is confirmed before
-   * being replaced, and a save into a *different* folder copies the scene's
-   * referenced assets there first, so the destination is self-contained.
+   * Open the folder picker for a dialog's **Change…**, or for the first Load /
+   * Save of a session (§14.5). Anchored to the current target so it opens where
+   * the scene lives, not wherever a picker was last used in this origin.
+   * Resolves `null` on cancel, which is a no-op (§14.8).
    */
-  const handleSaveScene = useCallback(
-    async (intent: SaveIntent) => {
-      const target = saveTarget;
-      const action = resolveSaveAction(target != null, intent);
-      let dir: FileSystemDirectoryHandle;
-      // Assets to copy, and the folder to copy them from — empty for an in-place
-      // save, since the bytes are already there.
-      let assetSrcs: string[] = [];
-      let copyFrom: FileSystemDirectoryHandle | null = null;
-      // `action.kind === 'write'` already implies a target; re-narrowing keeps the
-      // picker as the fallback rather than trusting an assertion.
-      if (action.kind === 'write' && target != null) {
-        dir = target;
-        // First statement of the await chain, so the click still counts as the
-        // user activation `requestPermission` needs (§14.5).
-        let granted: boolean;
-        try {
-          granted = await ensureWritePermission(dir);
-        } catch (err) {
-          setSceneError(describeSaveFailure(dir.name, describeSceneError(err)));
-          return;
-        }
-        if (!granted) {
-          // Target kept, so a retry or Save As… is one click away (§14.8).
-          setSceneError(describeSaveFailure(dir.name, 'write permission was denied'));
-          return;
-        }
-      } else {
-        try {
-          dir = await window.showDirectoryPicker({ mode: 'readwrite', id: SCENE_PICKER_ID, startIn: target ?? undefined });
-        } catch (err) {
-          if (err instanceof DOMException && err.name === 'AbortError') return; // cancelled (§14.8)
-          setSceneError(describeSceneError(err));
-          return;
-        }
-        // Picking the folder the scene already lives in is an in-place save: no
-        // copy, and nothing to warn about replacing (§14.5).
-        const inPlace = target != null && (await dir.isSameEntry(target));
-        if (!inPlace) {
-          // The target is the asset source: `gltf` geometry can only arrive by
-          // import (§14.9 forbids authoring), and import always sets a target.
-          assetSrcs = target == null ? [] : planAssetCopy(geometryObjects);
-          copyFrom = assetSrcs.length > 0 ? target : null;
-        }
-        // The directory picker gives no overwrite warning of its own, so a folder
-        // we didn't open is confirmed before its scene or assets are replaced (§14.5).
-        if (action.confirmIfExists && !inPlace) {
-          const prompt = describeOverwritePrompt(dir.name, {
-            sceneExists: await sceneJsonExists(dir),
-            assetClashes: (await findExistingAssets(dir, assetSrcs)).length,
-          });
-          if (prompt != null && !window.confirm(prompt)) return; // nothing written, target unchanged (§14.8)
-        }
+  const pickSceneFolder = useCallback(
+    async (mode: 'read' | 'readwrite'): Promise<FileSystemDirectoryHandle | null> => {
+      try {
+        return await window.showDirectoryPicker({
+          mode,
+          id: SCENE_PICKER_ID,
+          startIn: saveTarget?.folder ?? undefined,
+        });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return null;
+        setSceneError(describeSceneError(err));
+        return null;
       }
+    },
+    [saveTarget],
+  );
 
+  const pickLoadFolder = useCallback(() => pickSceneFolder('read'), [pickSceneFolder]);
+  // A folder picked for a save is granted `readwrite` outright, and that grant
+  // survives editing the name before commit — permissions are per-handle (§14.5).
+  const pickSaveFolder = useCallback(() => pickSceneFolder('readwrite'), [pickSceneFolder]);
+
+  /**
+   * **Load…** (spec §14.4): opens the Load dialog on the folder the scene already
+   * lives in, so switching between variants that share one `assets/` costs no OS
+   * dialog at all. With no target, the folder picker comes first — it needs this
+   * click's user activation, which a chained second picker would not have.
+   */
+  const handleLoadClick = useCallback(() => {
+    setSceneError(null);
+    // Computed here, once, rather than tracked on every edit (§14.4).
+    // Snapshot equality, so a drag that ends where it started is not a change.
+    const dirty = sceneSnapshot(currentScene()) !== sceneBaselineRef.current;
+    setUnsavedWarning(dirty ? describeUnsavedWarning(saveTarget?.name ?? null) : null);
+    if (saveTarget != null) {
+      setLoadDialogFolder(saveTarget.folder);
+      return;
+    }
+    void pickLoadFolder().then((dir) => {
+      if (dir != null) setLoadDialogFolder(dir);
+    });
+  }, [saveTarget, currentScene, pickLoadFolder]);
+
+  /**
+   * Commit the Load dialog's selection (spec §14.4). All-or-nothing: the file is
+   * read, validated, and every referenced GLB loaded before any app state moves,
+   * so a failure leaves the current scene *and* the target completely untouched
+   * and is reported in the still-open dialog (§14.8).
+   */
+  const handleLoadScene = useCallback(
+    async (target: SaveTarget<FileSystemDirectoryHandle>) => {
       setSceneIOBusy(true);
       try {
-        const current: Scene = {
-          geometry: geometryObjects,
-          cameras,
-          probes,
-          sections,
-          clipSectionId,
-          zones,
-          volumes,
-          useZones,
-          constraintGroups,
-          constraints,
-        };
-        // Assets first: a destination left without a scene.json is visibly
-        // incomplete, whereas one with a scene.json missing its assets is a
-        // trap that only fails on the next import (§14.5).
-        if (copyFrom != null) await copyAssets(copyFrom, dir, assetSrcs);
-        await exportSceneToDirectory(dir, current);
-        setSaveTarget((prev) => nextSaveTarget(prev, { kind: 'saved', folder: dir }));
+        const { scene: imported, build } = await importSceneFile(target);
+        applyScene({
+          geometry: imported.geometry,
+          build,
+          cameras: imported.cameras,
+          probes: imported.probes,
+          sections: imported.sections,
+          clipSectionId: imported.clipSectionId,
+          zones: imported.zones,
+          volumes: imported.volumes,
+          useZones: imported.useZones,
+          constraintGroups: imported.constraintGroups,
+          constraints: imported.constraints,
+        });
+        // The scene now lives in this file, so Save writes back here (§14.5).
+        setSaveTarget((prev) => nextSaveTarget(prev, { kind: 'imported', ...target }));
+        // Sections gain resolved footprints on import (§14.3), so the baseline is
+        // the scene in memory, not the bytes on disk.
+        sceneBaselineRef.current = sceneSnapshot(imported);
+        setLastSave(null);
         setSceneError(null);
+        setLoadDialogFolder(null);
+        setUnsavedWarning(null);
+      } catch (err) {
+        // Nothing above this point touched app state — the current scene *and*
+        // the save target are left completely untouched (spec §14.4, §14.8), and
+        // the dialog stays open so another file can be tried.
+        setSceneError(describeSceneError(err));
+      } finally {
+        setSceneIOBusy(false);
+      }
+    },
+    [applyScene],
+  );
+
+  /**
+   * Write the scene to `target` (spec §14.5). Every write lands here — plain
+   * Save and either kind of Save As… — so this is where write permission is
+   * requested: the folder a Load granted is read-only, and saving a variant back
+   * into it is the commonest first write there is (§14.5). A save into a folder
+   * that is not the target's copies the scene's referenced assets first, so the
+   * destination is a self-contained scene — and copies **before** the scene file
+   * is written, since a folder left without one is visibly incomplete whereas
+   * one holding a scene file that can't import is a trap (§14.5).
+   */
+  const writeScene = useCallback(
+    async (target: SaveTarget<FileSystemDirectoryHandle>, sameFolder: boolean) => {
+      const { folder: dir, name } = target;
+      // The *current* target is the asset source — `target` here is the
+      // destination. `gltf` geometry can only arrive by import (§14.9 forbids
+      // authoring), and import always sets a target.
+      const assetSrcs = sameFolder || saveTarget == null ? [] : planAssetCopy(geometryObjects);
+      const copyFrom = assetSrcs.length > 0 ? saveTarget?.folder ?? null : null;
+      setSceneIOBusy(true);
+      try {
+        // First await, so the commit click still counts as the user activation
+        // `requestPermission` needs. Already-writable handles never prompt (§14.5).
+        if (!(await ensureWritePermission(dir))) {
+          // Target kept, so a retry or another folder is one click away (§14.8).
+          setSceneError(describeSaveFailure(name, 'write permission was denied'));
+          return;
+        }
+        if (copyFrom != null) await copyAssets(copyFrom, dir, assetSrcs);
+        const written = currentScene();
+        await exportSceneFile(target, written);
+        setSaveTarget((prev) => nextSaveTarget(prev, { kind: 'saved', ...target }));
+        sceneBaselineRef.current = sceneSnapshot(written);
+        setSceneError(null);
+        setSaveAsDialog(null);
         flashSavedStatus({ assetsCopied: copyFrom == null ? 0 : assetSrcs.length });
       } catch (err) {
         setSceneError(
           err instanceof AssetCopyError
             ? describeAssetCopyFailure(err.src, err.reason)
-            : describeSaveFailure(dir.name, describeSceneError(err)),
+            : describeSaveFailure(name, describeSceneError(err)),
         );
       } finally {
         setSceneIOBusy(false);
+        // The confirmation is a one-shot gate: it closes whatever happened, so a
+        // failure reports in the Save-as dialog or the panel banner as §14.7 says
+        // rather than behind a card that carries no banner of its own.
+        setConfirmOverwrite(null);
       }
     },
-    [saveTarget, flashSavedStatus, geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones],
+    [saveTarget, geometryObjects, currentScene, flashSavedStatus],
+  );
+
+  /**
+   * The one gate in front of every write (spec §14.5): a commit that would
+   * **replace** an existing file raises the overwrite confirmation, one that
+   * creates a file writes straight through. Both write paths — a plain Save onto
+   * its target and a Save-as commit — come through here, so they cannot drift
+   * into asking different questions about the same destructive act.
+   *
+   * The confirmation's own click then supplies the user activation the lazy
+   * `requestPermission` runs from, which is why nothing awaits between it and
+   * `writeScene`.
+   */
+  const requestWrite = useCallback(
+    async (target: SaveTarget<FileSystemDirectoryHandle>, sameFolder: boolean, clashes: DestinationClashes) => {
+      if (resolveWriteAction(clashes).kind === 'write') {
+        await writeScene(target, sameFolder);
+        return;
+      }
+      setConfirmOverwrite({ target, sameFolder, lines: describeOverwriteConfirm(target, clashes) });
+    },
+    [writeScene],
+  );
+
+  /**
+   * Save (spec §14.5): with a target, writes that file straight back with no
+   * naming dialog — confirmed first when it would replace what is there.
+   * Without one, and for Save As…, the **Save scene as** dialog settles
+   * `{ folder, name }` first; with no folder granted yet the picker runs from
+   * this click's activation.
+   */
+  const handleSaveScene = useCallback(
+    async (intent: SaveIntent) => {
+      setSceneError(null);
+      const target = saveTarget;
+      if (resolveSaveAction(target != null, intent).kind === 'dialog') {
+        if (target != null) {
+          setSaveAsDialog({ folder: target.folder, name: target.name });
+          return;
+        }
+        const dir = await pickSaveFolder();
+        if (dir != null) setSaveAsDialog({ folder: dir, name: DEFAULT_SCENE_FILE_NAME });
+        return;
+      }
+      if (target == null) return; // unreachable: 'write' implies a target
+      // Same folder by definition — an in-place Save writes only the scene file;
+      // the GLB bytes are already there and must not be copied onto themselves,
+      // so no asset can clash. The probe is read-only, and a folder that cannot
+      // be probed reads as "no file": the write reports the real error (§14.8).
+      await requestWrite(target, true, {
+        fileExists: await fileExists(target.folder, target.name),
+        assetClashes: 0,
+      });
+    },
+    [saveTarget, pickSaveFolder, requestWrite],
   );
 
   const handleSave = useCallback(() => void handleSaveScene('save'), [handleSaveScene]);
   const handleSaveAs = useCallback(() => void handleSaveScene('saveAs'), [handleSaveScene]);
+
+  /** Whether a Save-as destination is the target's own folder — no copy, no clash (§14.5). */
+  const isTargetFolder = useCallback(
+    async (dir: FileSystemDirectoryHandle) => saveTarget != null && (await dir.isSameEntry(saveTarget.folder)),
+    [saveTarget],
+  );
+
+  /** The assets a cross-folder Save As… would copy (§14.5). */
+  const assetCopyPlan = useMemo(() => planAssetCopy(geometryObjects), [geometryObjects]);
+
+  // An error raised while a dialog is up belongs *in* it, so the next file or
+  // folder can be tried without re-navigating; the panel's banner is for
+  // failures with no dialog open — a plain Save that cannot write (§14.7).
+  const sceneDialogOpen = loadDialogFolder != null || saveAsDialog != null;
 
   /**
    * Load the engine for `(room, voxelSize)` unless it already holds exactly that,
@@ -2256,9 +2391,9 @@ export function App() {
           <SceneFileControls
             fileSystemAccessAvailable={fileSystemAccessAvailable}
             busy={sceneIOBusy}
-            error={sceneError}
+            error={sceneDialogOpen ? null : sceneError}
             status={describeSceneFileStatus(saveTarget, lastSave)}
-            onImport={handleImportScene}
+            onLoad={handleLoadClick}
             onSave={handleSave}
             onSaveAs={handleSaveAs}
           />
@@ -2601,6 +2736,54 @@ export function App() {
             />
           )}
         </div>
+      )}
+      {/* Scene-file dialogs (spec §14.7). Rendered last so the backdrop sits over
+          the whole app; both open only once a folder is granted, so the picker
+          runs from the button's own user activation (§14.5). */}
+      {loadDialogFolder != null && (
+        <LoadSceneDialog
+          folder={loadDialogFolder}
+          currentName={saveTarget?.name ?? null}
+          isTargetFolder={isTargetFolder}
+          unsavedWarning={unsavedWarning}
+          error={sceneError}
+          busy={sceneIOBusy}
+          onPickFolder={pickLoadFolder}
+          onLoad={(target) => void handleLoadScene(target)}
+          onCancel={() => {
+            setLoadDialogFolder(null);
+            setUnsavedWarning(null);
+            setSceneError(null);
+          }}
+        />
+      )}
+      {/* The confirmation renders last, so it stacks over the Save-as dialog it
+          was committed from (spec §14.7). */}
+      {saveAsDialog != null && (
+        <SaveSceneAsDialog
+          folder={saveAsDialog.folder}
+          initialName={saveAsDialog.name}
+          assetSrcs={assetCopyPlan}
+          isTargetFolder={isTargetFolder}
+          error={sceneError}
+          busy={sceneIOBusy}
+          onPickFolder={pickSaveFolder}
+          onSave={(target, sameFolder, clashes) => void requestWrite(target, sameFolder, clashes)}
+          onCancel={() => {
+            setSaveAsDialog(null);
+            setSceneError(null);
+          }}
+        />
+      )}
+      {confirmOverwrite != null && (
+        <ConfirmOverwriteDialog
+          lines={confirmOverwrite.lines}
+          busy={sceneIOBusy}
+          onConfirm={() => void writeScene(confirmOverwrite.target, confirmOverwrite.sameFolder)}
+          // A no-op: nothing written, target unchanged, and the dialog underneath
+          // keeps its typed name (spec §14.8).
+          onCancel={() => setConfirmOverwrite(null)}
+        />
       )}
     </div>
   );

@@ -191,10 +191,13 @@ this rig, check the asset's metalness before touching the lights.
   that fills the column: a fixed title, a scrolling `.panel-body`, and a
   `.placement-actions` footer above a `#2a2e36` rule, so **Close** is on screen
   however far the review has been scrolled. `.placement-confirm` — the close
-  guard, the app's only dialog — is a `.panel`-surfaced card anchored over that
-  footer with a `0 8px 24px rgb(0 0 0 / 45%)` lift, dimming nothing: the viewport
-  behind it is live and is what the user is judging. A stale result is dimmed
-  (`.placement-curve.stale`, `opacity: 0.55`) rather than withdrawn.
+  guard — is a `.panel`-surfaced card anchored over that footer with a
+  `0 8px 24px rgb(0 0 0 / 45%)` lift, dimming nothing: the viewport behind it is live
+  and is what the user is judging. It is an *anchored* guard, not a **modal** (for those
+  see `.modal` below) — the distinction is what is being judged: a guard over a live
+  viewport must not dim it; a modal that settles the scene's identity on disk must
+  block. A stale result is dimmed (`.placement-curve.stale`, `opacity: 0.55`) rather
+  than withdrawn.
 - **Scrollbars:** custom 8 px thin thumbs (`#384252`, hover `#55606f`), WebKit via
   `::-webkit-scrollbar` and Firefox via a `@supports` block — kept apart
   deliberately (see the comment in `index.css`). Scroll containers reserve space
@@ -332,6 +335,67 @@ this rig, check the asset's metalness before touching the lights.
   sections, or probes. The colour is the load-bearing difference: red means the
   panel below it is empty, amber means it is populated but incomplete, so the two
   must never be styled alike.
+- **Modal** (`.modal-backdrop` + `.modal`): the app's only **blocking** surface, used by
+  the three scene-file dialogs (**Load scene**, **Save scene as**, **Overwrite scene
+  file?**; spec §14.7). A
+  `rgb(0 0 0 / 55%)` full-viewport backdrop centres a `.panel`-surfaced card, `520px`
+  wide (`max-width: calc(100vw - 24px)`), with the `0 8px 24px rgb(0 0 0 / 45%)` lift
+  the anchored guard uses. **One width for both dialogs**, and it is set by the file
+  list: a scene named for what distinguishes it (`night-shift-96cam-build-out.json`) is
+  the normal case, not the pathological one, and the earlier `420px` ellipsized those to
+  uselessness. Save scene as takes the same card so the two read as one surface when you
+  switch between them. Structure is a panel card's: an uppercase `.panel-title`, a
+  scrolling `.panel-body` (`max-height: 60vh`), and a `.row.button-row` footer, so a
+  long file list scrolls while **Cancel** and the commit button stay put.
+  - **When to use one.** Only when the choice is genuinely blocking *and* the viewport is
+    not the thing being judged. These dialogs qualify on both counts: they settle which
+    file on disk the scene is, and two of them can destroy work — unsaved edits, or a
+    file already sitting on disk. Dimming the scene you are about to replace is honest,
+    not obstructive. Everything else in this app stays a panel, a popover, or an anchored
+    guard.
+  - **Stacking** (`.modal-backdrop.stacked`): only **Overwrite scene file?**, and only
+    over the **Save scene as** dialog it was committed from. A stacked backdrop drops to
+    `rgb(0 0 0 / 20%)` — the card beneath is already dimming the scene, and 55% over 55%
+    reads as a rendering fault rather than as depth. **Escape closes the topmost card
+    only**, so cancelling a confirmation returns to the dialog with its typed name
+    intact. A third level is not a thing this app does.
+  - **A confirmation card carries no chrome**: no folder line, no fields, just
+    `.confirm-line` sentences and the two buttons (spec §14.5). The buttons are the whole
+    interface, so anything else on the card distracts from the only decision on it.
+  - **Escape cancels**, and cancelling is always the safe half: nothing is written, no
+    scene is replaced. `role="dialog"`, `aria-modal="true"`, an `aria-label` naming the
+    dialog, focus moved into the card on open and restored to the invoking button on
+    close. Focus lands on the first field or list rather than the card, so typing a name
+    or arrowing the file list needs no Tab first.
+  - **Every shortcut is the commit button.** The Load list takes **ArrowUp/ArrowDown**
+    across its *loadable* rows (clamped, not wrapping — an unselectable row is not a
+    stop) with **Enter** to commit, and **double-click** on a row; the Name field takes
+    **Enter**. All of them route through the same handler as the footer button and so
+    carry the same **Load anyway** / **Replace** consequence — a shortcut must never be
+    a way past a warning the button would have shown.
+  - **The commit button restates the consequence** rather than sitting fixed: **Load** →
+    **Load anyway** when unsaved changes would be discarded; **Save** → **Replace** when
+    a file or referenced assets would be overwritten (spec §14.5). The label says where
+    the button *leads*; for a write that would replace a file, the **Overwrite scene
+    file?** card is what actually gates it. A notice and a gate are different jobs, and
+    the label keeps the first — see DECISIONS.md, "Overwriting a file is confirmed".
+  - **Warnings render inline** in the card, as a `.warning-banner` — amber, because the
+    dialog below it is populated and usable, exactly the distinction the banner pair
+    already carries. Errors render inline as an `.error-banner` and the modal **stays
+    open** so the next file or folder can be tried.
+  - **Disabled rows** (a `*.json` that is not a valid scene file) use the disabled-button
+    treatment — `#384252` text, no hover, `aria-disabled` — with the reason as 11 px
+    secondary text on the row, so an excluded file is visibly excluded rather than
+    absent.
+  - **The `current` badge** marks the one file a plain Save would write to, and appears
+    only while browsing the target's *own* folder (spec §14.7) — a same-named
+    `scene.json` in some other granted folder is not that file, and badging it would
+    misstate where Save goes.
+  - **A row truncates its text, never its badge.** `.scene-file-row` gives the name the
+    free space and the summary the remainder; each ellipsizes on its own with the full
+    string as a `title` (the folder line's treatment). The name is a flex row of an
+    ellipsizing label plus the badge, so a long name eats into the label and leaves the
+    mark — clipping the badge would drop the one thing the row is asserting.
 
 - **Score heatmap** (`.aim-heatmap`): a 2:1 canvas of yaw × pitch, 2° per pixel,
   `image-rendering: pixelated` and a crosshair cursor. Pixelated on purpose — smoothing

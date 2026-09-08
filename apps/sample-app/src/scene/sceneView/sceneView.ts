@@ -42,7 +42,7 @@ import type { CameraConstraint } from '../../placement/region.ts';
 import { CoverageOverlay, type OverlayOptions } from '../coverageOverlay.ts';
 import { threeSpace, type TransformSpace } from '../transformSpace.ts';
 import { axisMapping, type ClipBand, type Section, type SectionCellGrid } from '../sectionHeatmap.ts';
-import { clipBandPlanes, setGeometryClippingPlanes, type GeometryBuild } from '../sceneGeometryBuild.ts';
+import { clipBandPlanes, setGeometryClippingPlanes, swapGeometry, type GeometryBuild } from '../sceneGeometryBuild.ts';
 import {
   isClick,
   selectionAfterClick,
@@ -436,11 +436,12 @@ export class SceneView {
   sync(next: SceneViewState): void {
     const prev = this.prev;
 
-    // --- geometry group swap (import/reset, spec §14.4): remove the outgoing
-    // group and add the new one. App owns disposing the outgoing build. ---------
+    // --- geometry group swap (import/reset, spec §14.4): detach the outgoing
+    // group, release it, attach the new one — `swapGeometry` owns that order,
+    // because disposing a build still in the scene leaves the animation loop
+    // drawing freed resources for a frame. ------------------------------------
     if (!prev || prev.room !== next.room) {
-      if (prev) this.viewport.scene.remove(prev.room.group);
-      this.viewport.scene.add(next.room.group);
+      swapGeometry(this.viewport.scene, prev?.room ?? null, next.room);
     }
 
     // --- clip cross-section (spec §13.9): re-apply when the band or the room

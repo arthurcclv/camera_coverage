@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { SectionGizmoSet } from '../src/scene/sectionGizmos.ts';
-import type { Section } from '../src/scene/sectionHeatmap.ts';
+import type { Section, SectionCellGrid, SectionCellStats } from '../src/scene/sectionHeatmap.ts';
 
 function section(enabled: boolean): Section {
   return {
@@ -66,6 +66,72 @@ test('a selected disabled section draws its outlines and not its heatmap (spec �
   // Enabled again, the heatmap returns.
   gizmos.update([section(true)], NO_GRIDS, true, false, 'sec-1');
   assert.equal(heatmap(gizmos).visible, true);
+
+  gizmos.dispose();
+});
+
+/** A 2x2 grid of coloured cells — enough for the texture to be visibly real. */
+function cellGrid(): SectionCellGrid {
+  const cell = (meanFraction: number): SectionCellStats => ({
+    valid: true,
+    black: false,
+    meanFraction,
+    maxFraction: meanFraction,
+    minFraction: meanFraction,
+    blindFraction: 0,
+    seenWords: new Uint32Array([1]),
+  });
+  return {
+    dimsA: 2,
+    dimsB: 2,
+    cells: [cell(0.25), cell(0.5), cell(0.75), cell(1)],
+    camWords: 1,
+    cameraIds: ['cam-1'],
+    cameraBits: [0],
+    extentA: { min: -5, max: 5 },
+    extentB: { min: -5, max: 5 },
+  };
+}
+
+/** The heatmap's texture, which the material's `map` points at. */
+function texture(gizmos: SectionGizmoSet): THREE.DataTexture {
+  return (heatmap(gizmos).material as THREE.MeshBasicMaterial).map as THREE.DataTexture;
+}
+
+test('a section with no retained data draws the no-data plane, not the last run it saw (spec §13.4, §14.4)', () => {
+  // The bug this pins: entries are pooled by section id, so a `sec-1` that
+  // survives a scene import reused its entry — and the `if (cellGrid)` that
+  // writes the texture had no else, leaving the outgoing scene's coverage on
+  // screen as a measurement of geometry that is gone.
+  const gizmos = new SectionGizmoSet();
+
+  gizmos.update([section(true)], new Map([['sec-1', cellGrid()]]), true, false, null);
+  assert.equal(texture(gizmos).image.width, 2, 'the run wrote its 2x2 cells');
+  assert.ok((texture(gizmos).image.data as Uint8Array).some((b) => b !== 0), 'and they are not blank');
+
+  // Same id, no data — what `coverageRun.clear()` produces on import (§14.4).
+  gizmos.update([section(true)], NO_GRIDS, true, false, null);
+  const reset = texture(gizmos);
+  assert.equal(reset.image.width, 1, 'back to the 1x1 no-data plane');
+  assert.equal(reset.image.height, 1);
+  assert.deepEqual(Array.from(reset.image.data as Uint8Array), [0, 0, 0, 0], 'fully transparent (§13.3)');
+
+  gizmos.dispose();
+});
+
+test('a fresh section is already the no-data plane, and a run replaces it in place (spec §13.4)', () => {
+  const gizmos = new SectionGizmoSet();
+
+  gizmos.update([section(true)], NO_GRIDS, true, false, null);
+  const first = texture(gizmos);
+  assert.equal(first.image.width, 1, 'no run yet: transparent');
+
+  // A never-measured section must not churn its texture on every update either.
+  gizmos.update([section(true)], NO_GRIDS, true, false, null);
+  assert.equal(texture(gizmos), first, 'the no-data texture is kept, not rebuilt');
+
+  gizmos.update([section(true)], new Map([['sec-1', cellGrid()]]), true, false, null);
+  assert.equal(texture(gizmos).image.width, 2, 'the run takes over');
 
   gizmos.dispose();
 });

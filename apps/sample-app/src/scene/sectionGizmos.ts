@@ -50,6 +50,19 @@ function noRaycast(this: THREE.Object3D, ..._args: unknown[]): void {
   // Intentionally empty: section visuals are never pick targets (spec §13.8).
 }
 
+/**
+ * The whole-plane no-data texture (spec §13.3, §13.4): one fully-transparent
+ * texel, which the material's `alphaTest` discards. What a section shows before
+ * its first run — and what it must be put *back* to when its data is discarded.
+ */
+function noDataTexture(): THREE.DataTexture {
+  const texture = new THREE.DataTexture(new Uint8Array(4), 1, 1, THREE.RGBAFormat);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  return texture;
+}
+
 // A rectangle outline as 4 disconnected segments — this project's renderer
 // (three/webgpu, both the WebGPU and WebGL2 paths) doesn't support the
 // `THREE.LineLoop` primitive, only `Line`/`LineSegments`.
@@ -109,10 +122,7 @@ export class SectionGizmoSet extends GizmoSet<SectionEntry> {
   protected createEntry(): SectionEntry {
     const group = new THREE.Group();
 
-    const texture = new THREE.DataTexture(new Uint8Array(4), 1, 1, THREE.RGBAFormat);
-    texture.magFilter = THREE.NearestFilter;
-    texture.minFilter = THREE.NearestFilter;
-    texture.generateMipmaps = false;
+    const texture = noDataTexture();
 
     const heatmapMaterial = new THREE.MeshBasicMaterial({
       map: texture,
@@ -154,8 +164,11 @@ export class SectionGizmoSet extends GizmoSet<SectionEntry> {
       lastOrientation: null,
       lastWidth: 0,
       lastHeight: 0,
-      lastDimsA: 0,
-      lastDimsB: 0,
+      // Not sentinels like the three above: the texture above really is 1x1, the
+      // no-data plane, and `updateEntry` compares against that to know whether a
+      // pooled entry still holds real cells.
+      lastDimsA: 1,
+      lastDimsB: 1,
     };
   }
 
@@ -252,6 +265,20 @@ export class SectionGizmoSet extends GizmoSet<SectionEntry> {
         (entry.texture.image.data as Uint8Array).set(data);
       }
       entry.texture.needsUpdate = true;
+      return;
+    }
+
+    // No data for this section: no run yet, or the run was discarded with the
+    // scene that produced it (spec §14.4). Entries are pooled by section id, so a
+    // `section-1` that survives an import inherits the outgoing scene's texture —
+    // the no-data plane has to be **written**, not assumed, or the section keeps
+    // reporting a measurement of geometry that is gone (§13.4).
+    if (entry.lastDimsA !== 1 || entry.lastDimsB !== 1) {
+      entry.texture.dispose();
+      entry.texture = noDataTexture();
+      entry.heatmapMaterial.map = entry.texture;
+      entry.lastDimsA = 1;
+      entry.lastDimsB = 1;
     }
   }
 

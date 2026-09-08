@@ -241,6 +241,27 @@ function disposeMaterial(material: THREE.Material): void {
   material.dispose();
 }
 
+/**
+ * Swap the rendered geometry: detach the outgoing build, **then** release it, then
+ * attach the incoming one (spec §14.4).
+ *
+ * The order is the whole point. Disposing a build while its group is still in the
+ * scene leaves the animation loop (`renderer.setAnimationLoop`) drawing meshes
+ * whose GPU resources are already gone — and React's `useEffect` runs *after*
+ * paint, so a dispose done in the state update is guaranteed to be followed by at
+ * least one such frame. It shows up with a clip band active because those meshes
+ * sit under a `ClippingGroup`: the renderer's cached pipelines for them are keyed
+ * on material state that disposal has just invalidated, so the frame draws
+ * garbage rather than nothing, and the bad cache entry outlives the frame.
+ */
+export function swapGeometry(scene: THREE.Object3D, prev: GeometryBuild | null, next: GeometryBuild): void {
+  if (prev) {
+    scene.remove(prev.group);
+    disposeGeometryBuild(prev);
+  }
+  scene.add(next.group);
+}
+
 /** Releases GPU resources (geometries, materials, textures) held by a built group's meshes. */
 export function disposeGeometryBuild(build: GeometryBuild): void {
   build.group.traverse((obj) => {

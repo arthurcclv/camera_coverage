@@ -6,6 +6,275 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Overwriting a file is confirmed, wherever the write came from
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §14.5, §14.7, §14.8.
+
+**This reverses part of "Backdrop modals for the scene-file dialogs, and only for
+those"** (below), which removed the old `window.confirm` on the reasoning that a
+commit button naming its consequence beats a second dialog stacked on the first.
+That reasoning still holds for *notice*, and the **Replace** label and the inline
+warning both stayed. What it got wrong is that a label is not a **gate**: the
+inline warning is read while typing a name, and the label is read in passing on
+the way to a click already decided on. Destroying a file on disk is the only
+irreversible thing this app does, and it was the one action with nothing between
+the intent and the act.
+
+**Decision.** One confirmation, in front of both write paths — a plain **Save**
+onto a target file that exists, and a **Save As…** commit onto a name the
+destination already holds. `resolveWriteAction(clashes)` is the whole rule and
+both paths call it, so they cannot drift into asking different questions about the
+same act. A Save As… onto a name that does *not* exist writes straight through:
+there is nothing to destroy, and confirming a creation is how a confirmation
+becomes a reflex.
+
+**Only the scene file triggers it.** Clashing *assets* are reported inside the
+confirmation but never raise one alone — a cross-folder Save As… under a fresh
+name is a creation, and the assets it copies alongside are what make the
+destination a complete scene rather than something being lost.
+
+**What it cost.** A target always names a file that exists (an import sets it, a
+Save As… creates it), so *every* routine re-save now carries a click. That is the
+trade, taken deliberately: Save is no longer "the only silent write in the
+feature", and §14.5 no longer claims it is.
+
+**Two mechanics the stacking forced.** Escape had to become topmost-only — both
+modals listen on `window` in the capture phase, and `stopPropagation` does not
+stop a sibling listener on the same target, so one keypress used to cancel the
+confirmation *and* the dialog under it, losing the typed name. `Modal` now keeps a
+module-level stack of open cards and ignores Escape unless it is on top. And the
+stacked backdrop does not dim again: 55% over 55% reads as a rendering fault, not
+as depth.
+
+**The confirmation closes on any outcome**, not just success. It carries no error
+banner of its own, so leaving it up on a failed write would hide the error behind
+it; closing it puts the message where §14.7 says — in the Save-as dialog if one is
+open, in the Scene panel's banner otherwise.
+
+---
+
+## A pooled gizmo entry must be told there is no data
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §13.4 (clarified — the rule was
+implied by §13.3 and §14.4 and is now stated).
+
+**The symptom.** Loading a second scene left the first scene's section heatmap on
+screen: cells coloured by a run against geometry that no longer existed, reported
+as this scene's measurement.
+
+**The cause.** Everything upstream was right. `coverageRun.clear()` drops the
+retained results and `sectionCells` returns `null` for every section, so the app
+correctly said "no data". But `SectionGizmoSet.updateEntry` wrote its texture
+inside `if (cellGrid) { … }` with **no else**, and `GizmoSet` pools entries by id.
+A default scene and an imported one both tend to call their first section
+`section-1`, so the id survived the import, the entry was reused, and its
+`DataTexture` was simply never touched. The class doc even claimed a missing entry
+"renders as an all-invalid/black plane" — true only of a *freshly created* entry,
+whose texture happens to be one transparent texel.
+
+**Decision.** No-data is a state to render, not a state to skip rendering.
+`noDataTexture()` is now a named function used by both `createEntry` and the new
+else-branch, and `lastDimsA/lastDimsB` start at `1` because that is the honest
+size of the texture `createEntry` actually makes — not a `0` sentinel like
+`lastWidth`/`lastOrientation` beside it, since those really do need to force a
+first build.
+
+**The general rule this pins.** Anything pooled by entity id inherits the previous
+occupant's GPU state, so a render path may only branch on "is there data" if
+**both** arms write. Sections are the only gizmo set where this can bite — probe
+and volume entries carry no measured data (probe visibility is drawn by its panel,
+volumes draw only their own geometry) and the coverage overlay is cleared wholesale
+by `SceneView.clearCoverage` rather than reconciled — which is exactly why the hole
+sat in the one set that does.
+
+**The test removes the else-branch and fails.** `test/sectionGizmos.test.ts` writes
+a 2×2 grid, updates the same id with no grid, and asserts the texture is back to
+1×1 `[0,0,0,0]`; a second test pins that a never-measured section keeps its
+no-data texture rather than rebuilding it on every update.
+
+---
+
+## One write path, so one place asks for write permission
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §14.5 (the lazy request was
+always the spec; this is where it actually happens).
+
+**The bug.** `ensureWritePermission` sat in `handleSaveScene`, on the plain-Save
+branch — the branch that reaches `writeScene` directly. Every other route to a
+write went through the **Save scene as** dialog and skipped it. That is fine for a
+folder picked through **Change…**, which is granted `readwrite` outright, and
+catastrophic for the case the feature exists to serve: Load grants `mode: 'read'`,
+so **Save As… into the folder the scene was loaded from** — saving
+`night-shift.json` beside `scene.json` — hit a raw `NotAllowedError` out of
+`getFileHandle(…, { create: true })` instead of a permission prompt. The headline
+same-folder case was the one path with no gate on it.
+
+**Why it happened.** The gate was placed where the *silent* write was, on the
+reasoning that a dialog commit is the loud path and needs no extra guard. But
+loudness is not the question — the question is whether the handle is writable, and
+that is a property of the folder, not of how the save was requested.
+
+**Decision.** `writeScene` owns the request, as its first `await`, and every save
+routes through `writeScene`. The gate now sits where the write is rather than
+where the button was, so no future save path can be added without it; the click's
+user activation still reaches `requestPermission` because an async function runs
+synchronously up to its first await. An already-granted handle resolves without
+prompting, so nothing re-asks a `readwrite` folder, and a denial reports through
+the same `describeSaveFailure` as before — in the dialog when one is open, in the
+panel banner when it is a plain Save.
+
+**No test pins it**, and that is the shape of the fix: the branch is gone. There is
+no longer a decision about *which* saves ask — the answer is all of them — so
+there is nothing pure left to assert. The only guard is that `writeScene` is the
+sole caller of `exportSceneFile`.
+
+---
+
+## The Load dialog's list is a pure module, not inline component logic
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §14.4, §14.7.
+
+**Why.** The list had accumulated four real decisions in two impure places: the
+case-insensitive ordering, the `SCENE_FILE_PARSE_CAP` partition and the read/JSON/
+schema classification inside `sceneIO.listSceneFiles`, and the opening selection
+plus the arrow-key walk inline in `LoadSceneDialog`. Both are places this app
+deliberately does not test — `sceneIO` because it needs a File System Access API,
+the dialog because it needs a renderer — so all four shipped unasserted, which is
+exactly the failure mode `CONVENTIONS.md` records against §5.2's plot geometry.
+
+**Decision.** `scene/sceneFileList.ts` takes them: `planSceneFileList`,
+`describeSceneFileRow`, `nextListSelection`, `moveListSelection`. `listSceneFiles`
+is left supplying bytes (`readTextAt` turns a failed read into the `null` the pure
+row function reads as "could not be read"), and the dialog is left holding state
+and JSX. A keyboard shortcut turned out to be the clearest case for the rule: an
+arrow key is `(rows, selected) → selected`, a pure function wearing an event
+handler's clothes.
+
+**What it caught.** Writing the selection down as a function surfaced that the
+re-list rule kept the *previous folder's* selection, because the effect only ever
+re-runs on a folder change — so `preferred` became the target's file when this is
+the target's folder and nothing otherwise, which is also what the **current**
+badge needed.
+
+---
+
+## The outgoing geometry build is detached before it is freed, not by App
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §14.4 (unchanged — this is an
+implementation-ordering fix, not a behavior change).
+
+**The symptom.** Loading a second scene showed both scenes at once, with the
+geometry sliced along planes that looked like a mispositioned near/far — and only
+when a section clip (§13.9) was enabled.
+
+**The cause.** `applyScene` disposed the outgoing `GeometryBuild` and *then* set
+the new one in React state. But the group of the outgoing build is removed from
+the Three scene by `SceneView.sync`, which runs in a `useEffect` — and
+`useEffect` fires **after** the browser paints. Meanwhile `renderer.setAnimationLoop`
+is drawing continuously. So every load was guaranteed to render at least one frame
+whose scene graph still contained a group whose geometries and materials had
+already been disposed: a use-after-free of GPU resources on the hot path.
+
+**Why the clip band was the tell.** Without a clip band the freed meshes are
+drawn with default state and the frame is close enough to the outgoing scene that
+nobody notices. With one, those meshes sit under a `ClippingGroup`, so the
+renderer's cached pipelines and bind groups for them are keyed on material state
+that disposal has just invalidated. The frame draws garbage rather than nothing,
+and — because the renderer's caches are persistent — the bad entry outlives the
+frame that created it, which is why the ghost stayed on screen instead of
+flickering once. This is also why the first two theories were wrong: the scene
+graph was never holding two groups (one diffed add/remove path, verified), and the
+orthographic auto-fit was a red herring that happened to produce a similar-looking
+slice.
+
+**Decision.** One function owns the order: `swapGeometry(scene, prev, next)` —
+detach, dispose, attach. `SceneView.sync` calls it on a room swap; `applyScene`
+no longer disposes anything, and the comment on `roomRef` that cited disposal as a
+reason for the mirror is gone. Ownership moves to where the removal already lived,
+because removal and disposal are one operation that was split across two modules
+and two ticks.
+
+**The test pins the order, not the outcome.** Both orderings leave the same end
+state, so `test/sceneGeometryBuild.test.ts` wraps each mesh's `geometry.dispose`
+and records `group.parent` at the moment it is called, asserting it is already
+`null`. Reversing the two lines in `swapGeometry` fails that test and nothing
+else.
+
+---
+
+## Scene identity is a file inside a folder, not the folder
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §14.2, §14.4, §14.5.
+
+**Why.** One `assets/` is worth reusing. A site's GLB capture is the expensive
+part of a scene folder, and the interesting question — what does a 40-camera
+night-shift layout cover against the 96-camera build-out? — is a question about
+two layouts over *the same geometry*. With a fixed `scene.json` per folder the
+only way to hold both was to duplicate the folder, GLB bytes included, and then
+keep two copies of the geometry in step by hand.
+
+**What we could not do.** The obvious shape — a native file dialog naming the
+scene file — is closed off by the platform. `showOpenFilePicker` yields a
+`FileSystemFileHandle` that grants access to that one file, and the File System
+Access API exposes **no parent**: from the handle for `night-shift.json` there is
+no route to `assets/site.glb` beside it. A file-picker Load could therefore never
+resolve glTF geometry. Asking for the file *and then* the folder does not rescue
+it either: a picker consumes the browser's transient user activation, so a second
+one cannot be chained inside the same click — it would need its own button press,
+making the first load of every folder a two-click affair.
+
+**Decision.** The **folder** stays what grants access — `showDirectoryPicker`
+remains the only picker in the app — and the **file** is chosen from an in-app
+list of that folder's root-level `*.json`, each parsed for a `96 cams · 12 probes`
+summary. The save target became the pair `{ folder, name }`. Load… opens on the
+folder already granted, so switching between variants that share one `assets/`
+costs no OS dialog at all; Save As… into that same folder writes one small JSON
+and copies nothing, which is the whole point.
+
+**What it cost.** The file list is ours to draw rather than the OS's, so it cannot
+reach a scene outside the granted folder, and opening the dialog reads every
+`*.json` at the root (capped at 200 files; beyond that rows list name-only and
+validate on selection). In exchange the list can say what each file *holds*,
+which an OS dialog cannot, and a `*.json` that is not a scene file is listed
+greyed with its reason instead of being mysteriously absent.
+
+**What it also bought.** Making Load one click away from replacing the scene
+forced the unsaved-changes guard the app had never had. It is snapshot equality —
+`serializeScene` output against the string stored at the last load or save,
+compared when the dialog opens — so a drag that ends where it started is not a
+change, and editing pays nothing for the check.
+
+---
+
+## Backdrop modals for the scene-file dialogs, and only for those
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §14.7; chrome in
+[`VISUAL_DESIGN.md`](./VISUAL_DESIGN.md).
+
+**Why.** Every other transient surface in this app deliberately refuses to dim
+the viewport — `.placement-confirm` is an anchored guard precisely because the
+live scene behind it is what the user is judging. The two scene-file dialogs are
+the opposite case: they settle which file on disk the scene *is*, and one of them
+can discard an hour of camera placement. Nothing behind them is being judged, and
+both genuinely block.
+
+**Decision.** A single `.modal-backdrop` + `.modal` pattern, used by **Load
+scene** and **Save scene as** and nothing else. The commit button restates the
+consequence — **Load** → **Load anyway** with unsaved changes, **Save** →
+**Replace** when a file or assets would be overwritten — which is why the
+`window.confirm` the old Save As… used is gone rather than moved: a label that
+names what it will do beats a second dialog stacked on the first.
+
+> **Partly reversed** — see "Overwriting a file is confirmed, wherever the write
+> came from" at the top of this file. A confirmation is back, as a third modal
+> that may stack; the labels stayed. Warnings are
+inline `.warning-banner`s (amber: the dialog below is populated and usable) and
+errors inline `.error-banner`s with the dialog left **open**, so the next file or
+folder can be tried without re-navigating. The Scene panel's own banner now only
+carries failures raised with no dialog up — a plain Save that cannot write.
+
+---
+
 ## A greedy pass beside the trials, with separation as the objective's second key
 
 Behavior in [`../specs/camera_placement.md`](../specs/camera_placement.md) §1.2, §4.4.
@@ -1722,6 +1991,12 @@ surface hit buries half the box).
 
 ## Save writes back to the folder the scene was opened from, and the target is session-only
 
+> **Partly superseded** by *Scene identity is a file inside a folder, not the folder*
+> (top of this file): the target is now the pair `{ folder, name }` and Save As… goes
+> through a dialog rather than straight to a picker. The round-trip-to-where-it-was-
+> opened rule, the session-only lifetime, and the `startIn`/`id` anchoring below all
+> still hold.
+
 Behavior in [`../specs/spec.md`](../specs/spec.md) §14.5, §14.7. The app now tracks a
 **save target** — the folder a successful import (or Save As…) established — and plain
 **Save** writes `scene.json` into it with no picker. `Save As…` picks a folder and
@@ -1766,6 +2041,12 @@ footgun.
   Only the handle's leaf `name` is available, so the line can never show a full path.
 
 ## Save As… copies the scene's referenced assets, so the destination is self-contained
+
+> **Still current, narrowed:** this is now the *cross-folder* Save As… only. A Save As…
+> into the folder the scene already lives in — the way variants on one `assets/` are
+> made — copies nothing, and the overwrite confirmation described below is an inline
+> warning in the dialog rather than a `window.confirm`. See *Scene identity is a file
+> inside a folder, not the folder* at the top of this file.
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §14.5. A save into a folder that
 isn't the current target copies every `gltf` asset the scene references from the target

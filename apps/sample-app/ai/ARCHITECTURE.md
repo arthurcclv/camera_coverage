@@ -103,8 +103,12 @@ source of truth, spec §14.1) + `room` (its built `GeometryBuild`), overlay
 options, `voxelSize` (debounced 250 ms), summary, `autoRun`, transform
 mode/space, gizmo visibility, `sectionsVisible` (viewport master toggle), probe
 queries, `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`/
-`saveTarget`/`lastSave` (§14.5 — session-only, never persisted), and inspector
-split height. The merged per-chunk aggregation results and the
+`saveTarget`/`lastSave` (§14.5 — session-only, never persisted) plus the two dialog
+states `loadDialogFolder`/`saveAsDialog` and `unsavedWarning` (§14.7), and inspector
+split height. `saveTarget` is the **pair** `{ folder, name }` (§14.5), and the scene as
+last loaded or saved is held serialized in a `sceneBaselineRef` — the dirty check
+compares snapshots when a dialog opens rather than tracking edits, so a drag that ends
+where it started is not a change and editing costs nothing (§14.4). The merged per-chunk aggregation results and the
 run-generation guard live on one `coverageRun` (`useMemo(() => new CoverageRun())`,
 see `scene/coverageRun.ts`); the three derived reads (`sectionCellGrids`,
 `zoneCoverage`, `probeQueries`) call its `sectionCells`/`zoneCoverage`/
@@ -219,32 +223,61 @@ default" — see DECISIONS.md).
   synchronous fast path used for the default scene); `buildSceneGeometry` adds
   `gltf` objects via `GLTFLoader`, transforming each mesh by (object transform ×
   node world-matrix) into the same merged mesh. `disposeGeometryBuild` releases
-  a superseded build's GPU resources.
-- `sceneFile.ts` — pure `scene.json` schema/validation/(de)serialization (spec
-  §14.3, §14.8): `parseSceneFile` (schema, `formatVersion` — writes `2`, reads
-  `1` and `2` with a v1 file getting empty zones/volumes, geometry `kind`s,
+  a superseded build's GPU resources, and `swapGeometry` is the **only** caller
+  that matters: it detaches the outgoing group, disposes it, then attaches the
+  incoming one, in that order. `SceneView.sync` calls it on a room swap; App
+  deliberately does **not** dispose in `applyScene`, because `useEffect` runs
+  after paint and freeing a build still parented to the scene leaves the
+  animation loop drawing released resources for a frame.
+- `sceneFile.ts` — pure scene-file schema/validation/(de)serialization (spec
+  §14.3, §14.8): `parseSceneFile` (schema, `formatVersion` — writes `3`, reads
+  `1`–`3` with a v1 file getting empty zones/volumes, geometry `kind`s,
   asset-path safety, id uniqueness within each id-bearing category, and
   `volume.zoneId` referential integrity + `size > 0`) and `serializeScene`. No
   file I/O; this is the layer with real decision logic, so it's the one that's
   unit-tested.
-- `sceneIO.ts` — the only impure scene-file I/O: `importSceneFromDirectory`/
-  `exportSceneToDirectory` against a `FileSystemDirectoryHandle` (spec §14.4,
-  §14.5), thin wrappers around `sceneFile.ts` + `sceneGeometryBuild.ts`. Also the
-  save-time probes `sceneJsonExists` / `findExistingAssets` (what a picked
-  destination would replace) and `ensureWritePermission` (read handle → readwrite
-  on first save), and `copyAssets` — the Save As… asset copy, which streams each
-  referenced GLB from the source folder to the same relative path in the
-  destination (creating folders as needed) and throws `AssetCopyError` (carrying
-  `src` + `reason`) on the first failure so the caller can abandon the save before
-  writing `scene.json`. One private `fileHandleAt` walks a relative asset path for
-  both import and copy.
-- `saveTarget.ts` — pure save-target logic (spec §14.5, §14.7): `resolveSaveAction`
-  (write silently vs. show a picker, and whether an overwrite needs confirming),
-  `nextSaveTarget` (fold an import/save/failure/cancel outcome into the target),
-  `planAssetCopy` (the deduped referenced-`src` list a Save As… must copy), and
-  the status/prompt/error strings. Generic over the handle type — only `.name` is
+- `sceneIO.ts` — the only impure scene-file I/O: `importSceneFile`/
+  `exportSceneFile` (spec §14.4, §14.5), thin wrappers around `sceneFile.ts`,
+  `sceneFileList.ts` + `sceneGeometryBuild.ts`. A scene file is addressed by the
+  **save target**, the `{ folder, name }` pair — a folder holds any number of
+  scene files (§14.2), so nothing here knows a default name, and the pair travels
+  as the one value `saveTarget.ts` already names. Also `listSceneFiles` (the Load
+  dialog's rows: reads what `planSceneFileList` says to read, with **no GLB
+  loaded**, and shapes each row through `describeSceneFileRow`), `fileNamesIn`
+  (the Save-as dialog's collision set, probed once per folder rather than per
+  keystroke), `findExistingAssets` (which assets a destination would replace),
+  `ensureWritePermission` (read handle → readwrite, from the click's activation),
+  and `copyAssets` — the cross-folder Save As… asset copy, which
+  streams each referenced GLB from the source folder to the same relative path in
+  the destination (creating folders as needed) and throws `AssetCopyError`
+  (carrying `src` + `reason`) on the first failure so the caller can abandon the
+  save before writing the scene file. One private `fileHandleAt` walks a relative
+  asset path for both import and copy; one private `readTextAt` turns a failed
+  read into `null` for the list. **No decisions live here** — every judgement is
+  in one of the three pure modules, which is what keeps the untested surface this
+  small.
+- `sceneFileList.ts` — pure Load-list logic (spec §14.4, §14.7):
+  `planSceneFileList` (which of a folder's names are listed, the stable
+  case-insensitive order, and which fall past `SCENE_FILE_PARSE_CAP` and so list
+  name-only), `describeSceneFileRow` (a row's `96 cams · 12 probes` or the reason
+  it cannot load — `null` text means unreadable), `nextListSelection` (which row
+  a freshly-listed folder opens on) and `moveListSelection` (ArrowUp/ArrowDown
+  across the loadable rows, clamped). Owns the `SceneFileEntry` row type.
+  `sceneIO.listSceneFiles` supplies the bytes and nothing else, so the whole list
+  is unit-tested with plain strings (`test/sceneFileList.test.ts`).
+- `saveTarget.ts` — pure save-target logic (spec §14.5, §14.7). The target is the
+  pair `{ folder, name }`: `resolveSaveAction` (write silently vs. open the
+  Save-as dialog), `nextSaveTarget` (fold an import/save/failure/cancel outcome
+  into it), `normalizeSceneFileName` + `isSceneFileName` (the naming rules and the
+  `*.json` listing predicate), `summarizeSceneFile` (a list row's
+  `96 cams · 12 probes`), `planAssetCopy` (the deduped referenced-`src` list a
+  cross-folder Save As… must copy), `resolveWriteAction` + `describeOverwriteConfirm`
+  (whether a commit replaces a file and so must be confirmed, §14.5, and what the
+  confirmation says), and the status/warning/error strings. The
+  dirty check is not a function here — it is one `!==` on the `sceneSnapshot`
+  strings App.tsx stores at each load and save (§14.4). Generic over the handle type — only `.name` is
   read — so `test/saveTarget.test.ts` needs no File System Access API. App.tsx
-  holds the handle and does the awaits; every decision lives here.
+  holds the handles and does the awaits; every decision lives here.
 - `viewport.ts` — async `WebGPURenderer` init, orbit + transform controls, the
   light rig (from `sceneLighting.ts`), grid, render loop, and the five view
   cameras of the View selector. The
@@ -342,7 +375,10 @@ default" — see DECISIONS.md).
   outlines + axis-constrained TransformControls target; consumes
   `sectionHeatmap.ts`'s output (including its rotation/sign math), owns no
   aggregation logic. Extends the plain (non-pickable) `GizmoSet` — sections are
-  selected from the hierarchy row, never the viewport (spec §13.8).
+  selected from the hierarchy row, never the viewport (spec §13.8). The only set
+  whose pooled entry holds **measured** data, so it is the only one that must
+  write the absence of it: a null cell grid resets the texture to the 1×1
+  transparent no-data plane (§13.4) rather than leaving what was there.
 - `sceneTree.ts` — `SceneNode` union (camera/probe/section + zone/volume +
   constraintGroup/constraint) + `buildSceneTree` / `flattenVisible`, the
   `nodeIdFor*` / `*IdForNode` namespaced id pair per kind, and
@@ -562,10 +598,42 @@ re-search cheap. And the six capture slots are the **same six** the aim optimize
 the two sessions are mutually exclusive rather than each reserving its own.
 
 **UI (`ui/`, presentational React)**
-- `SceneFileControls.tsx` — the "Scene" panel (Load / Save / Save As… plus the
+- `SceneFileControls.tsx` — the "Scene" panel (Load… / Save / Save As… plus the
   save-target status line, spec §14.7) atop the left panel, above the hierarchy;
   hidden entirely where the File System Access API is unavailable. Presentational
-  only — the status string comes from `scene/saveTarget.ts`.
+  only — the status string comes from `scene/saveTarget.ts`. Its error banner is
+  for failures with **no dialog open**; a dialog's own errors render inside it.
+- `Modal.tsx` — the app's only blocking surface (`VISUAL_DESIGN.md`): dimmed
+  backdrop, centred `.panel` card, title + scrolling body + pinned footer, Escape
+  to cancel, focus moved in on open and restored on close. Holds a module-level
+  **open-modal stack** so Escape closes the topmost card only — both modals listen
+  on `window` in the capture phase and `stopPropagation` does not stop a sibling
+  listener, so without it one Escape would cancel a stacked confirmation *and* the
+  dialog beneath it. `stacked` suppresses the second dim (spec §14.7). Plus what
+  the dialogs share of the folder line: `FolderLine` (the granted-folder row and
+  its **Change…** button), `usePickedFolder` (the folder being browsed and the
+  re-pick that replaces *only* it) and `FOLDER_UNAVAILABLE`, the one message a
+  folder that cannot be enumerated or probed gets (§14.8).
+- `ConfirmOverwriteDialog.tsx` — the **Overwrite scene file?** gate (spec §14.5):
+  the confirmation in front of every write that would replace an existing file,
+  from a plain Save or a Save-as commit alike. Body lines come from
+  `describeOverwriteConfirm`; the only `stacked` modal in the app. Its
+  **Overwrite** click is the activation the lazy `requestPermission` runs from, so
+  App commits straight to `writeScene` from it.
+- `LoadSceneDialog.tsx` — the **Load scene** dialog (spec §14.4): lists the
+  granted folder's scene files via `listSceneFiles`, with summaries, invalid rows
+  greyed with their reason, arrow-key/Enter/double-click navigation, and the
+  unsaved-changes warning that turns **Load** into **Load anyway**. The **current**
+  badge is gated on `isTargetFolder` as well as the name, since two granted
+  folders can each hold a `scene.json` and only one is what Save writes to
+  (§14.7). Owns only the folder being browsed and its listing; the all-or-nothing
+  import is the caller's, so a failure leaves the dialog open over an untouched
+  scene.
+- `SaveSceneAsDialog.tsx` — the **Save scene as** dialog (spec §14.5): an editor
+  for `{ folder, name }` that writes nothing until its own commit. Name validated
+  through `normalizeSceneFileName` as typed; the replace warning is inline and
+  recomputed per folder, turning **Save** into **Replace**, so no modal
+  confirmation ever stacks on it.
 - `SceneHierarchy.tsx` — tree view, add menu, duplicate/delete context menu, per-kind
   rows, and `useDragReorder` — the pointer plumbing for drag-to-reorder (§5.5.1):
   the 4px threshold, window move/up listeners attached on pointerdown, Escape-cancel,

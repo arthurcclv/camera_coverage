@@ -40,7 +40,20 @@ message, belonging to no single layer.
   shared `Slider` primitive; panels are `.panel` / `.panel-title` / `.hint` div
   structures styled by class in `index.css`. Inline SVG icons live in `App.tsx`.
 - **Accessibility:** semantic roles are used — `tree`/`treeitem`/`group`, `menu`,
-  `radiogroup`, `separator`, and `aria-expanded`/`aria-selected`.
+  `radiogroup`, `separator`, `dialog`/`aria-modal`, `listbox`/`option`, and
+  `aria-expanded`/`aria-selected`/`aria-disabled`.
+- **A dialog may own its own I/O; a commit may not.** The scene-file dialogs
+  (`LoadSceneDialog`, `SaveSceneAsDialog`) are the one exception to the
+  presentational-components rule: each runs its own folder reads (`listSceneFiles`,
+  `fileNamesIn`, `findExistingAssets`) for state that exists only while it is open,
+  guarded by a `live` flag so a folder change mid-read is discarded. What they never
+  own is the **commit** — the all-or-nothing import and the asset-copy-then-write both
+  stay in `App.tsx`, so a failure leaves the scene untouched and the dialog open. Nor
+  do they own **decisions**: the name rules, summaries and replace warnings are pure
+  functions in `scene/saveTarget.ts`, and the file list's order, rows and
+  selection — including where an arrow key moves it — in `scene/sceneFileList.ts`,
+  both unit-tested without a handle in sight. A keyboard shortcut inside a dialog is
+  still `(rows, selected) → selected`, and belongs in the pure module like any other.
 - **Pointer gestures** (the panel divider, hierarchy drag-reorder): the geometry goes
   in a pure module that takes plain numbers; the component keeps only the plumbing.
   Window `pointermove`/`pointerup` listeners are attached **imperatively inside

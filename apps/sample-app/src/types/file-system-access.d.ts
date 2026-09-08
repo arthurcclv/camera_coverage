@@ -3,8 +3,9 @@
  * uses (spec §14) that TypeScript's bundled DOM lib doesn't declare.
  * `FileSystemDirectoryHandle`/`FileSystemFileHandle` (incl. `getFileHandle`,
  * `getDirectoryHandle`, `createWritable`) are already in `lib.dom.d.ts`;
- * `Window.showDirectoryPicker` and the per-handle permission methods (used to
- * upgrade a read handle to readwrite on first save, §14.5) are not.
+ * `Window.showDirectoryPicker`, the per-handle permission methods (used to
+ * upgrade a read handle to readwrite on first save, §14.5) and the directory
+ * async iterators (used to list a folder's scene files, §14.4) are not.
  */
 export {};
 
@@ -16,6 +17,11 @@ declare global {
   interface FileSystemHandle {
     queryPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
     requestPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
+  }
+
+  interface FileSystemDirectoryHandle {
+    /** Enumerates the folder's immediate children — how the Load dialog finds `*.json` (§14.4). */
+    entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
   }
 
   interface DirectoryPickerOptions {
