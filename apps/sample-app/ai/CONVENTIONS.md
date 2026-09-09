@@ -7,7 +7,8 @@ Coding standards and organization for the demo app. Match the existing code. See
 ## The spec is the source of truth
 
 The app is built from `specs/spec.md` (+ `specs/volumetric_rendering.md`,
-`specs/sampling_volumes.md`, and `specs/aim_optimization.md`). Every
+`specs/sampling_volumes.md`, `specs/aim_optimization.md`,
+`specs/camera_placement.md`, and `specs/gaussian_splats.md`). Every
 source file opens with a doc comment citing the spec section it implements.
 Behavior changes update the spec first — see WORKFLOWS.md.
 
@@ -42,18 +43,24 @@ message, belonging to no single layer.
 - **Accessibility:** semantic roles are used — `tree`/`treeitem`/`group`, `menu`,
   `radiogroup`, `separator`, `dialog`/`aria-modal`, `listbox`/`option`, and
   `aria-expanded`/`aria-selected`/`aria-disabled`.
-- **A dialog may own its own I/O; a commit may not.** The scene-file dialogs
-  (`LoadSceneDialog`, `SaveSceneAsDialog`) are the one exception to the
-  presentational-components rule: each runs its own folder reads (`listSceneFiles`,
-  `fileNamesIn`, `findExistingAssets`) for state that exists only while it is open,
-  guarded by a `live` flag so a folder change mid-read is discarded. What they never
+- **A dialog may own its own I/O; a commit may not.** The **file-referencing
+  dialogs** (`LoadSceneDialog`, `SaveSceneAsDialog`, `AddSplatDialog`) are the
+  exception to the presentational-components rule: each runs its own folder reads
+  (`listSceneFiles`, `fileNamesIn`, `findExistingAssets`, `listSplatAssets`) for
+  state that exists only while it is open, guarded by a `live` flag so a folder
+  change mid-read is discarded. The exception is exactly this shape — *what is on
+  disk right now, needed only while the dialog is up* — and does not extend to a
+  dialog reading app state it could be handed. What they never
   own is the **commit** — the all-or-nothing import and the asset-copy-then-write both
   stay in `App.tsx`, so a failure leaves the scene untouched and the dialog open. Nor
   do they own **decisions**: the name rules, summaries and replace warnings are pure
   functions in `scene/saveTarget.ts`, and the file list's order, rows and
   selection — including where an arrow key moves it — in `scene/sceneFileList.ts`,
   both unit-tested without a handle in sight. A keyboard shortcut inside a dialog is
-  still `(rows, selected) → selected`, and belongs in the pure module like any other.
+  still `(rows, selected) → selected`, and belongs in the pure module like any other —
+  and where two dialogs walk a file list the same way they **share** that function
+  rather than each keeping its own copy: `AddSplatDialog` moves its selection with
+  `sceneFileList.moveListSelection`, the Load dialog's own.
 - **Pointer gestures** (the panel divider, hierarchy drag-reorder): the geometry goes
   in a pure module that takes plain numbers; the component keeps only the plumbing.
   Window `pointermove`/`pointerup` listeners are attached **imperatively inside
@@ -103,7 +110,13 @@ context menu routed `constraint` and `constraintGroup` into `onDeleteVolume`, wh
 filtered the volume array for an id no volume had and returned it unchanged — no
 error, nothing deleted. A `Record` keyed on the union makes the next added kind a
 compile error instead (`ui/entityMenu.ts`). The same reasoning covers the reducer's
-`switch` over `EntityKind`, which is exhaustive per case rather than defaulted.
+`switch` over `EntityKind`, which is exhaustive per case rather than defaulted, and
+three more sites that each replaced a chain: `sceneTree.nodeSelection` (row → what it
+selects), `sceneTree.nodeEnabled` (row → whether it dims, via an `EnabledLookup` the
+hierarchy builds from what it has indexed), and `SceneView.emitTransform` (selection →
+how a gizmo drag reads back, with `zone`/`constraintGroup` as **explicit** no-ops).
+The hierarchy's context menu no longer dispatches at all: it asks `nodeSelection` for
+the kind and id, since the `DeletableKind`s *are* the selectable kinds.
 
 ## Testing
 
@@ -116,7 +129,7 @@ compile error instead (`ui/entityMenu.ts`). The same reasoning covers the reduce
   `sectionHeatmap`, `sceneReducer`, `coverageRun` (the run coordinator: generation
   guard + reset/addChunk/clear fan-out), `sceneView/pick`, `sceneView/transformReadback`,
   `sceneLighting` (the viewport's light rig, extracted from `viewport.ts` precisely
-  so it is reachable here).
+  so it is reachable here), `splats`, `splatAssets`.
   A few drive real (renderer-free) Three.js gizmo objects and assert on their
   state — `cameraGizmos`, `samplingVolumeGizmos`, and `gizmoSet` (the shared spine,
   via a minimal subclass: reconcile/dispose/getAttachTarget/pickHit) — which is how
@@ -136,6 +149,18 @@ compile error instead (`ui/entityMenu.ts`). The same reasoning covers the reduce
   cannot be reached. `usePlacement`'s Reposition is the pattern: the pick and the
   blocker moved to `pool.ts` as `bestSample`/`repositionBlocker`, and the hook keeps
   the build step loop and the state writes.
+- **The pure/impure split extends to whole renderers, not just to functions.**
+  Spark cannot run under `node --test` at all — it needs a WebGL2 context, workers
+  and wasm — so the splat feature draws the boundary where `sceneFileList.ts` vs
+  `sceneIO.ts` already draws it. `scene/splats.ts` (label, accepted extensions,
+  row badge, the `Flip 180° Z` preset, `clipBandToSdfBox`) and
+  `scene/splatAssets.ts` (the Add-dialog list) hold **every judgement** and are
+  tested; `scene/splatLayer.ts` holds only canvas creation, the `SparkRenderer`,
+  the stream load, `mesh.visible`, the `SplatEdit` lifecycle and disposal, and is
+  verified by running the app. When a decision looks like it belongs in the layer,
+  that is the signal it belongs in one of the other two — `clipBandToSdfBox` is the
+  example: the layer could have built its SDF box inline, and then the band → box
+  mapping would have had no test.
 - **A few suites drive the real engine on the CPU backend** — `coverageRun`,
   `optimizeAcceptance`, `optimizeObjective`, `placementParity` — because some contracts
   are only meaningful against the engine's own answer. `placementParity` is the model:

@@ -265,7 +265,14 @@ this rig, check the asset's metalness before touching the lights.
   (`.icon-btn`) opens a checklist of layer-visibility rows (`.layer-menu-row`:
   checkbox + glyph + label). Toggling keeps the menu open; it closes on
   outside-click / Escape / re-click. Reuses the `.menu` popover chrome shared with
-  the hierarchy add/context menus.
+  the hierarchy add/context menus. Rows, in order: **Coverage** (stacked planes),
+  **Sections** (2×2 grid), **Cameras** (camera body), **Zones** (dashed ROI box),
+  **Constraints** (rail + mount point), **Splats** (a scatter of soft filled
+  blobs at graded opacity — a Gaussian cloud, the only *filled* glyph in the
+  menu, since a splat has no outline to draw), and **Geometry** (a solid
+  wireframe cube). The last two sit together and last on purpose: they read as a
+  pair, because hiding the model is how the capture behind it is seen
+  (`gaussian_splats.md` §5.2, §5.3).
 - **View selector** (`.view-menu`, a `.menu` popover): the top-middle button opens
   the five view rows (`.view-menu-row`: a 12 px blue `#4d9dff` checkmark column +
   label; `.selected` brightens the label to `#fff`). A row that cannot be chosen
@@ -280,12 +287,28 @@ this rig, check the asset's metalness before touching the lights.
   canvas to aim. The area outside it is **not** dimmed: it is legible context
   showing what a small pan or a wider FOV would gain.
 - **Badge** (`.badge`): pill, 11 px/600 — variants `stale`, `backend-webgpu`,
-  `backend-cpu`, `flagged`, `zone` (neutral blue, the volume's zone reference).
+  `backend-cpu`, `flagged`, `zone` (neutral blue, the volume's zone reference),
+  `splat` (the same neutral blue, a capture's load-state readout on the
+  `SplatPanel` header), and `splat-error` (warning amber on `#3a2d18` — a capture
+  that is missing or undecodable). The two splat variants are deliberately
+  different surfaces: a splat count is a readout, a missing file is a warning, and
+  the amber is the same `#ffb84d` `stale` uses because it is the same kind of
+  statement — something is not what it looks.
 - **Tree row** (`.tree-row`): caret + colored `.dot` + ellipsized `.label` +
   right-aligned rate/count; `.selected` (blue bg + border), `.disabled` (opacity
   0.45), `.group` (lighter, 500). Probe dots are rotated squares (`.probe-dot`),
-  section dots are green squares (`.section-dot`), and zone/volume dots are teal
-  (`.zone-dot` round, `.volume-dot` square). Zone rows carry a leading
+  section dots are green squares (`.section-dot`), zone/volume dots are teal
+  (`.zone-dot` round, `.volume-dot` square), constraint dots violet
+  (`.constraint-dot`), and **splat dots amber** (`.splat-dot`, `#d0a88b`) — its
+  own hue for the same reason violet is the constraint family's: teal and violet
+  are analysis inputs, amber is the one entity kind that cannot change a number
+  (`gaussian_splats.md` §1.1). Splat rows carry the same
+  `.tree-row-toggle` checkbox (checked = the viewport draws the capture) and a
+  right-aligned **load-state badge** in the `.rate` slot — `41%` / `loading…`
+  while reading, `4.2M splats` once decoded, and `⚠ missing from assets/` /
+  `⚠ could not be decoded` / `⚠ no WebGL context` in `.rate.splat-error` amber.
+  The neutral states reuse `.rate`'s tabular numerals, so `41%` → `4.2M splats`
+  does not jitter the row. Zone rows carry a leading
   `.tree-row-toggle` **enabled checkbox** (checked = the zone contributes to the
   visualized marked set), reusing the camera enable-toggle control. Sections use the
   same checkbox for their per-heatmap enabled state.
@@ -296,6 +319,22 @@ this rig, check the asset's metalness before touching the lights.
   depth** (`8 + depth * 14` px, matching the row padding), marks where it will land.
   The line's absence is the "you can't drop here" cue — there is deliberately no
   separate rejection state. `.tree` therefore carries `position: relative`.
+- **Menu row, unavailable** (`.menu li.disabled`): dimmed to `#5a626e`, no hover
+  lift, `cursor: not-allowed`, with its `title` carrying the reason — the "+"
+  menu's **3D Gaussian Splat…** before a scene folder exists ("Load or save a
+  scene first."). Disabled rather than hidden, matching how the toolbar disables
+  Scale and the view menu disables **Selected**: an entry that vanishes teaches
+  nothing.
+- **`SplatPanel`** (`gaussian_splats.md` §7): Name (`.text-input`, placeholder =
+  the capture's filename, so the fallback label is visible before it is
+  overridden), a read-only **Source** row (`.splat-source` — monospace 11 px,
+  ellipsized, full path on hover), then a `.hint` "Registration" subhead over
+  Position / Rotation `Vec3Field`s and a **Scale** row holding one bare
+  `NumberInput`. Scale is deliberately *not* a vector field: a per-axis scale
+  shears the capture's Gaussians, so there is no third-of-a-row to offer. The
+  footer is a `.row.button-row` of two `.btn.secondary`s — **Flip 180° Z**
+  (`.active` + `aria-pressed` while the rotation is that preset) and **Reset
+  transform**.
 - **Select / text input** (`.select`, `.text-input`): match the numeric-input
   chrome (dark field, subtle border, 4 px radius) — the volume zone-reassign
   dropdown and the editable zone name.
@@ -336,23 +375,29 @@ this rig, check the asset's metalness before touching the lights.
   panel below it is empty, amber means it is populated but incomplete, so the two
   must never be styled alike.
 - **Modal** (`.modal-backdrop` + `.modal`): the app's only **blocking** surface, used by
-  the three scene-file dialogs (**Load scene**, **Save scene as**, **Overwrite scene
-  file?**; spec §14.7). A
+  the four file-referencing dialogs (**Load scene**, **Save scene as**, **Overwrite scene
+  file?**, **Add 3D Gaussian Splat**; spec §14.7). A
   `rgb(0 0 0 / 55%)` full-viewport backdrop centres a `.panel`-surfaced card, `520px`
   wide (`max-width: calc(100vw - 24px)`), with the `0 8px 24px rgb(0 0 0 / 45%)` lift
-  the anchored guard uses. **One width for both dialogs**, and it is set by the file
+  the anchored guard uses. **One width for all four**, and it is set by the file
   list: a scene named for what distinguishes it (`night-shift-96cam-build-out.json`) is
   the normal case, not the pathological one, and the earlier `420px` ellipsized those to
-  uselessness. Save scene as takes the same card so the two read as one surface when you
-  switch between them. Structure is a panel card's: an uppercase `.panel-title`, a
+  uselessness. Save scene as and Add 3D Gaussian Splat take the same card, so the set
+  reads as one surface when you switch between them — and a capture filename is no
+  shorter than a scene's. Structure is a panel card's: an uppercase `.panel-title`, a
   scrolling `.panel-body` (`max-height: 60vh`), and a `.row.button-row` footer, so a
   long file list scrolls while **Cancel** and the commit button stay put.
   - **When to use one.** Only when the choice is genuinely blocking *and* the viewport is
-    not the thing being judged. These dialogs qualify on both counts: they settle which
-    file on disk the scene is, and two of them can destroy work — unsaved edits, or a
-    file already sitting on disk. Dimming the scene you are about to replace is honest,
-    not obstructive. Everything else in this app stays a panel, a popover, or an anchored
-    guard.
+    not the thing being judged. These dialogs qualify on both counts: each settles a
+    reference to a **file on disk** — which scene is loaded, which file Save writes, or
+    which capture a splat row points at — and two of them can destroy work: unsaved
+    edits, or a file already sitting on disk. Dimming the scene you are about to replace
+    is honest, not obstructive. That shared question is also why **Add 3D Gaussian
+    Splat** is a modal card rather than a popover hanging off the "+" menu, despite
+    being reached from a menu: it reuses the `.scene-file-list` rows wholesale (name
+    left, size or the reason-it-cannot-be-added right, `.invalid` rows greyed and
+    unselectable), because it is the same kind of list. Everything else in this app
+    stays a panel, a popover, or an anchored guard.
   - **Stacking** (`.modal-backdrop.stacked`): only **Overwrite scene file?**, and only
     over the **Save scene as** dialog it was committed from. A stacked backdrop drops to
     `rgb(0 0 0 / 20%)` — the card beneath is already dimming the scene, and 55% over 55%
@@ -447,6 +492,13 @@ this rig, check the asset's metalness before touching the lights.
   non-essential.
 
 ## When adding UI
+
+**Amber is the splat family's own hue** (`#d0a88b` dot, `#ffb84d` failure badge),
+on the same reasoning as violet below, one step further: a splat row looks like
+every other hierarchy row — a name, a checkbox, a right-aligned badge — but it is
+the only kind that cannot change a coverage number
+(`gaussian_splats.md` §1.1). Warm against the analysis palette's cool teals and
+violets is the first place that distinction is legible.
 
 **Violet is the constraint family's own hue**, chosen so a constraint is never mistaken
 for a sampling volume (teal) in the hierarchy or the viewport. The two look alike — a

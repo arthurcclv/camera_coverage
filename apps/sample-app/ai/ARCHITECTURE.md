@@ -16,6 +16,24 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
       run off-thread in a Web Worker
 ```
 
+The viewport is **two stacked canvases**, not one (`gaussian_splats.md` §4):
+
+```
+.viewport
+  canvas.viewport-splats   WebGLRenderer  ← splat scene: SparkRenderer,
+      z-index 0                             one SplatMesh per row, the clip
+      pointer-events: none                  SplatEdit. Owns the background.
+  canvas.viewport-main     WebGPURenderer ← everything else, alpha: true,
+      (z-index auto)                        scene.background = null
+```
+
+Both renderers are handed **the same camera object** each frame, and the splat
+layer draws first. The two share no **depth** buffer, so captures are always
+behind every mesh and gizmo — which is what the eye menu's **Geometry** row
+exists to make usable. `SplatLayer` (`scene/splatLayer.ts`) is a part of the
+viewport, like the gizmo sets: App reaches it only through the `SceneViewState`
+snapshot.
+
 1. **React UI** — `App.tsx` owns *all* state and layout; `ui/*` components are
    presentational, driven by props and callbacks.
 2. **SceneView** (`scene/sceneView/`) — owns everything Three.js behind one small
@@ -180,6 +198,40 @@ default" — see DECISIONS.md).
   (`floorVolumeSize`, `sectionBoundsFromCenters`), plus `types.ts`
   (`SceneViewState`, `TransformChange`). The gizmo/overlay/viewport modules below
   are its internal parts — App never touches them directly.
+- `splats.ts` — the `SplatObject` entity and every **pure decision** around it
+  (`gaussian_splats.md` §2, §5.4, §6.2, §7): `splatLabel` (the one entity kind
+  whose blank-name fallback is its *filename*, not an ordinal), the accepted
+  capture extensions, `defaultSplat`, `identityRegistration` (fresh tuples per
+  call — `Vec3`/`Quat` are mutable, so a shared constant would alias every splat
+  in the scene), `splatBadge` (the row's load-state text), `splatDecodeFailure`
+  (which failure a capture that would not decode reports — a hand-referenced
+  PCSOGS `meta.json` names its `.sog` zip instead of badging bare), the
+  `FLIP_Z_ROTATION` preset, and `clipBandToSdfBox` — the section clip's world
+  band as an SDF box, a pure function of the band and the workspace AABB alone
+  with **no capture registration in it**. The `Registration` type
+  (position/rotation/uniform scale) is here too, and `SplatObject` extends it, so
+  the three fields that always travel together have one name without changing the
+  serialized shape. Tested in `test/splats.test.ts`.
+- `splatAssets.ts` — the **Add 3DGS** dialog's list decisions (§3.2):
+  `planSplatAssetList` (filter to the accepted extensions, list a PCSOGS
+  `meta.json` *with its reason* rather than dropping it, case-insensitive stable
+  order), `firstSelectableAsset`, `formatByteSize`. The same pure/impure split
+  `sceneFileList.ts` has from `sceneIO.ts`. Tested in `test/splatAssets.test.ts`.
+- `splatLayer.ts` — the impure half (§4): the second `WebGLRenderer` canvas, the
+  splat scene, the `SparkRenderer` (constructed once, on the first load), the
+  streamed load path, the **per-`src` decode cache** refcounted by referencing
+  rows, and the clip's single global `SplatEdit` — which it re-applies when a
+  decode lands, since Spark's `SplatEdit` class only arrives with the first load
+  and a scene *opened* with a section already clipping would otherwise draw its
+  captures uncut. Its `releaseAll()` is public because "the scene was replaced"
+  is not visible from here: two scene files in one folder share an asset loader,
+  so App's import path calls it (`SceneView.releaseSplats`). Each row gets an **anchor**
+  `Object3D` carrying its registration with the `SplatMesh` at identity beneath
+  it, which is what makes a still-loading or hidden capture a stable
+  `TransformControls` target and lets one decode serve several rows at different
+  transforms. Deliberately thin and **untested** — Spark cannot run under
+  `node --test`, so every judgement lives in the two modules above and this is
+  verified by running the app (§11).
 - `aggregateSpec.ts` — the app → SDK aggregation mapping (spec §3.3), in one
   place and in both directions: `buildAggregateSpec` turns zones/volumes/
   sections/probes into an `AggregateSpec` (volume → OBB region, zone → group,
@@ -380,13 +432,19 @@ default" — see DECISIONS.md).
   write the absence of it: a null cell grid resets the texture to the 1×1
   transparent no-data plane (§13.4) rather than leaving what was there.
 - `sceneTree.ts` — `SceneNode` union (camera/probe/section + zone/volume +
-  constraintGroup/constraint) + `buildSceneTree` / `flattenVisible`, the
+  constraintGroup/constraint + splat) + `buildSceneTree` / `flattenVisible`, the
   `nodeIdFor*` / `*IdForNode` namespaced id pair per kind, and
   `nodeIdForSelection` — the selection → highlighted-row mapping, an exhaustive
   `Record` over `Selection['kind']` (it replaced a ternary chain ending in `: null`,
   which left the two constraint kinds with no node and so no highlight). Zone nodes
   are both selectable and expandable (their volume children); `flattenVisible`
   treats any node with a non-empty `childIds` as expandable, not just groups.
+  Two more row decisions live here rather than in the component: `nodeSelection`
+  (row → what clicking it selects, and what its context menu addresses) and
+  `nodeEnabled` (row → whether it dims, through an `EnabledLookup` the hierarchy
+  builds from the arrays and maps it already has). Both are exhaustive `Record`s
+  over the kind union; `nodeEnabled` replaced a six-deep ternary chain ending in
+  a bare `: true`, which every kind added after `splat` would have inherited.
 - `reorder.ts` — pure drag-reorder logic (spec §5.5.1). Two halves: `siblingRows` /
   `insertionTargetAt` turn a pointer Y plus measured row extents into "insert before
   this sibling" (or null → illegal drop), and `moveBefore` / `moveVolumeBefore` do
@@ -759,21 +817,31 @@ the two sessions are mutually exclusive rather than each reserving its own.
 ## Selection model
 
 A single unified selection: `Selection = { kind: 'camera' | 'probe' | 'section' |
-'zone' | 'volume' | 'constraintGroup' | 'constraint', id } | null`
+'zone' | 'volume' | 'constraintGroup' | 'constraint' | 'splat', id } | null`
 (`scene/viewportSelection.ts`). Every kind highlights its hierarchy row, via
 `sceneTree.ts`'s `nodeIdForSelection`. A viewport click
 picks the nearest hit across cameras, probes, and **volumes** (`SceneView`
 raycasts each set in its three-set pickable registry, arbitration by the pure
 `scene/sceneView/pick.ts` `nearestHit`, then the click-vs-drag decision
 `selectionAfterClick`) — sections and zones have no pickable body, so they're
-selected from their hierarchy rows; drag-tail clicks (> 5 px travel) are ignored.
+selected from their hierarchy rows — as are **splats**, whose body is on the other
+canvas and deliberately unreachable (`pointer-events: none` plus absence from the
+picked scene): a capture contributes no triangles, so a camera "placed" on a
+captured wall would be reported as seeing through the surface it sits on
+(`gaussian_splats.md` §1.1, §6.5). Drag-tail clicks (> 5 px travel) are ignored.
 `SceneView` emits the resolved selection to App via `onSelect`. Exactly one
 `TransformControls` gizmo is attached at a time (a four-set attach registry keyed
 by selection kind maps the selection to the set that owns its target); selecting a
 probe forces translate-only, selecting a section forces translate-only **and**
 constrains the visible handle to its collapse axis, selecting a **volume** enables
 the volume-only **scale** mode (translate/rotate/scale), and selecting a **zone**
-attaches no gizmo (it's a container, absent from the attach registry). Which zones
+attaches no gizmo (it's a container, absent from the attach registry), and
+selecting a **splat** attaches the gizmo to its anchor in the *splat* scene —
+Move/Rotate only, since a per-axis scale drag would shear the capture's
+Gaussians, and its scale is one uniform number in `SplatPanel` instead. A
+disabled splat is the one exception to "selection wins" (spec §2.4.3): it stays
+hidden while selected, though its gizmo still attaches, because re-drawing a
+capture the user just hid by clicking its row would read as a broken checkbox. Which zones
 are **enabled** (contribute to the visualized marked set) is decoupled from
 selection — driven by a per-zone **enabled checkbox** in the hierarchy row
 (independent per zone, like cameras/sections), not by selecting a zone.

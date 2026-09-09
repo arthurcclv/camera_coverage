@@ -19,8 +19,11 @@
  * edit marks stale and sampling-dirty; a probe or section edit, any rename,
  * adding an empty zone, and deleting or duplicating an empty zone mark neither
  * (§12.5, §13.4). A hierarchy **reorder** (§5.5.1) marks neither either — array
- * order is display-only. `stale` only latches once a run has happened
- * (`hasRunOnce`); `samplingDirty` latches regardless.
+ * order is display-only. **No splat action marks either flag**, ever: a capture
+ * contributes no triangles, no bounds and no voxels, so there is nothing for a
+ * recompute to produce differently (`gaussian_splats.md` §1.1).
+ * `stale` only latches once a run has happened (`hasRunOnce`); `samplingDirty`
+ * latches regardless.
  */
 import type { CameraConfig, Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 import type { SceneCamera } from '../cameras/camera.ts';
@@ -35,6 +38,7 @@ import {
   type ConstraintGroup,
   type ConstraintKind,
 } from '../placement/region.ts';
+import { defaultSplat, FLIP_Z_ROTATION, identityRegistration, type SplatObject } from './splats.ts';
 import type { Scene } from './sceneModel.ts';
 import type { Selection } from './viewportSelection.ts';
 import {
@@ -43,6 +47,7 @@ import {
   duplicateConstraintGroup,
   duplicateProbe,
   duplicateSection,
+  duplicateSplat,
   duplicateVolume,
   duplicateZone,
   nextFreeId,
@@ -75,7 +80,16 @@ function pruneTargetZones(
 }
 
 /** Entities addressable by a delete/duplicate action. */
-export type EntityKind = 'camera' | 'probe' | 'section' | 'zone' | 'volume' | 'constraintGroup' | 'constraint';
+export type EntityKind =
+  | 'camera'
+  | 'probe'
+  | 'section'
+  | 'zone'
+  | 'volume'
+  | 'constraintGroup'
+  | 'constraint'
+  /** A splat capture (`gaussian_splats.md` §6.3, §6.4). */
+  | 'splat';
 
 /** The persisted scene-document fields (the {@link Scene} minus its geometry). */
 export type SceneDoc = Pick<
@@ -89,6 +103,7 @@ export type SceneDoc = Pick<
   | 'useZones'
   | 'constraintGroups'
   | 'constraints'
+  | 'splats'
 >;
 
 /**
@@ -121,6 +136,12 @@ export type SceneAction =
    */
   | { type: 'addConstraint'; kind: ConstraintKind; position: Vec3; points?: Vec3[] }
   | { type: 'addVolume'; position: Vec3 }
+  /**
+   * New splat referencing a capture already in the scene folder's `assets/`
+   * (`gaussian_splats.md` §3.2). Committed by the **Add 3DGS** dialog, which is
+   * the only "+" entry that opens one — the app never writes into `assets/`.
+   */
+  | { type: 'addSplat'; src: string }
   | { type: 'deleteEntity'; kind: EntityKind; id: string }
   | { type: 'duplicateEntity'; kind: EntityKind; id: string }
   /** Hierarchy drag-reorder (§5.5.1): move `id` before sibling `beforeId`, or last when null. */
@@ -141,6 +162,14 @@ export type SceneAction =
   | { type: 'changeProbe'; id: string; position: Vec3 }
   | { type: 'changeSection'; id: string; patch: Partial<Section> }
   | { type: 'changeVolume'; id: string; patch: Partial<SamplingVolume> }
+  /**
+   * Edit a splat's registration (`gaussian_splats.md` §7). Deliberately **not**
+   * routed through anything that marks the result stale: a splat is never an
+   * analysis input (§1.1).
+   */
+  | { type: 'changeSplat'; id: string; patch: Partial<SplatObject> }
+  /** Reset a splat's registration to identity, or apply the Flip 180° Z preset (§7). */
+  | { type: 'splatPreset'; id: string; preset: 'reset' | 'flipZ' }
   | { type: 'changeConstraintGroup'; id: string; patch: Partial<ConstraintGroup> }
   | { type: 'changeConstraint'; id: string; patch: Partial<CameraConstraint> }
   /** Move one polyline vertex (`camera_placement.md` §6.2). */
@@ -173,11 +202,15 @@ export type SceneAction =
     }
   | {
       type: 'renameEntity';
-      kind: 'camera' | 'probe' | 'section' | 'zone' | 'constraintGroup' | 'constraint';
+      kind: 'camera' | 'probe' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat';
       id: string;
       name: string;
     }
-  | { type: 'toggleEnabled'; kind: 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint'; id: string }
+  | {
+      type: 'toggleEnabled';
+      kind: 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat';
+      id: string;
+    }
   | { type: 'toggleSectionClip'; id: string }
   | { type: 'toggleCollapse'; id: string }
   | { type: 'toggleUseZones'; value: boolean }
@@ -201,6 +234,7 @@ export function initSceneState(scene: Scene): SceneDocState {
     useZones: scene.useZones,
     constraintGroups: scene.constraintGroups,
     constraints: scene.constraints,
+    splats: scene.splats,
     selection: scene.cameras[0] ? { kind: 'camera', id: scene.cameras[0].id } : null,
     collapsedIds: new Set(),
     stale: false,
@@ -395,6 +429,20 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
       return { ...state, zones, volumes: [...state.volumes, volume], selection: { kind: 'volume', id }, ...samplingInput(state) };
     }
 
+    case 'addSplat': {
+      const id = nextFreeId('splat', state.splats.map((s) => s.id));
+      // A capture contributes no triangles, no bounds and no voxels
+      // (`gaussian_splats.md` §1.1), so — like a constraint and deliberately
+      // unlike a volume — adding one marks nothing stale. It spawns at an
+      // identity transform and auto-selects, so the `SplatPanel` is open on it
+      // ready to register (§3.2).
+      return {
+        ...state,
+        splats: [...state.splats, defaultSplat(id, action.src)],
+        selection: { kind: 'splat', id },
+      };
+    }
+
     case 'deleteEntity': {
       const { kind, id } = action;
       const selection = selectionAfterDelete(state.selection, kind, id);
@@ -433,6 +481,12 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
             selection: selection?.kind === 'constraint' && gone.has(selection.id) ? null : selection,
           };
         }
+        case 'splat':
+          // The mesh disposal, the in-flight load's cancellation, and the
+          // decode-cache release (only when this was the last row on that
+          // `src`) are the splat layer's side effects, driven off the array
+          // shrinking (`gaussian_splats.md` §3.3, §6.3). Never marks stale.
+          return { ...state, splats: state.splats.filter((s) => s.id !== id), selection };
         case 'zone': {
           // Removing a zone removes its volumes too (§4); it is a coverage input
           // only when it actually had volumes (an empty zone marks nothing).
@@ -497,6 +551,13 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
             selection: { kind: 'constraintGroup', id: copy.group.id },
           };
         }
+        case 'splat': {
+          const copy = duplicateSplat(state.splats, id);
+          if (!copy) return state;
+          // The copy carries the same `src`, so it **shares the original's
+          // decode** (`gaussian_splats.md` §3.3, §6.4) and never marks stale.
+          return { ...state, splats: [...state.splats, copy], selection: { kind: 'splat', id: copy.id } };
+        }
         case 'zone': {
           const copy = duplicateZone(state.zones, state.volumes, id);
           if (!copy) return state;
@@ -536,6 +597,11 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
           return { ...state, constraintGroups: moveBefore(state.constraintGroups, id, beforeId) };
         case 'constraint':
           return { ...state, constraints: moveConstraintBefore(state.constraints, id, beforeId) };
+        case 'splat':
+          // Doubly presentation-only: Spark sorts every Gaussian globally by
+          // view depth across all captures, so row order does not even affect
+          // draw order (`gaussian_splats.md` §6.6).
+          return { ...state, splats: moveBefore(state.splats, id, beforeId) };
       }
       return state;
     }
@@ -579,6 +645,29 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
         ...state,
         volumes: state.volumes.map((v) => (v.id === action.id ? { ...v, ...action.patch } : v)),
         ...samplingInput(state),
+      };
+
+    case 'changeSplat':
+      // No `cameraInput`, no `samplingInput`: **no splat action ever marks the
+      // result stale** (`gaussian_splats.md` §1.1, spec §8.1).
+      return {
+        ...state,
+        splats: state.splats.map((s) => (s.id === action.id ? { ...s, ...action.patch } : s)),
+      };
+
+    case 'splatPreset':
+      // Both presets **replace** the rotation rather than composing with it, so
+      // pressing Flip 180° Z twice is idempotent instead of drifting back to
+      // identity (`gaussian_splats.md` §7).
+      return {
+        ...state,
+        splats: state.splats.map((s) =>
+          s.id !== action.id
+            ? s
+            : action.preset === 'flipZ'
+              ? { ...s, rotation: [...FLIP_Z_ROTATION] as Quat }
+              : { ...s, ...identityRegistration() },
+        ),
       };
 
     case 'changeConstraintGroup':
@@ -704,6 +793,10 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
           };
         case 'constraint':
           return { ...state, constraints: state.constraints.map((c) => (c.id === id ? { ...c, name } : c)) };
+        case 'splat':
+          // A blank name reads back as the capture's filename, not `Splat N`
+          // (`gaussian_splats.md` §2.3).
+          return { ...state, splats: state.splats.map((s) => (s.id === id ? { ...s, name } : s)) };
       }
       return state;
     }
@@ -741,6 +834,11 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
             ...state,
             constraints: state.constraints.map((c) => (c.id === id ? { ...c, enabled: !c.enabled } : c)),
           };
+        case 'splat':
+          // Purely whether the viewport draws it (`gaussian_splats.md` §5.1).
+          // The capture stays decoded and resident, so re-ticking is instant —
+          // hide is not unload, which is the whole point of a checkbox.
+          return { ...state, splats: state.splats.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)) };
       }
       return state;
     }
@@ -807,6 +905,17 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
           });
           return { ...state, constraints, ...reclamp(state, constraints, change.id) };
         }
+        case 'splat':
+          // A gizmo drag writes position + rotation only: scale is a single
+          // uniform number edited in the panel, because the per-axis scale
+          // gizmo would shear the capture's Gaussians (`gaussian_splats.md`
+          // §2.1, §7). Never marks stale.
+          return {
+            ...state,
+            splats: state.splats.map((s) =>
+              s.id === change.id ? { ...s, position: change.position, rotation: change.rotation } : s,
+            ),
+          };
         case 'constraintVertex': {
           const constraints = mapPolyline(state.constraints, change.id, (points) =>
             points.map((p, i) => (i === change.vertex ? ([...change.position] as Vec3) : p)),

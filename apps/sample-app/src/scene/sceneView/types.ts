@@ -34,4 +34,11 @@ export type TransformChange =
    */
   | { kind: 'constraint'; id: string; position: Vec3; rotation?: Quat; size?: [number, number] }
   /** One polyline vertex dragged by its handle (`camera_placement.md` §6.2). */
-  | { kind: 'constraintVertex'; id: string; vertex: number; position: Vec3 };
+  | { kind: 'constraintVertex'; id: string; vertex: number; position: Vec3 }
+  /**
+   * A splat capture re-registered by its gizmo (`gaussian_splats.md` §7).
+   * Position and rotation only: a splat's scale is a **single uniform number**
+   * edited in its panel, because the per-axis scale gizmo would shear the
+   * capture's Gaussians (§2.1).
+   */
+  | { kind: 'splat'; id: string; position: Vec3; rotation: Quat };

@@ -7,8 +7,10 @@
  * adding a future entity type means adding a node variant + its row-content
  * component, not touching the shell.
  *
- * The panel header carries the "+" add-entity menu; right-clicking a camera,
- * probe, section, zone, or volume row opens a Duplicate/Delete context menu.
+ * The panel header carries the "+" add-entity menu — including the one entry
+ * that opens a dialog instead of spawning an entity, **3D Gaussian Splat…**
+ * (`gaussian_splats.md` §3.2); right-clicking a camera, probe, section, zone,
+ * volume, constraint, or splat row opens a Duplicate/Delete context menu.
  *
  * Rows also **drag to reorder within their own group** (spec §5.5.1) via
  * `useDragReorder` below. That hook owns only the pointer plumbing — threshold,
@@ -21,6 +23,7 @@ import type { SceneCamera } from '../cameras/camera.ts';
 import type { Probe } from '../scene/probeVisibility.ts';
 import { averageDisplayValue, type Section, type SectionCellGrid } from '../scene/sectionHeatmap.ts';
 import type { SamplingVolume, Zone, ZoneSummary } from '../scene/samplingVolumes.ts';
+import { splatBadge, type SplatLoadState, type SplatObject } from '../scene/splats.ts';
 import type { Selection } from '../scene/viewportSelection.ts';
 import {
   primitiveMeasure,
@@ -31,8 +34,10 @@ import {
 import {
   buildSceneTree,
   flattenVisible,
+  nodeEnabled,
   nodeIdForSelection,
   nodeSelection,
+  type EnabledLookup,
   type RenderRow,
   type SceneNode,
 } from '../scene/sceneTree.ts';
@@ -59,6 +64,14 @@ export interface SceneHierarchyProps extends EntityMenuHandlers {
   /** Camera-placement groups (`camera_placement.md` §7). */
   constraintGroups: ConstraintGroup[];
   constraints: CameraConstraint[];
+  /** 3D Gaussian Splat captures (`gaussian_splats.md` §2.2). */
+  splats: SplatObject[];
+  /**
+   * Per-splat load state (`gaussian_splats.md` §6.2) — derived side state held
+   * beside the scene, like the retained per-run probe/section data, never part
+   * of the entity and never serialized.
+   */
+  splatLoadStates: ReadonlyMap<string, SplatLoadState>;
   /** Unified selection (spec §5.5); drives the highlighted node. */
   selection: Selection;
   flaggedIds: Set<string>;
@@ -88,12 +101,20 @@ export interface SceneHierarchyProps extends EntityMenuHandlers {
    * the two happens is App's call, not the tree's.
    */
   onAddConstraint(kind: ConstraintKind): void;
+  /**
+   * Open the **Add 3DGS** dialog (`gaussian_splats.md` §3.2) — the one "+" entry
+   * that opens a dialog rather than spawning an entity, and the one that is not
+   * always enabled: it needs a scene folder to read `assets/` from.
+   */
+  onAddSplat(): void;
+  /** Why **3D Gaussian Splat…** is disabled, or null when it is available (§3.2). */
+  addSplatBlocker: string | null;
   /** Drag-reorder within a group (§5.5.1): move `id` before `beforeId`, or last when null. */
   onReorder(kind: ReorderableKind, id: string, beforeId: string | null): void;
 }
 
 /** Kinds whose row carries an enabled checkbox (spec §5.5, `camera_placement.md` §7). */
-type ToggleableKind = 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint';
+type ToggleableKind = 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat';
 
 interface ContextMenuState {
   x: number;
@@ -153,6 +174,8 @@ function reorderableTarget(node: SceneNode): { kind: ReorderableKind; entityId: 
       return { kind: 'constraintGroup', entityId: node.groupId };
     case 'constraint':
       return { kind: 'constraint', entityId: node.constraintId };
+    case 'splat':
+      return { kind: 'splat', entityId: node.splatId };
     default:
       return null;
   }
@@ -399,10 +422,10 @@ function placeOutward(
 
 export function SceneHierarchy(props: SceneHierarchyProps) {
   const { cameras, probes, sections, zones, volumes, selection, collapsedIds } = props;
-  const { constraintGroups, constraints } = props;
+  const { constraintGroups, constraints, splats } = props;
   const nodes = useMemo(
-    () => buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints),
-    [cameras, probes, sections, zones, volumes, constraintGroups, constraints],
+    () => buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats),
+    [cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats],
   );
   const rows = useMemo(() => flattenVisible(nodes, collapsedIds), [nodes, collapsedIds]);
   const rateById = useMemo(
@@ -413,6 +436,26 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
   const constraintById = useMemo(
     () => new Map(props.constraints.map((c) => [c.id, c])),
     [props.constraints],
+  );
+  const splatById = useMemo(() => new Map(splats.map((s) => [s.id, s])), [splats]);
+
+  /**
+   * Which entities are ticked, per kind (spec §5.4, §7.3) — one exhaustive
+   * lookup for every row rather than a per-row `find` chain. Probes and zones'
+   * own volumes have no checkbox of their own, so they never dim.
+   */
+  const enabledLookup = useMemo<EnabledLookup>(
+    () => ({
+      camera: (id) => cameras.find((c) => c.id === id)?.enabled ?? true,
+      probe: () => true,
+      section: (id) => sections.find((s) => s.id === id)?.enabled ?? true,
+      zone: (id) => zones.find((z) => z.id === id)?.enabled ?? true,
+      volume: () => true,
+      constraintGroup: (id) => constraintGroups.find((g) => g.id === id)?.enabled ?? true,
+      constraint: (id) => constraintById.get(id)?.enabled ?? true,
+      splat: (id) => splatById.get(id)?.enabled ?? true,
+    }),
+    [cameras, sections, zones, constraintGroups, constraintById, splatById],
   );
 
   const selectedNodeId = nodeIdForSelection(selection);
@@ -578,6 +621,23 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
                   </ul>
                 )}
               </li>
+              {/* The one entry that opens a dialog, and the one that is not
+                  always enabled: it lists what is already in the scene folder's
+                  `assets/`, so it needs a folder (`gaussian_splats.md` §3.2). */}
+              <li
+                role="menuitem"
+                className={props.addSplatBlocker ? 'disabled' : undefined}
+                aria-disabled={props.addSplatBlocker ? true : undefined}
+                title={props.addSplatBlocker ?? undefined}
+                onPointerEnter={closeSubmenu}
+                onClick={() => {
+                  if (props.addSplatBlocker) return;
+                  setAddMenu(null);
+                  props.onAddSplat();
+                }}
+              >
+                3D Gaussian Splat…
+              </li>
             </ul>
           )}
         </div>
@@ -596,12 +656,11 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             probeSeenCounts={props.probeSeenCounts}
             sectionCellGrids={props.sectionCellGrids}
             zoneSummaries={props.zoneSummaries}
-            cameras={cameras}
+            enabled={enabledLookup}
             sections={sections}
-            zones={zones}
             volumeById={volumeById}
-            constraintGroups={props.constraintGroups}
             constraintById={constraintById}
+            splatLoadStates={props.splatLoadStates}
             onSelect={props.onSelect}
             onToggleEnabled={props.onToggleEnabled}
             onToggleCollapse={props.onToggleCollapse}
@@ -660,16 +719,16 @@ interface TreeRowProps {
   dragging: boolean;
   onPointerDown(ev: React.PointerEvent, node: SceneNode): void;
   rateById: Map<string, number>;
+  /** Per-kind `enabled` lookup for the row's dimming (spec §5.4, §7.3). */
+  enabled: EnabledLookup;
   flaggedIds: Set<string>;
   probeSeenCounts: Map<string, number | null>;
   sectionCellGrids: Map<string, SectionCellGrid | null>;
   zoneSummaries: Map<string, ZoneSummary> | null;
-  cameras: SceneCamera[];
   sections: Section[];
-  zones: Zone[];
   volumeById: Map<string, SamplingVolume>;
-  constraintGroups: ConstraintGroup[];
   constraintById: Map<string, CameraConstraint>;
+  splatLoadStates: ReadonlyMap<string, SplatLoadState>;
   onSelect(selection: Selection): void;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
   onToggleCollapse(nodeId: string): void;
@@ -681,20 +740,10 @@ function TreeRow(props: TreeRowProps) {
   const { row, selected } = props;
   const { node, depth, hasChildren, collapsed } = row;
   const isGroup = node.kind === 'group';
-  // Enabled/disabled dims the row (spec §5.4, §7.3): cameras/sections/zones each
-  // via their own entity `enabled` flag.
-  const enabled =
-    node.kind === 'camera'
-      ? props.cameras.find((c) => c.id === node.cameraId)?.enabled ?? true
-      : node.kind === 'section'
-        ? props.sections.find((s) => s.id === node.sectionId)?.enabled ?? true
-        : node.kind === 'zone'
-          ? props.zones.find((z) => z.id === node.zoneId)?.enabled ?? true
-          : node.kind === 'constraintGroup'
-            ? props.constraintGroups.find((g) => g.id === node.groupId)?.enabled ?? true
-            : node.kind === 'constraint'
-              ? props.constraintById.get(node.constraintId)?.enabled ?? true
-              : true;
+  // Enabled/disabled dims the row (spec §5.4, §7.3): each kind via its own
+  // entity `enabled` flag, through the tree's exhaustive lookup rather than a
+  // ternary chain ending in a bare `true` (`ai/CONVENTIONS.md`).
+  const enabled = nodeEnabled(node, props.enabled);
 
   const handleClick = () => {
     // A group header only expands/collapses; every other kind selects. A zone
@@ -712,14 +761,14 @@ function TreeRow(props: TreeRowProps) {
   };
 
   const handleContextMenu = (ev: React.MouseEvent) => {
-    if (node.kind === 'camera') props.onContextMenu(ev, 'camera', node.cameraId);
-    else if (node.kind === 'probe') props.onContextMenu(ev, 'probe', node.probeId);
-    else if (node.kind === 'section') props.onContextMenu(ev, 'section', node.sectionId);
-    else if (node.kind === 'zone') props.onContextMenu(ev, 'zone', node.zoneId);
-    else if (node.kind === 'volume') props.onContextMenu(ev, 'volume', node.volumeId);
-    else if (node.kind === 'constraintGroup') props.onContextMenu(ev, 'constraintGroup', node.groupId);
-    else if (node.kind === 'constraint') props.onContextMenu(ev, 'constraint', node.constraintId);
-    // Group headers have no context menu (spec §5.5).
+    // The kind→id mapping is `nodeSelection`'s, not a second cascade of its own:
+    // the `DeletableKind`s are exactly the selectable kinds, and an if/else
+    // chain here is the very shape that once routed `constraint` into
+    // `onDeleteVolume` (`ui/entityMenu.ts`, `ai/CONVENTIONS.md`). Group headers
+    // select nothing and have no context menu (spec §5.5).
+    const target = nodeSelection(node);
+    if (target === null) return;
+    props.onContextMenu(ev, target.kind, target.id);
   };
 
   const className = [
@@ -796,6 +845,14 @@ function TreeRow(props: TreeRowProps) {
           node={node}
           constraint={props.constraintById.get(node.constraintId)}
           enabled={enabled}
+          onToggleEnabled={props.onToggleEnabled}
+        />
+      )}
+      {node.kind === 'splat' && (
+        <SplatRowContent
+          node={node}
+          enabled={enabled}
+          loadState={props.splatLoadStates.get(node.splatId)}
           onToggleEnabled={props.onToggleEnabled}
         />
       )}
@@ -1017,6 +1074,47 @@ function ConstraintRowContent({
       <span className="dot constraint-dot" />
       <span className="label">{node.label}</span>
       <span className="rate">{detail}</span>
+    </>
+  );
+}
+
+/**
+ * A splat row (`gaussian_splats.md` §6.2): its enabled checkbox and a badge
+ * reflecting **load state** — progress while reading, the splat count once
+ * decoded, or the reason it is not on screen.
+ *
+ * The badge is the only place a capture's loading is surfaced, and nothing in
+ * the app blocks on it. `loaded` means *decoded*: Spark's sort runs in a worker,
+ * so the capture appears a few frames later, and there is deliberately no state
+ * between the two (§4.4).
+ */
+function SplatRowContent({
+  node,
+  enabled,
+  loadState,
+  onToggleEnabled,
+}: {
+  node: Extract<SceneNode, { kind: 'splat' }>;
+  enabled: boolean;
+  loadState: SplatLoadState | undefined;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
+}) {
+  const badge = splatBadge(loadState);
+  const failed = loadState?.status === 'error';
+  return (
+    <>
+      <input
+        type="checkbox"
+        className="tree-row-toggle"
+        checked={enabled}
+        title={enabled ? 'Hide capture' : 'Show capture'}
+        aria-label={enabled ? 'Hide capture' : 'Show capture'}
+        onClick={(e) => e.stopPropagation()}
+        onChange={() => onToggleEnabled('splat', node.splatId)}
+      />
+      <span className="dot splat-dot" />
+      <span className="label">{node.label}</span>
+      {badge && <span className={failed ? 'rate splat-error' : 'rate'}>{badge}</span>}
     </>
   );
 }

@@ -15,6 +15,7 @@
  * the dialogs, and the reads/writes in `sceneIO.ts` (see `ai/CONVENTIONS.md`).
  */
 import type { GeometryObject } from './geometryModel.ts';
+import type { SplatObject } from './splats.ts';
 
 /** How long the transient "Saved <file>" status stays up (§14.7). */
 export const SAVED_STATUS_MS = 2000;
@@ -138,15 +139,25 @@ function count(n: number, noun: string): string {
 
 /**
  * The referenced-asset paths a cross-folder Save As… must copy alongside the
- * scene file (§14.5) — every `gltf` object's `src`, in scene order, each once.
+ * scene file (§14.5) — every `gltf` object's `src` **and every splat's `src`**
+ * (`gaussian_splats.md` §8), in scene order, each once and **deduplicated across
+ * the two**: a capture referenced by two splat rows (§3.3) copies once.
+ *
  * Only *referenced* paths: unrelated files under the source's `assets/` are not
- * copied, so a cross-folder Save As… also prunes.
+ * copied, so a cross-folder Save As… also prunes. A splat whose file is absent
+ * still **aborts** the copy (§14.8) — survivable on import, but a destination
+ * that is supposed to hold a complete scene would silently not.
  */
-export function planAssetCopy(geometry: readonly GeometryObject[]): string[] {
+export function planAssetCopy(
+  geometry: readonly GeometryObject[],
+  splats: readonly SplatObject[],
+): string[] {
   const srcs: string[] = [];
-  for (const obj of geometry) {
-    if (obj.kind === 'gltf' && !srcs.includes(obj.src)) srcs.push(obj.src);
-  }
+  const add = (src: string) => {
+    if (!srcs.includes(src)) srcs.push(src);
+  };
+  for (const obj of geometry) if (obj.kind === 'gltf') add(obj.src);
+  for (const splat of splats) add(splat.src);
   return srcs;
 }
 

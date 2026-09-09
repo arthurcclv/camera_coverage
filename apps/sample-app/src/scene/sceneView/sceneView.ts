@@ -51,6 +51,8 @@ import {
   type Selection,
 } from '../viewportSelection.ts';
 import { drawClickAction } from '../polylineDraw.ts';
+import { clipBandToSdfBox, type SplatLoadState, type SplatObject } from '../splats.ts';
+import type { SplatAssetLoader } from '../splatLayer.ts';
 import type { SamplingVolume } from '../samplingVolumes.ts';
 import type { SceneCamera } from '../../cameras/camera.ts';
 import type { Probe } from '../probeVisibility.ts';
@@ -68,7 +70,8 @@ export type { TransformChange } from './types.ts';
 
 /**
  * One immutable snapshot of everything the scene reflects (spec §2.4, §5, §9,
- * §12.4, §13). App builds this from its state and passes it to `sync`; every
+ * §12.4, §13; `gaussian_splats.md` §4, §5). App builds this from its state and
+ * passes it to `sync`; every
  * field must be referentially stable between genuine changes (React state or
  * `useMemo`) so SceneView's per-field diff mirrors the old effect dependencies.
  */
@@ -153,6 +156,24 @@ export interface SceneViewState {
   draftPolyline: readonly Vec3[];
   /** Where each camera the Apply plan moves stands today → where it goes (§5.2). */
   placementMoves: readonly { from: Vec3; to: Vec3 }[];
+  /** The scene's 3D Gaussian Splat captures (`gaussian_splats.md` §2.1). */
+  splats: readonly SplatObject[];
+  /**
+   * Resolves a capture's `src` to its bytes, or null before any Load/Save
+   * (`gaussian_splats.md` §3.2, §4.4). `useCallback` in App, keyed on the save
+   * target, so a scene load re-points every pending load at the new folder.
+   */
+  splatLoader: SplatAssetLoader | null;
+  /** The eye menu's **Splats** master toggle (`gaussian_splats.md` §5.2). */
+  splatsVisible: boolean;
+  /**
+   * The eye menu's **Geometry** toggle (`gaussian_splats.md` §5.3, `spec.md`
+   * §2.4). Hides the **rendered** group only: the merged collision `SceneMesh`,
+   * the workspace AABB and every coverage result are untouched, so it never
+   * marks the result stale. It is the row that makes a capture visible at all,
+   * since splats draw behind opaque double-sided geometry (§4.1).
+   */
+  geometryVisible: boolean;
 }
 
 type SelectionKind = NonNullable<Selection>['kind'];
@@ -199,6 +220,8 @@ export class SceneView {
   private drawHoverHandler: ((point: Vec3 | null) => void) | null = null;
   /** A draw-mode double-click: commit what is drawn (§6.2). */
   private drawCommitHandler: (() => void) | null = null;
+  /** Per-row splat load state, forwarded from the splat layer (§6.2). */
+  private splatLoadHandler: ((states: ReadonlyMap<string, SplatLoadState>) => void) | null = null;
 
   /**
    * The plane the armed draw mode's rubber band runs on (§6.2, `hoverPlane.ts`).
@@ -262,6 +285,13 @@ export class SceneView {
       section: this.sectionGizmos,
       volume: this.volumeGizmos,
       constraint: this.constraintGizmos,
+      // A splat's attach target is its anchor in the *splat* scene, on the other
+      // canvas. That works because both `three` builds share one
+      // `three.core.js`, so there is exactly one `Object3D` class, and because
+      // the splat scene is rendered every frame — which keeps the anchor's
+      // `matrixWorld` live even while the capture is hidden
+      // (`gaussian_splats.md` §4.3, §5.1).
+      splat: viewport.splats,
     };
 
     // A genuine click selects the picked gizmo (or deselects on a miss); the click
@@ -390,6 +420,17 @@ export class SceneView {
   }
 
   /**
+   * Register the callback for a change in any splat row's load state
+   * (`gaussian_splats.md` §6.2) — progress, splat count, or a failure. Derived
+   * side state: App holds it beside the scene and renders it as a row badge;
+   * nothing in the app blocks on it.
+   */
+  onSplatLoadStates(handler: (states: ReadonlyMap<string, SplatLoadState>) => void): void {
+    this.splatLoadHandler = handler;
+    this.viewport.splats.onLoadStates((states) => this.splatLoadHandler?.(states));
+  }
+
+  /**
    * Register the callback for a double-click commit (§6.2). The keyboard's
    * **Enter** commit is App's own — it never reaches the viewport — so this is
    * the pointer half of the same decision.
@@ -401,6 +442,20 @@ export class SceneView {
   /** Empty the coverage overlay outright, with no run following (spec §14.4). */
   clearCoverage(): void {
     this.overlay.clear();
+  }
+
+  /**
+   * Release every decoded capture and cancel every in-flight load, for a scene
+   * **replacement** (`spec.md` §14.4, `gaussian_splats.md` §3.3, §8).
+   *
+   * App's business, not the layer's: the layer drops its cache by itself when
+   * the *folder* changes, but two scene files in one folder share a loader while
+   * meaning entirely different scenes — and `assets/site.spz` in the incoming
+   * one is not necessarily the bytes the outgoing one decoded. The next `sync`
+   * re-loads whatever the new scene references.
+   */
+  releaseSplats(): void {
+    this.viewport.splats.releaseAll();
   }
 
   /**
@@ -448,6 +503,35 @@ export class SceneView {
     // (which rebuilds the ClippingGroup) changed. -------------------------------
     if (!prev || prev.clipBand !== next.clipBand || prev.room !== next.room) {
       setGeometryClippingPlanes(next.room, next.clipBand ? clipBandPlanes(next.clipBand) : []);
+    }
+
+    // --- geometry layer visibility (`spec.md` §2.4, `gaussian_splats.md` §5.3):
+    // drawing only. Re-applied on a room swap, since the incoming build's group
+    // is freshly created and defaults to visible. -----------------------------
+    if (!prev || prev.geometryVisible !== next.geometryVisible || prev.room !== next.room) {
+      next.room.group.visible = next.geometryVisible;
+    }
+
+    // --- the splat layer (`gaussian_splats.md` §4, §5). The clip band becomes a
+    // world-space SDF box here rather than in the layer: the mapping is a pure,
+    // tested function of the band and the workspace AABB alone, and no capture's
+    // registration enters it (§5.4). -----------------------------------------
+    if (
+      !prev ||
+      prev.splats !== next.splats ||
+      prev.splatLoader !== next.splatLoader ||
+      prev.splatsVisible !== next.splatsVisible ||
+      prev.clipBand !== next.clipBand ||
+      prev.room !== next.room
+    ) {
+      this.viewport.splats.sync({
+        splats: next.splats,
+        loader: next.splatLoader,
+        clip: next.clipBand
+          ? clipBandToSdfBox(next.clipBand, next.room.worldMin, next.room.worldMax)
+          : null,
+        visible: next.splatsVisible,
+      });
     }
 
     // --- camera gizmos (spec §5.3): [cameras, selectedCameraId, flagged, activeView].
@@ -753,51 +837,73 @@ export class SceneView {
   private emitTransform(): void {
     const sel = this.prev?.selection;
     if (!sel) return;
-    if (sel.kind === 'camera') {
-      const readback = this.gizmos.readTransform(sel.id);
-      if (!readback) return;
-      this.gizmos.syncHelper(sel.id);
-      this.transformHandler?.({ kind: 'camera', id: sel.id, position: readback.position, rotation: readback.rotation });
-    } else if (sel.kind === 'probe') {
-      const position = this.probeGizmos.readPosition(sel.id);
-      if (!position) return;
-      this.transformHandler?.({ kind: 'probe', id: sel.id, position });
-    } else if (sel.kind === 'volume') {
-      const t = this.volumeGizmos.readTransform(sel.id);
-      if (!t) return;
-      const size = floorVolumeSize(t.size, this.prev?.voxelSize ?? t.size[0]);
-      this.transformHandler?.({ kind: 'volume', id: sel.id, position: t.position, rotation: t.rotation, size });
-    } else if (sel.kind === 'section') {
-      const current = this.prev?.sections.find((s) => s.id === sel.id);
-      if (!current) return;
-      const { collapseAxis, axisA, axisB } = axisMapping(current.orientation);
-      const mid = this.sectionGizmos.readAxisPosition(sel.id, collapseAxis);
-      const centerA = this.sectionGizmos.readAxisPosition(sel.id, axisA);
-      const centerB = this.sectionGizmos.readAxisPosition(sel.id, axisB);
-      if (mid === undefined || centerA === undefined || centerB === undefined) return;
-      const bounds = sectionBoundsFromCenters(current, { mid, centerA, centerB });
-      this.transformHandler?.({ kind: 'section', id: sel.id, ...bounds });
-    } else if (sel.kind === 'constraint') {
-      const constraint = this.prev?.constraints.find((c) => c.id === sel.id);
-      if (!constraint) return;
-      const vertex = this.prev?.selectedVertex ?? null;
-      // A polyline has no whole-constraint transform: the gizmo is attached to
-      // one vertex handle, so the drag reads back as that vertex (§6.1, §6.2).
-      if (constraint.kind === 'polyline') {
-        if (vertex === null) return;
-        const position = this.constraintGizmos.readVertex(sel.id, vertex);
+    // Keyed as an exhaustive `Record<Kind, …>` rather than an if/else cascade,
+    // for the reason `ui/entityMenu.ts` records: a chain silently swallows every
+    // kind added to the union afterwards, and a gizmo drag that reads back as
+    // the wrong kind fails without an error (`ai/CONVENTIONS.md`). The two
+    // container kinds are explicit no-ops — neither has a viewport body to drag,
+    // so selecting one detaches the gizmo outright (`sampling_volumes.md` §5).
+    const emit: Record<NonNullable<Selection>['kind'], (id: string) => void> = {
+      camera: (id) => {
+        const readback = this.gizmos.readTransform(id);
+        if (!readback) return;
+        this.gizmos.syncHelper(id);
+        this.transformHandler?.({ kind: 'camera', id, position: readback.position, rotation: readback.rotation });
+      },
+      probe: (id) => {
+        const position = this.probeGizmos.readPosition(id);
         if (!position) return;
-        this.transformHandler?.({ kind: 'constraintVertex', id: sel.id, vertex, position });
-        return;
-      }
-      const t = this.constraintGizmos.readTransform(sel.id);
-      if (!t) return;
-      this.transformHandler?.(
-        constraint.kind === 'plane'
-          ? { kind: 'constraint', id: sel.id, position: t.position, rotation: t.rotation, size: t.size }
-          : { kind: 'constraint', id: sel.id, position: t.position },
-      );
-    }
+        this.transformHandler?.({ kind: 'probe', id, position });
+      },
+      volume: (id) => {
+        const t = this.volumeGizmos.readTransform(id);
+        if (!t) return;
+        const size = floorVolumeSize(t.size, this.prev?.voxelSize ?? t.size[0]);
+        this.transformHandler?.({ kind: 'volume', id, position: t.position, rotation: t.rotation, size });
+      },
+      section: (id) => {
+        const current = this.prev?.sections.find((s) => s.id === id);
+        if (!current) return;
+        const { collapseAxis, axisA, axisB } = axisMapping(current.orientation);
+        const mid = this.sectionGizmos.readAxisPosition(id, collapseAxis);
+        const centerA = this.sectionGizmos.readAxisPosition(id, axisA);
+        const centerB = this.sectionGizmos.readAxisPosition(id, axisB);
+        if (mid === undefined || centerA === undefined || centerB === undefined) return;
+        const bounds = sectionBoundsFromCenters(current, { mid, centerA, centerB });
+        this.transformHandler?.({ kind: 'section', id, ...bounds });
+      },
+      splat: (id) => {
+        // Position + rotation only: a splat's scale is one uniform number edited
+        // in its panel, never dragged per-axis (`gaussian_splats.md` §7).
+        const t = this.viewport.splats.readTransform(id);
+        if (!t) return;
+        this.transformHandler?.({ kind: 'splat', id, position: t.position, rotation: t.rotation });
+      },
+      constraint: (id) => {
+        const constraint = this.prev?.constraints.find((c) => c.id === id);
+        if (!constraint) return;
+        const vertex = this.prev?.selectedVertex ?? null;
+        // A polyline has no whole-constraint transform: the gizmo is attached to
+        // one vertex handle, so the drag reads back as that vertex (§6.1, §6.2).
+        if (constraint.kind === 'polyline') {
+          if (vertex === null) return;
+          const position = this.constraintGizmos.readVertex(id, vertex);
+          if (!position) return;
+          this.transformHandler?.({ kind: 'constraintVertex', id, vertex, position });
+          return;
+        }
+        const t = this.constraintGizmos.readTransform(id);
+        if (!t) return;
+        this.transformHandler?.(
+          constraint.kind === 'plane'
+            ? { kind: 'constraint', id, position: t.position, rotation: t.rotation, size: t.size }
+            : { kind: 'constraint', id, position: t.position },
+        );
+      },
+      zone: () => {},
+      constraintGroup: () => {},
+    };
+    emit[sel.kind](sel.id);
   }
 
   /**
@@ -842,6 +948,12 @@ export class SceneView {
  * The active TransformControls mode for a selection (spec §12.4, §13.8): a probe
  * is a point and a section slides along one axis — both translate only; scale is
  * a volume-only mode and falls back to translate on any other selection.
+ *
+ * A **splat** therefore keeps Move/Rotate and never Scale, which is deliberate
+ * rather than incidental: `TransformControls`'s scale mode is per-axis, and
+ * dragging one handle would write the non-uniform scale that shears a capture's
+ * Gaussians. Its scale is a single number in its panel instead
+ * (`gaussian_splats.md` §2.1, §7).
  */
 function resolveMode(mode: 'translate' | 'rotate' | 'scale', selection: Selection): 'translate' | 'rotate' | 'scale' {
   if (selection?.kind === 'probe' || selection?.kind === 'section') return 'translate';

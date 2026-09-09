@@ -5,7 +5,8 @@ behavioral definition is [`../specs/spec.md`](../specs/spec.md) (with volumetric
 rendering detailed in [`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md)
 the region-of-interest tool in [`../specs/sampling_volumes.md`](../specs/sampling_volumes.md),
 the aim optimizer in [`../specs/aim_optimization.md`](../specs/aim_optimization.md), and
-camera placement in [`../specs/camera_placement.md`](../specs/camera_placement.md));
+camera placement in [`../specs/camera_placement.md`](../specs/camera_placement.md), and
+3D Gaussian Splat site captures in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md));
 this file is the plain-language orientation.
 
 ## Vision
@@ -59,9 +60,21 @@ result. It is a **readable reference for SDK consumers**, not a shipping product
   zone has an independent **enabled** checkbox (like cameras/sections): the
   overlay/sections/stats show the **union of the enabled zones**, so you can isolate
   one, combine several, or show all.
+- **Show the real site behind the analysis** — drop a **3D Gaussian Splat**
+  capture of the actual place into the scene folder's `assets/` and add it as a
+  hierarchy row with a visibility checkbox (`specs/gaussian_splats.md`). The
+  modelled geometry has the walls and the gross massing; the capture has the
+  gantries, pipe runs, stacked containers and parked vehicles a person siting a
+  camera actually reasons about. Register it by hand (position, rotation, one
+  uniform scale), hide the **Geometry** layer, and the same cameras and the same
+  coverage overlay sit over the real thing — including in the **Selected** view,
+  where "what this camera sees" becomes literal, and inside a **section clip**,
+  which cuts the capture as well as the model. It is deliberately **look-only**:
+  a capture has no surface to intersect, so it changes no coverage number, is
+  never a *Place on surface* target, and never marks a result stale.
 - Read a **stats panel** (overall coverage, valid voxels, blind-spot count,
   elapsed time, per-camera rates) and browse a **scene hierarchy tree** of cameras,
-  probes, sections, and zones/volumes.
+  probes, sections, zones/volumes, constraints, and splat captures.
 - Adjust **sampling resolution** (voxel size) and overlay appearance (mode, hue,
   intensity).
 
@@ -75,7 +88,9 @@ controls/stats. No mobile, no persistence.
 
 1. **The room is static; only cameras and probes are editable.** The scene mesh
    is built once and reused for both rendering and `loadScene`; there is no
-   in-app scene editing.
+   in-app editing of the `geometry` array. Splat captures are the one exception,
+   and they are not geometry: they live in their own `splats` array, are
+   selectable and editable, and contribute nothing to the mesh.
 2. **React owns state; Three.js objects are dumb sinks.** React holds the
    canonical arrays (cameras, probes, selection, options) and pushes them, as one
    snapshot, through the `SceneView` bridge into the imperative Three.js scene
@@ -83,7 +98,11 @@ controls/stats. No mobile, no persistence.
 3. **Two independent WebGPU surfaces.** The **render** backend (Three.js
    `WebGPURenderer`, main thread) is separate from the SDK's **compute** backend
    (in the worker). Each falls back independently — render to WebGL2, compute to
-   the CPU reference — and the stats panel shows both.
+   the CPU reference — and the stats panel shows both. A **third** surface sits
+   behind the viewport: a plain `WebGLRenderer` canvas for the splat captures,
+   because Spark cannot draw into `WebGPURenderer`. It shares the viewport's
+   camera objects but no depth buffer, so captures are always behind the model —
+   which is what the **Geometry** layer toggle is for.
 4. **Pure decision logic is factored out of React/Three to be testable.**
    Selection, transform-space mapping, panel split, tree derivation, overlay
    encoding, probe voxel lookup, and volumetric slab/chord math are pure
@@ -101,5 +120,11 @@ controls/stats. No mobile, no persistence.
 
 ## Non-goals
 
-Scene save/load, mesh import, multiple scenes, authentication, mobile support,
-and any persistence of camera/probe layouts are explicitly out of scope.
+Multiple scenes, authentication, mobile support, and browser-local persistence of
+layouts are explicitly out of scope (scene save/load to a folder on disk shipped —
+spec §14). For splats specifically: using a capture as an **occluder** — meshing or
+voxel-carving it so coverage is computed against the real site — is the obvious
+next question and a much larger one, since it changes what a coverage number
+*means*; so are correct mutual occlusion with the model, viewport picking on a
+capture, and in-app import or transcoding of capture files
+(`specs/gaussian_splats.md` §13).

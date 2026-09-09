@@ -8,6 +8,7 @@ import {
   serializeScene,
   type SceneFileJSON,
 } from '../src/scene/sceneFile.ts';
+import { splatLabel } from '../src/scene/splats.ts';
 
 function validDoc(): SceneFileJSON {
   return {
@@ -117,6 +118,20 @@ function validDoc(): SceneFileJSON {
         position: [0, 4, -9.6],
         rotation: [0, 0, 0, 1],
         size: [18, 3],
+      },
+    ],
+    // Two captures (`gaussian_splats.md` §8): a bare one carrying neither `name`
+    // nor `enabled` — the omit-on-write defaults — and a named, hidden one.
+    splats: [
+      { id: 'splat-1', src: 'assets/site.spz', position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1 },
+      {
+        id: 'splat-2',
+        name: 'North dock',
+        src: 'assets/dock.sog',
+        enabled: false,
+        position: [12, 0, -40],
+        rotation: [0, 0.707, 0, 0.707],
+        scale: 0.98,
       },
     ],
   };
@@ -575,4 +590,165 @@ test('camera.aimLocked must be a boolean (aim_optimization.md §9)', () => {
   ];
   const parsed = parseSceneFile(doc);
   assert.equal(parsed.ok, false);
+});
+
+// --- 3D Gaussian Splats (`gaussian_splats.md` §8, §9) -----------------------
+
+test('splats round-trip with their registration (§8)', () => {
+  const parsed = parseSceneFile(validDoc());
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.scene.splats.map((s) => s.id), ['splat-1', 'splat-2']);
+  const [bare, named] = parsed.scene.splats;
+  assert.equal(bare.src, 'assets/site.spz');
+  assert.equal(bare.scale, 1);
+  assert.equal(named.name, 'North dock');
+  assert.deepEqual(named.rotation, [0, 0.707, 0, 0.707]);
+  assert.equal(named.scale, 0.98);
+});
+
+test('an absent `splats` key reads as empty, which is why formatVersion stays 3 (§8)', () => {
+  // The whole point of the additive choice: a version > 3 is rejected outright,
+  // so bumping would make a scene carrying a backdrop unopenable by an older
+  // build — while an older reader can simply ignore a key it does not know.
+  const doc = validDoc();
+  delete (doc as Partial<SceneFileJSON>).splats;
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.scene.splats, []);
+  assert.equal(SCENE_FILE_FORMAT_VERSION, 3);
+  // And it writes back at 3, so the round-trip does not upgrade the file.
+  assert.equal(serializeScene(parsed.scene).formatVersion, 3);
+});
+
+test('`enabled` is optional on read and omitted on write when true (§8)', () => {
+  const doc = validDoc();
+  doc.splats = [{ id: 'splat-1', src: 'assets/site.spz', position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1 }];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(parsed.scene.splats[0].enabled, true);
+  const written = serializeScene(parsed.scene).splats[0];
+  assert.equal('enabled' in written, false);
+  assert.equal('name' in written, false);
+});
+
+test('`enabled: false` is written, exactly like the camera flag (§8)', () => {
+  const parsed = parseSceneFile(validDoc());
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const written = serializeScene(parsed.scene).splats[1];
+  assert.equal(written.enabled, false);
+});
+
+test('a blank/missing splat name reads back as the capture filename, not `Splat N` (§2.3)', () => {
+  const doc = validDoc();
+  doc.splats = [
+    { id: 'splat-1', name: '   ', src: 'assets/site.spz', position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1 },
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  // Stored blank; the *label* resolves to the filename, and the blank name is
+  // dropped on write so the file has no `name` key at all.
+  assert.equal(parsed.scene.splats[0].name, '');
+  assert.equal(splatLabel(parsed.scene.splats[0]), 'site.spz');
+  assert.equal('name' in serializeScene(parsed.scene).splats[0], false);
+});
+
+test('splats array order is display order and round-trips verbatim (§8)', () => {
+  const doc = validDoc();
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const reordered = { ...parsed.scene, splats: [parsed.scene.splats[1], parsed.scene.splats[0]] };
+  const again = parseSceneFile(serializeScene(reordered));
+  assert.equal(again.ok, true);
+  if (!again.ok) return;
+  assert.deepEqual(again.scene.splats.map((s) => s.id), ['splat-2', 'splat-1']);
+});
+
+test('an unsafe splat src aborts the import, as a gltf src does (§9, spec §14.2)', () => {
+  for (const src of ['/abs/site.spz', 'http://x/site.spz', '../site.spz', 'assets/../../site.spz']) {
+    const doc = validDoc();
+    doc.splats = [{ id: 'splat-1', src, position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1 }];
+    const parsed = parseSceneFile(doc);
+    assert.equal(parsed.ok, false, src);
+    if (parsed.ok) return;
+    assert.match(parsed.error, /unsafe splat src/);
+  }
+  // A plain relative path under `assets/` is accepted.
+  assert.equal(isSafeAssetPath('assets/site.spz'), true);
+  assert.equal(isSafeAssetPath('assets/site/level-1/scan.sog'), true);
+});
+
+test('duplicate splat ids abort the import (§9)', () => {
+  const doc = validDoc();
+  doc.splats = [
+    { id: 'splat-1', src: 'assets/a.spz', position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1 },
+    { id: 'splat-1', src: 'assets/b.spz', position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1 },
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.match(parsed.error, /duplicate splat id/);
+});
+
+test('a non-positive, non-finite, or non-numeric scale aborts the import (§9)', () => {
+  for (const scale of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '1' as unknown as number]) {
+    const doc = validDoc();
+    doc.splats = [{ id: 'splat-1', src: 'assets/a.spz', position: [0, 0, 0], rotation: [0, 0, 0, 1], scale }];
+    const parsed = parseSceneFile(doc);
+    assert.equal(parsed.ok, false, String(scale));
+    if (parsed.ok) return;
+    assert.match(parsed.error, /scale must be a number > 0/);
+  }
+});
+
+test('a malformed rotation or position aborts the import (§9)', () => {
+  const badRotation = validDoc();
+  badRotation.splats = [
+    { id: 'splat-1', src: 'assets/a.spz', position: [0, 0, 0], rotation: [0, 0, 1] as unknown as [number, number, number, number], scale: 1 },
+  ];
+  const r = parseSceneFile(badRotation);
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.match(r.error, /rotation must be \[x,y,z,w\]/);
+
+  const badPosition = validDoc();
+  badPosition.splats = [
+    { id: 'splat-1', src: 'assets/a.spz', position: [0, 0] as unknown as [number, number, number], rotation: [0, 0, 0, 1], scale: 1 },
+  ];
+  const p = parseSceneFile(badPosition);
+  assert.equal(p.ok, false);
+  if (p.ok) return;
+  assert.match(p.error, /position must be \[x,y,z\]/);
+});
+
+test('a non-boolean splat `enabled` aborts the import (§9)', () => {
+  const doc = validDoc();
+  doc.splats = [
+    {
+      id: 'splat-1',
+      src: 'assets/a.spz',
+      enabled: 'yes' as unknown as boolean,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0, 1],
+      scale: 1,
+    },
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.match(parsed.error, /enabled must be a boolean/);
+});
+
+test('a non-array `splats` aborts the import (§9)', () => {
+  const doc = validDoc();
+  (doc as unknown as Record<string, unknown>).splats = 'assets/site.spz';
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.match(parsed.error, /splats must be an array/);
 });

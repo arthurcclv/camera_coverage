@@ -7,10 +7,13 @@
  * drag-tail click and for the resulting selection, kept pure so it can be
  * unit-tested without a React/DOM harness (test/viewportSelection.test.ts).
  *
- * Selection is unified across cameras, probes, sections, zones, and volumes
- * (spec §5.5, §12.4, §13.8; `sampling_volumes.md` §4.1): a single value picks out
- * one entity, so selecting one deselects the others. Sections and zones are only
- * ever reachable via `hit` from the hierarchy (their bodies aren't pickable);
+ * Selection is unified across cameras, probes, sections, zones, volumes and
+ * splats (spec §5.5, §12.4, §13.8; `sampling_volumes.md` §4.1;
+ * `gaussian_splats.md` §6.1): a single value picks out
+ * one entity, so selecting one deselects the others. Sections, zones and splats
+ * are only ever reachable via `hit` from the hierarchy (their bodies aren't
+ * pickable — a splat's is on another canvas entirely, and a click must not reach
+ * it, `gaussian_splats.md` §6.5);
  * cameras, probes, volumes, and camera constraints are also pickable in the
  * viewport (a constraint through its handles, `camera_placement.md` §6.1; a
  * constraint *group* has no body, like a zone). This module doesn't care which
@@ -19,7 +22,16 @@
 
 /** The unified selection: one entity across every type, or nothing (spec §5.5). */
 export type Selection = {
-  kind: 'camera' | 'probe' | 'section' | 'zone' | 'volume' | 'constraintGroup' | 'constraint';
+  kind:
+    | 'camera'
+    | 'probe'
+    | 'section'
+    | 'zone'
+    | 'volume'
+    | 'constraintGroup'
+    | 'constraint'
+    /** A 3D Gaussian Splat capture (`gaussian_splats.md` §6.1). */
+    | 'splat';
   id: string;
 } | null;
 

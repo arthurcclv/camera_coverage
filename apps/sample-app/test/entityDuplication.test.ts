@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { duplicateConstraint, duplicateConstraintGroup } from '../src/scene/entityDuplication.ts';
+import { duplicateConstraint, duplicateConstraintGroup, duplicateSplat } from '../src/scene/entityDuplication.ts';
 import type { CameraConstraint, ConstraintGroup } from '../src/placement/region.ts';
+import type { Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 
 import type { SceneCamera } from '../src/cameras/camera.ts';
 import type { Probe } from '../src/scene/probeVisibility.ts';
@@ -192,4 +193,50 @@ test('duplicateConstraintGroup deep-copies the group, its strategy, and its cons
   assert.equal(copy.constraints[0].id, 'con-3');
   assert.equal(copy.constraints[0].groupId, 'cg-2');
   assert.equal(duplicateConstraintGroup(groups, constraints, 'cg-404'), null);
+});
+
+// --- 3D Gaussian Splats (`gaussian_splats.md` §6.4) ------------------------
+
+test('duplicateSplat copies everything verbatim under the next free id', () => {
+  const splats = [
+    {
+      id: 'splat-1',
+      name: 'North dock',
+      src: 'assets/dock.sog',
+      enabled: false,
+      position: [12, 0, -40] as Vec3,
+      rotation: [0, 0.707, 0, 0.707] as Quat,
+      scale: 0.98,
+    },
+  ];
+  const copy = duplicateSplat(splats, 'splat-1');
+  assert.ok(copy);
+  assert.equal(copy.id, 'splat-2');
+  // The same `src` is the point: the copy is labelled by the same filename and
+  // **shares the original's decode**, so comparing two registrations of one
+  // capture costs a row rather than a second gigabyte (§3.3).
+  assert.equal(copy.src, 'assets/dock.sog');
+  assert.equal(copy.name, 'North dock');
+  assert.equal(copy.enabled, false);
+  assert.equal(copy.scale, 0.98);
+  assert.deepEqual(copy.position, [12, 0, -40]);
+  assert.deepEqual(copy.rotation, [0, 0.707, 0, 0.707]);
+});
+
+test('duplicateSplat deep-copies the transform arrays and rejects an unknown id', () => {
+  const original = {
+    id: 'splat-1',
+    name: '',
+    src: 'assets/site.spz',
+    enabled: true,
+    position: [0, 0, 0] as Vec3,
+    rotation: [0, 0, 0, 1] as Quat,
+    scale: 1,
+  };
+  const copy = duplicateSplat([original], 'splat-1');
+  assert.ok(copy);
+  // Otherwise dragging one row's gizmo would move the other's.
+  assert.notEqual(copy.position, original.position);
+  assert.notEqual(copy.rotation, original.rotation);
+  assert.equal(duplicateSplat([original], 'splat-9'), null);
 });

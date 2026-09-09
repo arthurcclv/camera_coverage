@@ -10,12 +10,16 @@
  * only wires them to real file reads/writes and GLTFLoader asset resolution, and
  * is deliberately kept that thin so there's as little untested surface as
  * possible (this app's tests target pure functions only — `ai/CONVENTIONS.md`).
+ * The **Add 3DGS** dialog's listing and a splat's asset resolution follow the
+ * same split, against `splatAssets.ts` (`gaussian_splats.md` §3.2, §11).
  */
 import { buildSceneGeometry, type GeometryBuild } from './sceneGeometryBuild.ts';
-import { parseSceneFile, resolveSectionFootprints, serializeScene } from './sceneFile.ts';
+import { isSafeAssetPath, parseSceneFile, resolveSectionFootprints, serializeScene } from './sceneFile.ts';
 import { describeSceneFileRow, planSceneFileList, type SceneFileEntry } from './sceneFileList.ts';
 import type { SaveTarget } from './saveTarget.ts';
 import type { Scene } from './sceneModel.ts';
+import { planSplatAssetList, type SplatAssetFile } from './splatAssets.ts';
+import { SPLAT_ASSET_DIR } from './splats.ts';
 
 /**
  * Walks a folder-relative asset path (spec §14.2, already validated safe on
@@ -87,6 +91,69 @@ async function readTextAt(dir: FileSystemDirectoryHandle, name: string): Promise
   }
 }
 
+/** What the **Add 3DGS** dialog lists (`gaussian_splats.md` §3.2). */
+export interface SplatAssetListing {
+  /** False when the scene folder has no `assets/` at all — the dialog says so. */
+  hasAssetDir: boolean;
+  files: SplatAssetFile[];
+}
+
+/**
+ * The capture files already sitting in a scene folder's `assets/`
+ * (`gaussian_splats.md` §3.2) — the root of `assets/` only, **non-recursive**,
+ * the same flatness rule §14.2 applies to scene files.
+ *
+ * Which names are listed and in what order is `planSplatAssetList`'s decision;
+ * this only reads the folder and each handle's **metadata**. **No file is read or
+ * decoded to build the list** — a site capture can run to hundreds of megabytes,
+ * and opening a dialog must not touch those bytes.
+ */
+export async function listSplatAssets(dir: FileSystemDirectoryHandle): Promise<SplatAssetListing> {
+  let assets: FileSystemDirectoryHandle;
+  try {
+    assets = await dir.getDirectoryHandle(SPLAT_ASSET_DIR);
+  } catch {
+    // No `assets/`, or it cannot be read. The dialog says so and offers no
+    // commit; it does **not** create the folder (§3.2, §9).
+    return { hasAssetDir: false, files: [] };
+  }
+  const fileNames: string[] = [];
+  for await (const [name, handle] of assets.entries()) {
+    if (handle.kind === 'file') fileNames.push(name);
+  }
+  const files: SplatAssetFile[] = [];
+  for (const entry of planSplatAssetList(fileNames)) {
+    files.push({ ...entry, size: await fileSizeAt(assets, entry.name) });
+  }
+  return { hasAssetDir: true, files };
+}
+
+/** One entry's byte size, or `null` when the metadata could not be read (§3.2). */
+async function fileSizeAt(dir: FileSystemDirectoryHandle, name: string): Promise<number | null> {
+  try {
+    return (await (await dir.getFileHandle(name)).getFile()).size;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves a splat's folder-relative `src` to its `File`
+ * (`gaussian_splats.md` §4.4 step 1) — `isSafeAssetPath` first, then the walk,
+ * so a hand-edited scene file cannot reach outside the folder even though
+ * `parseSceneFile` already rejected it.
+ *
+ * Returns a `File`, not an `ArrayBuffer`, deliberately: the load path streams it
+ * (`file.stream()`), because buffering a gigabyte-scale `.ply` into one
+ * `ArrayBuffer` just to hand it over is an avoidable out-of-memory failure
+ * (§4.4). Rejecting means **missing**, which the row reports without failing the
+ * import (§9).
+ */
+export async function resolveSplatFile(dir: FileSystemDirectoryHandle, src: string): Promise<File> {
+  if (!isSafeAssetPath(src)) throw new Error(`unsafe splat src "${src}"`);
+  return (await fileHandleAt(dir, src, false)).getFile();
+}
+
 /**
  * Every file name at a folder's root — what the Save-as dialog checks a typed
  * name against, so a collision is known in memory as the user types rather than
@@ -148,6 +215,13 @@ export async function copyAssets(
  * parse/validate, load every referenced GLB, build the merged mesh) must succeed
  * before this resolves — nothing here touches app state, so a thrown error
  * leaves the caller free to leave the current scene completely untouched (§14.8).
+ *
+ * **Splat captures are deliberately not part of that gate.** The geometry is
+ * what coverage is measured against, so a broken GLB invalidates the scene;
+ * a capture is a backdrop that cannot change a single number, so a missing or
+ * undecodable one leaves the import successful and reports on the row instead
+ * (`gaussian_splats.md` §9). Captures therefore load asynchronously, after the
+ * import commits — nothing here reads a capture's bytes.
  *
  * The file is re-read here even when the Load dialog already parsed it for a
  * summary, so this stays the single all-or-nothing validation path.

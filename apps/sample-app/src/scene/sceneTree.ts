@@ -7,11 +7,16 @@
  * types (lights, meshes, …) slot in as new `SceneNode` variants and sibling
  * groups. Nodes carry hierarchy + identity only; entity payload stays in the
  * canonical arrays — cameras in `CameraConfig[]`, probes in `Probe[]`, sections
- * in `Section[]`, zones in `Zone[]`, volumes in `SamplingVolume[]` — which a node
- * references by id (cameras in `SceneCamera[]`). The tree is derived from those
- * arrays via `buildSceneTree` — there is no separate mutable node state. Row labels
+ * in `Section[]`, zones in `Zone[]`, volumes in `SamplingVolume[]`, splats in
+ * `SplatObject[]` — which a node references by id (cameras in `SceneCamera[]`).
+ * The tree is derived from those arrays via `buildSceneTree` — there is no
+ * separate mutable node state. Row labels
  * resolve to each entity's display name (`cameraLabel`/`probeLabel`/`sectionLabel`/
  * `zoneLabel`, spec §5.6); volume rows are the one exception and show the raw id.
+ *
+ * Splat rows are the one documented exception to the ordinal label fallback:
+ * blank-named, they show the **basename of their `src`**, because a capture's
+ * identity is its file (`gaussian_splats.md` §2.3).
  *
  * Zones introduce the first **user-created, selectable sub-groups**: a zone node
  * is both selectable (drives the ZonePanel) and expandable (its
@@ -27,6 +32,7 @@ import {
   type CameraConstraint,
   type ConstraintGroup,
 } from '../placement/region.ts';
+import { splatLabel, type SplatObject } from './splats.ts';
 import type { Selection } from './viewportSelection.ts';
 
 export type SceneNode =
@@ -43,13 +49,15 @@ export type SceneNode =
       groupId: string;
       childIds: string[];
     }
-  | { kind: 'constraint'; id: string; label: string; constraintId: string };
+  | { kind: 'constraint'; id: string; label: string; constraintId: string }
+  | { kind: 'splat'; id: string; label: string; splatId: string };
 
 const CAMERA_GROUP_ID = 'group:cameras';
 const PROBE_GROUP_ID = 'group:probes';
 const SECTION_GROUP_ID = 'group:sections';
 const ZONES_GROUP_ID = 'group:zones';
 const CONSTRAINTS_GROUP_ID = 'group:constraints';
+const SPLATS_GROUP_ID = 'group:splats';
 const CAMERA_NODE_PREFIX = 'cam:';
 const PROBE_NODE_PREFIX = 'probe:';
 const SECTION_NODE_PREFIX = 'section:';
@@ -57,6 +65,7 @@ const ZONE_NODE_PREFIX = 'zone:';
 const VOLUME_NODE_PREFIX = 'volume:';
 const CONSTRAINT_GROUP_NODE_PREFIX = 'cg:';
 const CONSTRAINT_NODE_PREFIX = 'con:';
+const SPLAT_NODE_PREFIX = 'splat:';
 
 /** Stable tree-node id for a camera (namespaced to avoid collisions). */
 export function nodeIdForCamera(cameraId: string): string {
@@ -142,6 +151,18 @@ export function constraintIdForNode(nodeId: string): string | null {
     : null;
 }
 
+/** Stable tree-node id for a splat (namespaced to avoid collisions). */
+export function nodeIdForSplat(splatId: string): string {
+  return `${SPLAT_NODE_PREFIX}${splatId}`;
+}
+
+/** Inverse of {@link nodeIdForSplat}; null if the node id isn't a splat. */
+export function splatIdForNode(nodeId: string): string | null {
+  return nodeId.startsWith(SPLAT_NODE_PREFIX)
+    ? nodeId.slice(SPLAT_NODE_PREFIX.length)
+    : null;
+}
+
 /**
  * The tree node a selection highlights, or null when nothing is selected (spec §5.5).
  *
@@ -163,6 +184,7 @@ export function nodeIdForSelection(selection: Selection): string | null {
     volume: nodeIdForVolume,
     constraintGroup: nodeIdForConstraintGroup,
     constraint: nodeIdForConstraint,
+    splat: nodeIdForSplat,
   };
   return nodeIdFor[selection.kind](selection.id);
 }
@@ -179,10 +201,11 @@ function childIdsOf(node: SceneNode): string[] {
 
 /**
  * Build the scene tree: a "Cameras" group over one node per camera, and — when
- * any exist — sibling "Probes" / "Sections" groups, and a "Zones" umbrella over
- * selectable+expandable zone nodes (each holding its volume children). All in
- * array order. Returned flat, parents before their children; children are
- * reachable via `childIds`.
+ * any exist — sibling "Probes" / "Sections" / "Splats" groups, and a "Zones"
+ * umbrella over selectable+expandable zone nodes (each holding its volume
+ * children). Root order is Cameras → Probes → Sections → Zones → Constraints →
+ * Splats, fixed. All in array order. Returned flat, parents before their
+ * children; children are reachable via `childIds`.
  */
 export function buildSceneTree(
   cameras: SceneCamera[],
@@ -192,6 +215,7 @@ export function buildSceneTree(
   volumes: SamplingVolume[] = [],
   constraintGroups: ConstraintGroup[] = [],
   constraints: CameraConstraint[] = [],
+  splats: SplatObject[] = [],
 ): SceneNode[] {
   const cameraNodes: SceneNode[] = cameras.map((c) => ({
     kind: 'camera',
@@ -305,6 +329,27 @@ export function buildSceneTree(
     nodes.push(umbrella, ...groupNodes, ...constraintNodes);
   }
 
+  // The Splats group appears once any capture exists — auto-derived by type like
+  // Cameras/Probes/Sections, not a user-created sub-group
+  // (`gaussian_splats.md` §2.2). It sits **last** in the fixed root order because
+  // it is the only group that cannot change a number, and the order already runs
+  // from analysis inputs toward presentation.
+  if (splats.length > 0) {
+    const splatNodes: SceneNode[] = splats.map((s) => ({
+      kind: 'splat',
+      id: nodeIdForSplat(s.id),
+      label: splatLabel(s),
+      splatId: s.id,
+    }));
+    const splatsGroup: SceneNode = {
+      kind: 'group',
+      id: SPLATS_GROUP_ID,
+      label: 'Splats',
+      childIds: splatNodes.map((n) => n.id),
+    };
+    nodes.push(splatsGroup, ...splatNodes);
+  }
+
   return nodes;
 }
 
@@ -357,6 +402,33 @@ export function flattenVisible(nodes: SceneNode[], collapsedIds: Set<string>): R
  * `group` is the one kind that selects nothing: a group header toggles its own
  * collapse instead.
  */
+/**
+ * Per-kind `enabled` lookups a hierarchy row needs (spec §5.4, §7.3). Keyed on
+ * the **selection** kinds, so it is built from whatever the caller already has
+ * indexed — arrays or maps — and adding an entity kind is a compile error here
+ * rather than a row that silently stops dimming.
+ */
+export type EnabledLookup = Record<NonNullable<Selection>['kind'], (id: string) => boolean>;
+
+/**
+ * Whether a row draws **enabled** (spec §5.4, §7.3) — its entity's own
+ * `enabled` flag, or `true` for a row that has none.
+ *
+ * Routed through {@link nodeSelection} so the kind→id mapping exists once, and
+ * so this is the exhaustive `Record` `ai/CONVENTIONS.md` requires instead of the
+ * six-deep nested ternary this replaced: that chain ended in a bare `: true`,
+ * which every kind added after `splat` would have quietly inherited — the same
+ * failure `ui/entityMenu.ts` records, in its silent form.
+ *
+ * A **group header** has no flag of its own and is never dimmed: its members
+ * carry their own state, and a group that dimmed with them would read as a
+ * disabled group.
+ */
+export function nodeEnabled(node: SceneNode, lookup: EnabledLookup): boolean {
+  const target = nodeSelection(node);
+  return target === null ? true : lookup[target.kind](target.id);
+}
+
 export function nodeSelection(node: SceneNode): Selection {
   const pick: { [K in SceneNode['kind']]: (n: Extract<SceneNode, { kind: K }>) => Selection } = {
     group: () => null,
@@ -367,6 +439,7 @@ export function nodeSelection(node: SceneNode): Selection {
     volume: (n) => ({ kind: 'volume', id: n.volumeId }),
     constraintGroup: (n) => ({ kind: 'constraintGroup', id: n.groupId }),
     constraint: (n) => ({ kind: 'constraint', id: n.constraintId }),
+    splat: (n) => ({ kind: 'splat', id: n.splatId }),
   };
   return (pick[node.kind] as (n: SceneNode) => Selection)(node);
 }

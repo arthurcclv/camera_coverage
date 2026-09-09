@@ -27,6 +27,7 @@ import {
   type ConstraintGroup,
   type ConstraintKind,
 } from '../placement/region.ts';
+import type { SplatObject } from './splats.ts';
 
 /**
  * Version written by {@link serializeScene}: 2 for zones/volumes, 3 for camera
@@ -36,6 +37,13 @@ export const SCENE_FILE_FORMAT_VERSION = 3;
 /**
  * Versions {@link parseSceneFile} accepts (§14.8): a v1 file reads with empty
  * zones/volumes, and a v1 or v2 file with empty constraint groups/constraints.
+ *
+ * **Splats did not bump this.** `splats` reads as `[]` when absent, the same
+ * additive precedent `name`, `clipRange`, the camera `enabled` flag and the
+ * section footprint bounds already set. A bump to 4 was rejected precisely
+ * because a version > 3 is rejected *outright*: a scene carrying a visual
+ * backdrop would become unopenable by an older build, when an older reader can
+ * simply ignore a key it does not know (`gaussian_splats.md` §8).
  */
 export const SUPPORTED_FORMAT_VERSIONS = [1, 2, 3] as const;
 
@@ -52,6 +60,19 @@ type SerializedCamera = Omit<SceneCamera, 'name' | 'enabled' | 'aimLocked'> & {
   aimLocked?: boolean;
   /** The constraint this camera is bound to (`camera_placement.md` §6.3); omitted when unbound. */
   constraintId?: string;
+};
+
+/**
+ * On-disk splat shape (§14.3, `gaussian_splats.md` §8): `name` omitted when
+ * blank (and read back as the **capture's filename**, not `Splat N`, §5.5), and
+ * `enabled` omitted when `true` — splats are enabled by default, exactly like
+ * cameras. `scale` is a **single number**, the one transform in this format that
+ * is not a `Vec3` scale, because a non-uniform scale shears the capture's
+ * Gaussians.
+ */
+type SerializedSplat = Omit<SplatObject, 'name' | 'enabled'> & {
+  name?: string;
+  enabled?: boolean;
 };
 
 export interface SceneFileJSON {
@@ -77,14 +98,21 @@ export interface SceneFileJSON {
   constraintGroups: Serialized<ConstraintGroup>[];
   /** Mount regions belonging to groups (§14.3, `camera_placement.md` §9). */
   constraints: Serialized<CameraConstraint>[];
+  /**
+   * 3D Gaussian Splat captures (§14.3, `gaussian_splats.md` §8). **Additive at
+   * `formatVersion` 3, no bump**: absent reads as `[]`, so every existing file
+   * loads unchanged. `enabled` is omitted when `true`, like the camera flag.
+   */
+  splats: SerializedSplat[];
 }
 
 export type ParseResult = { ok: true; scene: Scene } | { ok: false; error: string };
 
 /**
  * Rejects absolute paths, URLs/schemes (`http:`, `file:`, `data:`, ...), and any
- * `.`/`..` segment — a `gltf.src` must stay a plain relative path inside the
- * scene folder (spec §14.2).
+ * `.`/`..` segment — a `gltf.src` (and, by the same rule, a **splat** `src`,
+ * `gaussian_splats.md` §3.1) must stay a plain relative path inside the scene
+ * folder (spec §14.2).
  */
 export function isSafeAssetPath(src: string): boolean {
   if (typeof src !== 'string' || src.length === 0) return false;
@@ -342,6 +370,48 @@ function parseVolumes(raw: unknown, zones: Zone[]): SamplingVolume[] | string {
   return volumes;
 }
 
+/**
+ * Parses `splats` (§14.3, §14.4; `gaussian_splats.md` §8): each
+ * `{ id, src, position, rotation, scale }` plus optional `name`/`enabled`, ids
+ * unique, `src` safe per {@link isSafeAssetPath}, `scale` finite and `> 0`.
+ *
+ * Absent reads as `[]` — the whole reason `formatVersion` stays 3 (§14.3). A
+ * missing or blank `name` is **never** an error: it reads back as the capture's
+ * filename (`splatLabel`, `gaussian_splats.md` §2.3).
+ *
+ * Whether the referenced capture *exists* is deliberately **not** checked here,
+ * nor anywhere in the import gate: a backdrop that cannot change a coverage
+ * number must not stop a 96-camera layout opening, so the row reports it instead
+ * (§14.4 step 5, §14.8; `gaussian_splats.md` §9).
+ */
+function parseSplats(raw: unknown): SplatObject[] | string {
+  if (raw === undefined) return []; // additive at v3 — absent is empty (§14.3)
+  if (!Array.isArray(raw)) return 'splats must be an array';
+  const splats: SplatObject[] = [];
+  const seenIds = new Set<string>();
+  for (const [i, item] of raw.entries()) {
+    if (!isRecord(item) || typeof item.id !== 'string') return `splats[${i}]: requires a string id`;
+    if (seenIds.has(item.id)) return `duplicate splat id "${item.id}"`;
+    seenIds.add(item.id);
+    if (typeof item.src !== 'string') return `splats[${i}]: requires a string src`;
+    if (!isSafeAssetPath(item.src)) return `splats[${i}]: unsafe splat src "${item.src}"`;
+    if (!isVec3(item.position)) return `splats[${i}]: position must be [x,y,z]`;
+    if (!isQuat(item.rotation)) return `splats[${i}]: rotation must be [x,y,z,w]`;
+    if (!isFiniteNumber(item.scale) || item.scale <= 0) return `splats[${i}]: scale must be a number > 0`;
+    if (item.enabled !== undefined && typeof item.enabled !== 'boolean') return `splats[${i}]: enabled must be a boolean`;
+    splats.push({
+      id: item.id,
+      name: readName(item.name),
+      src: item.src,
+      enabled: item.enabled !== false,
+      position: item.position,
+      rotation: item.rotation,
+      scale: item.scale,
+    });
+  }
+  return splats;
+}
+
 const CONSTRAINT_KINDS: ConstraintKind[] = ['point', 'polyline', 'plane'];
 
 /**
@@ -537,6 +607,9 @@ export function parseSceneFile(json: unknown): ParseResult {
   const constraints = parseConstraints(json.constraints, constraintGroups);
   if (typeof constraints === 'string') return fail(constraints);
 
+  const splats = parseSplats(json.splats);
+  if (typeof splats === 'string') return fail(splats);
+
   // A camera's binding is checked here rather than in `parseCameras`, which runs
   // before the constraints exist. A dangling binding is rejected outright: it
   // would otherwise read as an unclamped camera the user believes is on a rail
@@ -568,6 +641,7 @@ export function parseSceneFile(json: unknown): ParseResult {
       useZones,
       constraintGroups,
       constraints,
+      splats,
     },
   };
 }
@@ -611,6 +685,18 @@ function serializeCamera(camera: SceneCamera): SerializedCamera {
   return withoutBinding;
 }
 
+/**
+ * Serializes a splat (§14.3, `gaussian_splats.md` §8): drops a blank `name` and
+ * omits `enabled` when `true`, so an untouched capture writes as
+ * `{ id, src, position, rotation, scale }` and reads back labelled by its file.
+ */
+function serializeSplat(splat: SplatObject): SerializedSplat {
+  const stripped = stripBlankName(splat);
+  if (!splat.enabled) return stripped;
+  const { enabled: _enabled, ...rest } = stripped;
+  return rest;
+}
+
 /** Serializes a `Scene` to the `scene.json` shape (spec §14.5) — a plain data copy. */
 export function serializeScene(scene: Scene): SceneFileJSON {
   return {
@@ -630,5 +716,9 @@ export function serializeScene(scene: Scene): SceneFileJSON {
     // seeded search reproduces from the file (`camera_placement.md` §9).
     constraintGroups: scene.constraintGroups.map(stripBlankName),
     constraints: scene.constraints.map(stripBlankName),
+    // A splat's blank `name` is dropped like every other entity's, and its
+    // `enabled` is omitted when true, exactly as a camera's is
+    // (`gaussian_splats.md` §8).
+    splats: scene.splats.map(serializeSplat),
   };
 }

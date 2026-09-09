@@ -15,14 +15,20 @@ import {
   nodeIdForSection,
   nodeIdForVolume,
   nodeIdForZone,
+  nodeIdForSplat,
+  nodeEnabled,
   nodeSelection,
   probeIdForNode,
   sectionIdForNode,
+  splatIdForNode,
   volumeIdForNode,
   zoneIdForNode,
+  type EnabledLookup,
+  type SceneNode,
 } from '../src/scene/sceneTree.ts';
 import type { SamplingVolume, Zone } from '../src/scene/samplingVolumes.ts';
 import type { CameraConstraint, ConstraintGroup } from '../src/placement/region.ts';
+import type { SplatObject } from '../src/scene/splats.ts';
 
 function cam(id: string): SceneCamera {
   return { id, name: '', position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 };
@@ -440,4 +446,142 @@ test('nodeSelection maps each row kind to its own entity, and a group to nothing
     kind: 'constraint',
     id: 'con-1',
   });
+});
+
+// --- 3D Gaussian Splats (`gaussian_splats.md` §2.2, §2.3, §6.1) -------------
+
+function splat(id: string, src = 'assets/site.spz', name = ''): SplatObject {
+  return { id, name, src, enabled: true, position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1 };
+}
+
+test('the Splats group appears only once a capture exists (§2.2)', () => {
+  const without = buildSceneTree([cam('a')]);
+  assert.equal(without.some((n) => n.id === 'group:splats'), false);
+
+  const nodes = buildSceneTree([cam('a')], [], [], [], [], [], [], [splat('splat-1')]);
+  const group = nodes.find((n) => n.id === 'group:splats');
+  assert.ok(group, 'Splats group should exist');
+  assert.equal(group.kind, 'group');
+  assert.equal(group.label, 'Splats');
+});
+
+test('splat nodes are selectable leaves under the group, in array order (§2.2)', () => {
+  const nodes = buildSceneTree(
+    [cam('a')], [], [], [], [], [], [],
+    [splat('splat-1'), splat('splat-2', 'assets/dock.sog')],
+  );
+  const group = nodes.find((n) => n.id === 'group:splats');
+  assert.ok(group && group.kind === 'group');
+  assert.deepEqual(group.childIds, [nodeIdForSplat('splat-1'), nodeIdForSplat('splat-2')]);
+  const leaf = nodes.find((n) => n.id === nodeIdForSplat('splat-1'));
+  assert.ok(leaf && leaf.kind === 'splat');
+  assert.deepEqual(nodeSelection(leaf), { kind: 'splat', id: 'splat-1' });
+  // A leaf, so it never expands: nothing lists it as a parent.
+  assert.equal('childIds' in leaf, false);
+});
+
+test('Splats sits last in the fixed root order (§2.2)', () => {
+  // It is the only group that cannot change a number, and the order already runs
+  // from analysis inputs toward presentation.
+  const nodes = buildSceneTree(
+    [cam('a')],
+    [probe('p')],
+    [section('s')],
+    [zone('zone-1')],
+    [],
+    [cgroup('cg-1')],
+    [],
+    [splat('splat-1')],
+  );
+  const rows = flattenVisible(nodes, new Set());
+  const groups = rows.filter((r) => r.node.kind === 'group' && r.depth === 0).map((r) => r.node.label);
+  assert.deepEqual(groups, ['Cameras', 'Probes', 'Sections', 'Zones', 'Constraints', 'Splats']);
+});
+
+test('a splat row is labelled by its own name, else its filename — never an ordinal (§2.3)', () => {
+  const nodes = buildSceneTree(
+    [cam('a')], [], [], [], [], [], [],
+    [splat('splat-1'), splat('splat-2', 'assets/yard-scan.ply', 'North dock')],
+  );
+  const labelOf = (id: string) => nodes.find((n) => n.id === nodeIdForSplat(id))?.label;
+  assert.equal(labelOf('splat-1'), 'site.spz');
+  assert.equal(labelOf('splat-2'), 'North dock');
+});
+
+test('splat node ids round-trip and do not collide with other kinds (§2.2)', () => {
+  assert.equal(splatIdForNode(nodeIdForSplat('splat-1')), 'splat-1');
+  assert.equal(splatIdForNode(nodeIdForSection('section-1')), null);
+  assert.equal(sectionIdForNode(nodeIdForSplat('splat-1')), null);
+});
+
+test('a splat selection highlights its own row (§6.1)', () => {
+  // The `Record` in `nodeIdForSelection` is what made adding `splat` to
+  // `Selection` a compile error until it named its node here — the bug that
+  // once left constraint rows silently un-highlighted.
+  assert.equal(nodeIdForSelection({ kind: 'splat', id: 'splat-1' }), nodeIdForSplat('splat-1'));
+});
+
+// --- the row's enabled flag (spec §5.4, §7.3) -------------------------------
+// One exhaustive lookup, replacing the six-deep ternary chain that ended in a
+// bare `: true` — the silent form of the bug `ui/entityMenu.ts` records
+// (`ai/CONVENTIONS.md`).
+
+const enabledLookup = (ticked: (kind: string, id: string) => boolean): EnabledLookup => ({
+  camera: (id) => ticked('camera', id),
+  probe: (id) => ticked('probe', id),
+  section: (id) => ticked('section', id),
+  zone: (id) => ticked('zone', id),
+  volume: (id) => ticked('volume', id),
+  constraintGroup: (id) => ticked('constraintGroup', id),
+  constraint: (id) => ticked('constraint', id),
+  splat: (id) => ticked('splat', id),
+});
+
+test('nodeEnabled asks the lookup for the row\'s own kind and id', () => {
+  // Every kind, so a node routed to the wrong lookup (the old chain's failure
+  // mode) shows up as a wrong answer rather than as a row that stops dimming.
+  const asked: string[] = [];
+  const lookup = enabledLookup((kind, id) => {
+    asked.push(`${kind}:${id}`);
+    return false;
+  });
+  const nodes: SceneNode[] = [
+    { kind: 'camera', id: 'n', label: '', cameraId: 'cam-1' },
+    { kind: 'probe', id: 'n', label: '', probeId: 'probe-1' },
+    { kind: 'section', id: 'n', label: '', sectionId: 'section-1' },
+    { kind: 'zone', id: 'n', label: '', zoneId: 'zone-1', childIds: [] },
+    { kind: 'volume', id: 'n', label: '', volumeId: 'volume-1' },
+    { kind: 'constraintGroup', id: 'n', label: '', groupId: 'cg-1', childIds: [] },
+    { kind: 'constraint', id: 'n', label: '', constraintId: 'con-1' },
+    { kind: 'splat', id: 'n', label: '', splatId: 'splat-1' },
+  ];
+  for (const node of nodes) assert.equal(nodeEnabled(node, lookup), false, node.kind);
+  assert.deepEqual(asked, [
+    'camera:cam-1',
+    'probe:probe-1',
+    'section:section-1',
+    'zone:zone-1',
+    'volume:volume-1',
+    'constraintGroup:cg-1',
+    'constraint:con-1',
+    'splat:splat-1',
+  ]);
+});
+
+test('a group header is never dimmed, and never consults the lookup', () => {
+  // Its members carry their own state; a group dimming with them would read as
+  // a disabled group.
+  const lookup = enabledLookup(() => {
+    throw new Error('a group header must not be looked up');
+  });
+  const group: SceneNode = { kind: 'group', id: 'group:cameras', label: 'Cameras', childIds: [] };
+  assert.equal(nodeEnabled(group, lookup), true);
+});
+
+test('an unticked entity dims only its own row', () => {
+  const lookup = enabledLookup((kind, id) => !(kind === 'splat' && id === 'splat-2'));
+  const one: SceneNode = { kind: 'splat', id: 'n', label: '', splatId: 'splat-1' };
+  const two: SceneNode = { kind: 'splat', id: 'n', label: '', splatId: 'splat-2' };
+  assert.equal(nodeEnabled(one, lookup), true);
+  assert.equal(nodeEnabled(two, lookup), false);
 });

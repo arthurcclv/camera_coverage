@@ -1,7 +1,8 @@
 /**
  * Viewport top-right layer-visibility dropdown (spec §2.4). A single eye icon
  * button opens a checklist of the viewport-only layers — Coverage, Sections,
- * Cameras, Zones, Constraints. Toggling a checkbox flips that layer immediately and leaves
+ * Cameras, Zones, Constraints, Splats, Geometry. Toggling a checkbox flips that
+ * layer immediately and leaves
  * the menu open so several can be changed in one pass; the menu closes on an
  * outside click, Escape, or re-clicking the eye button. Rows are always present
  * regardless of scene contents (toggling an empty layer is a no-op).
@@ -15,11 +16,23 @@ export interface ViewportLayerMenuProps {
   zonesVisible: boolean;
   /** Constraint gizmos + the placement pool scatter (`camera_placement.md` §5.2, §6.1). */
   constraintsVisible: boolean;
+  /** The whole 3D Gaussian Splat layer (`gaussian_splats.md` §5.2). */
+  splatsVisible: boolean;
+  /**
+   * The **rendered** scene geometry — floor, walls, boxes, glTF
+   * (`gaussian_splats.md` §5.3, spec §14.6). Drawing only: the merged collision
+   * mesh, the workspace AABB and every coverage result are untouched, so this
+   * never marks a result stale. It is the row that makes a splat capture
+   * visible, since splats draw behind opaque double-sided geometry.
+   */
+  geometryVisible: boolean;
   onToggleCoverage(): void;
   onToggleSections(): void;
   onToggleCameras(): void;
   onToggleZones(): void;
   onToggleConstraints(): void;
+  onToggleSplats(): void;
+  onToggleGeometry(): void;
 }
 
 // Layer glyphs (spec §2.4). Coverage = stacked planes (the volumetric overlay),
@@ -61,6 +74,30 @@ function ConstraintsIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="3 18 10 11 21 11" />
       <circle cx="10" cy="11" r="2.5" />
+    </svg>
+  );
+}
+
+// Splats = a scatter of soft blobs (a Gaussian cloud, `gaussian_splats.md` §5.2);
+// Geometry = a solid wireframe cube, the modelled scene the splats sit behind.
+function SplatsIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <circle cx="7" cy="8" r="3" opacity="0.85" />
+      <circle cx="15" cy="6" r="2.2" opacity="0.6" />
+      <circle cx="12" cy="14" r="3.4" opacity="0.75" />
+      <circle cx="18" cy="15" r="2" opacity="0.5" />
+      <circle cx="7" cy="18" r="2" opacity="0.55" />
+    </svg>
+  );
+}
+
+function GeometryIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2 21 7v10l-9 5-9-5V7z" />
+      <path d="M3 7l9 5 9-5" />
+      <path d="M12 12v10" />
     </svg>
   );
 }
@@ -140,6 +177,16 @@ export function ViewportLayerMenu(props: ViewportLayerMenuProps) {
             icon={<ConstraintsIcon />}
             checked={props.constraintsVisible}
             onToggle={props.onToggleConstraints}
+          />
+          {/* Splats last of the entity layers, and Geometry after it: the two
+              read as a pair, since hiding the model is how the capture behind it
+              is seen (`gaussian_splats.md` §5.2, §5.3). */}
+          <LayerRow label="Splats" icon={<SplatsIcon />} checked={props.splatsVisible} onToggle={props.onToggleSplats} />
+          <LayerRow
+            label="Geometry"
+            icon={<GeometryIcon />}
+            checked={props.geometryVisible}
+            onToggle={props.onToggleGeometry}
           />
         </ul>
       )}

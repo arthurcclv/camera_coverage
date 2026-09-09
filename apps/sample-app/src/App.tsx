@@ -36,6 +36,7 @@ import {
   type Zone,
 } from './scene/samplingVolumes.ts';
 import { drawableGroupIds, visibleZoneIds } from './scene/entityVisibility.ts';
+import type { SplatLoadState, SplatObject } from './scene/splats.ts';
 import {
   DEFAULT_TRANSFORM_SPACE,
   spaceIconKind,
@@ -60,6 +61,7 @@ import {
   exportSceneFile,
   fileExists,
   importSceneFile,
+  resolveSplatFile,
 } from './scene/sceneIO.ts';
 import {
   DEFAULT_SCENE_FILE_NAME,
@@ -109,6 +111,8 @@ import { LoadSceneDialog } from './ui/LoadSceneDialog.tsx';
 import { SaveSceneAsDialog } from './ui/SaveSceneAsDialog.tsx';
 import { VolumePanel } from './ui/VolumePanel.tsx';
 import { ZonePanel } from './ui/ZonePanel.tsx';
+import { SplatPanel } from './ui/SplatPanel.tsx';
+import { AddSplatDialog } from './ui/AddSplatDialog.tsx';
 import { SamplingVolumeControls } from './ui/SamplingVolumeControls.tsx';
 import { MAX_CAMERAS, type Bvh, type Quat } from '@linkervision/camera-coverage-sdk';
 import { CAPTURE_SLOTS } from './optimize/cubeRig.ts';
@@ -359,7 +363,7 @@ export function App() {
   // of the document.
   const [sceneState, dispatch] = useReducer(sceneReducer, initialScene, initSceneState);
   const { cameras, probes, sections, clipSectionId, zones, volumes, useZones, selection, collapsedIds, stale, hasRunOnce } = sceneState;
-  const { constraintGroups, constraints } = sceneState;
+  const { constraintGroups, constraints, splats } = sceneState;
   const [zoneLevel, setZoneLevel] = useState(DEFAULT_ZONE_LEVEL);
   const [boxLevel, setBoxLevel] = useState(DEFAULT_BOX_LEVEL);
 
@@ -667,6 +671,19 @@ export function App() {
   // (`camera_placement.md` §5.2, §6.1). Purely visual: constraints are not
   // analysis inputs, so hiding them cannot change a number.
   const [constraintsVisible, setConstraintsVisible] = useState(true);
+  // Master show/hide-all for the 3D Gaussian Splat layer (`gaussian_splats.md`
+  // §5.2), and the **Geometry** row that makes a capture visible at all — splats
+  // draw behind opaque double-sided geometry (§5.3). Both are transient viewport
+  // state, never written to the scene file, and neither can change a number.
+  const [splatsVisible, setSplatsVisible] = useState(true);
+  const [geometryVisible, setGeometryVisible] = useState(true);
+  /**
+   * Per-splat load state (`gaussian_splats.md` §6.2) — **derived side state**
+   * held beside the scene, exactly like the retained per-run probe/section data
+   * (§12.3, §13.4). Never part of `SplatObject`, never serialized, and nothing
+   * in the app blocks on it: the splat layer pushes it up as loads progress.
+   */
+  const [splatLoadStates, setSplatLoadStates] = useState<ReadonlyMap<string, SplatLoadState>>(new Map());
   // Per-probe visibility queries against the retained run (spec §12.2), keyed by
   // probe id. Recomputed when probes move or a new run's masks arrive.
   const [probeQueries, setProbeQueries] = useState<Map<string, ProbeVisibilityResult>>(new Map());
@@ -701,6 +718,11 @@ export function App() {
   // own user activation rather than being chained inside the dialog (§14.5).
   const [loadDialogFolder, setLoadDialogFolder] = useState<FileSystemDirectoryHandle | null>(null);
   const [saveAsDialog, setSaveAsDialog] = useState<{ folder: FileSystemDirectoryHandle; name: string } | null>(null);
+  // The **Add 3DGS** dialog and the folder it reads `assets/` from
+  // (`gaussian_splats.md` §3.2). Held as the folder rather than a boolean for
+  // the same reason the other two are: the dialog only ever opens on an
+  // already-granted handle.
+  const [addSplatFolder, setAddSplatFolder] = useState<FileSystemDirectoryHandle | null>(null);
   // The write waiting on its overwrite confirmation (spec §14.5). Held whole, so
   // **Overwrite** commits exactly what was routed rather than re-deciding: the
   // Save-as dialog may still be open underneath with an editable name.
@@ -723,6 +745,7 @@ export function App() {
   const selectedVolumeId = selection?.kind === 'volume' ? selection.id : null;
   const selectedConstraintGroupId = selection?.kind === 'constraintGroup' ? selection.id : null;
   const selectedConstraintId = selection?.kind === 'constraint' ? selection.id : null;
+  const selectedSplatId = selection?.kind === 'splat' ? selection.id : null;
 
   /**
    * The selected polyline and the vertex every editor acts on (§6.1).
@@ -948,6 +971,9 @@ export function App() {
         );
       });
       view.onTransform(applyTransformChange);
+      // Load progress/failure arrives here rather than being polled: derived
+      // side state, pushed up as the splat layer reads (`gaussian_splats.md` §6.2).
+      view.onSplatLoadStates(setSplatLoadStates);
       viewRef.current = view;
       setRenderBackend(view.renderBackend);
       setViewportReady(true);
@@ -973,7 +999,7 @@ export function App() {
   }, [clipSectionId, sections, room]);
 
   // --- the Selected view exists only for a selected camera (spec §2.4.1): if the
-  // selection stops being one — a probe/section/zone/volume, or a clear — the
+  // selection stops being one — a probe/section/zone/volume/splat, or a clear — the
   // viewport reverts to Perspective, so an active Selected view always implies a
   // selected camera and there is no empty state to render. -------------------
   useEffect(() => {
@@ -1060,6 +1086,22 @@ export function App() {
     [constraintGroups, placementMode],
   );
   const placementOpen = placementMode !== null && placementGroup !== null;
+
+  /**
+   * Resolves a splat's `src` against the save target's folder
+   * (`gaussian_splats.md` §4.4). `null` before any Load or Save, at which point
+   * no splat can exist (§3.2); re-created when the target changes, which is what
+   * re-points a scene load's pending capture loads at the new folder.
+   */
+  const splatFolder = saveTarget?.folder ?? null;
+  const splatLoader = useMemo(
+    () => (splatFolder == null ? null : (src: string) => resolveSplatFile(splatFolder, src)),
+    // Keyed on the **folder**, not the whole target: a plain Save mints a new
+    // target object with the same folder, and re-decoding a resident 400 MB
+    // capture on every save would be absurd. A *different* folder is exactly
+    // when the cache must be dropped, since `src` is folder-relative.
+    [splatFolder],
+  );
 
   /** Which constraints and volumes the viewport draws (`spec.md` §2.4.3). */
   const drawableGroups = useMemo(
@@ -1252,6 +1294,10 @@ export function App() {
       draftPolyline: draftPoints,
       draftVertices,
       placementMoves: placementMoveLines,
+      splats,
+      splatLoader,
+      splatsVisible,
+      geometryVisible,
     }),
     [
       room, previewCameras, placementPreviewCameras, probes, sections, volumes, selection, placementOpen,
@@ -1261,6 +1307,7 @@ export function App() {
       voxelSize, clipBand, sightlines, placing,
       constraints, activeVertex, constraintsVisible, poolPositions, chosenPoolIndices,
       drawing, extending, drawAnchor, draftPoints, draftVertices, placementMoveLines,
+      splats, splatLoader, splatsVisible, geometryVisible,
     ],
   );
 
@@ -1468,7 +1515,7 @@ export function App() {
   // (contributes to the marked set). Toggling a section or zone is a client-side
   // re-filter only — neither marks the coverage result stale.
   const handleToggleEnabled = useCallback(
-    (kind: 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint', id: string) => {
+    (kind: 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat', id: string) => {
       dispatch({ type: 'toggleEnabled', kind, id });
     },
     [],
@@ -1692,6 +1739,56 @@ export function App() {
     dispatch({ type: 'bindCamera', id, constraintId });
   }, []);
 
+  // --- 3D Gaussian Splats (`gaussian_splats.md` §3.2, §6, §7). **No splat action
+  // marks the result stale** — a capture contributes no triangles, no bounds and
+  // no voxels, so there is nothing for a recompute to produce differently (§1.1).
+  // The reducer enforces that; nothing here needs to. -------------------------
+
+  /**
+   * The **Add 3DGS** dialog needs a folder to read `assets/` from, so the "+"
+   * entry is disabled until a Load or Save has settled one (§3.2). This is the
+   * one "+" entry that is not always enabled, and the string is the hint the row
+   * shows.
+   */
+  const addSplatBlocker = saveTarget == null ? 'Load or save a scene first.' : null;
+
+  const handleAddSplat = useCallback(() => {
+    if (saveTarget != null) setAddSplatFolder(saveTarget.folder);
+  }, [saveTarget]);
+
+  const handleAddSplatCommit = useCallback((src: string) => {
+    // Adds a row referencing a file the user already put in `assets/` — the app
+    // never writes there (§3.2, spec §14.9) — at an identity transform, and
+    // auto-selects it so the `SplatPanel` is open ready to register.
+    dispatch({ type: 'addSplat', src });
+    setAddSplatFolder(null);
+  }, []);
+
+  const handleSplatChange = useCallback((id: string, patch: Partial<SplatObject>) => {
+    dispatch({ type: 'changeSplat', id, patch });
+  }, []);
+
+  const handleRenameSplat = useCallback((id: string, name: string) => {
+    dispatch({ type: 'renameEntity', kind: 'splat', id, name });
+  }, []);
+
+  const handleSplatPreset = useCallback((id: string, preset: 'reset' | 'flipZ') => {
+    dispatch({ type: 'splatPreset', id, preset });
+  }, []);
+
+  // Deleting a splat disposes its mesh, cancels an in-flight load, and releases
+  // the decoded capture **only if it was the last row on that `src`** (§3.3,
+  // §6.3) — all of which the splat layer does off the shrinking array.
+  const handleDeleteSplat = useCallback((id: string) => {
+    dispatch({ type: 'deleteEntity', kind: 'splat', id });
+  }, []);
+
+  // The copy carries the same `src`, so it **shares** the original's decode
+  // rather than re-reading and re-decoding the file (§3.3, §6.4).
+  const handleDuplicateSplat = useCallback((id: string) => {
+    dispatch({ type: 'duplicateEntity', kind: 'splat', id });
+  }, []);
+
   // Hierarchy drag-reorder (spec §5.5.1). Array order is the display order and
   // round-trips in the scene file, so this is a pure splice: no recompute, no
   // stale/sampling-dirty, and the selection is deliberately left alone.
@@ -1716,6 +1813,7 @@ export function App() {
       useZones: boolean;
       constraintGroups: ConstraintGroup[];
       constraints: CameraConstraint[];
+      splats: SplatObject[];
     }) => {
       // Geometry build + retained-chunk consumers are App-owned side effects; the
       // scene document is reset in one `sceneReplaced` dispatch (the reducer
@@ -1744,6 +1842,7 @@ export function App() {
           useZones: next.useZones,
           constraintGroups: next.constraintGroups,
           constraints: next.constraints,
+          splats: next.splats,
         },
       });
       setSummary(null);
@@ -1755,6 +1854,12 @@ export function App() {
       // from committing bookkeeping for geometry that is gone (spec §14.4).
       engineLoadRef.current = null;
       viewRef.current?.clearCoverage(); // the overlay lives in SceneView
+      // The incoming scene is a different scene even when it comes out of the
+      // same folder, so every decoded capture goes with the outgoing one — the
+      // layer cannot see that itself, since both scenes share one loader
+      // (`gaussian_splats.md` §3.3, §8; spec §14.4). The loads for whatever the
+      // new scene references start on the next `sync`.
+      viewRef.current?.releaseSplats();
       void cancelInFlight(); // spec §14.4 step 4, now an actual cancel (SDK §13.2)
       coverageRun.clear(); // wipes the three stores + invalidates in-flight runs
       setMasksVersion((v) => v + 1);
@@ -1798,8 +1903,9 @@ export function App() {
       useZones,
       constraintGroups,
       constraints,
+      splats,
     }),
-    [geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones, constraintGroups, constraints],
+    [geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones, constraintGroups, constraints, splats],
   );
 
   /**
@@ -1874,6 +1980,11 @@ export function App() {
           useZones: imported.useZones,
           constraintGroups: imported.constraintGroups,
           constraints: imported.constraints,
+          // Captures are **not** part of the import gate: a missing or
+          // undecodable one leaves the import successful and reports on its row
+          // instead, and the loads start asynchronously once the scene is in
+          // (`gaussian_splats.md` §9, spec §14.4 step 5).
+          splats: imported.splats,
         });
         // The scene now lives in this file, so Save writes back here (§14.5).
         setSaveTarget((prev) => nextSaveTarget(prev, { kind: 'imported', ...target }));
@@ -1912,7 +2023,9 @@ export function App() {
       // The *current* target is the asset source — `target` here is the
       // destination. `gltf` geometry can only arrive by import (§14.9 forbids
       // authoring), and import always sets a target.
-      const assetSrcs = sameFolder || saveTarget == null ? [] : planAssetCopy(geometryObjects);
+      // Captures copy the same way GLBs do, deduplicated across the two: a
+      // capture referenced by two splat rows copies once (`gaussian_splats.md` §8).
+      const assetSrcs = sameFolder || saveTarget == null ? [] : planAssetCopy(geometryObjects, splats);
       const copyFrom = assetSrcs.length > 0 ? saveTarget?.folder ?? null : null;
       setSceneIOBusy(true);
       try {
@@ -1945,7 +2058,7 @@ export function App() {
         setConfirmOverwrite(null);
       }
     },
-    [saveTarget, geometryObjects, currentScene, flashSavedStatus],
+    [saveTarget, geometryObjects, splats, currentScene, flashSavedStatus],
   );
 
   /**
@@ -2013,7 +2126,7 @@ export function App() {
   );
 
   /** The assets a cross-folder Save As… would copy (§14.5). */
-  const assetCopyPlan = useMemo(() => planAssetCopy(geometryObjects), [geometryObjects]);
+  const assetCopyPlan = useMemo(() => planAssetCopy(geometryObjects, splats), [geometryObjects, splats]);
 
   // An error raised while a dialog is up belongs *in* it, so the next file or
   // folder can be tried without re-navigating; the panel's banner is for
@@ -2319,6 +2432,7 @@ export function App() {
   const selectedZoneMemberCount = selectedZoneId ? volumes.filter((v) => v.zoneId === selectedZoneId).length : 0;
   const selectedConstraintGroup = constraintGroups.find((g) => g.id === selectedConstraintGroupId) ?? null;
   const selectedConstraint = constraints.find((c) => c.id === selectedConstraintId) ?? null;
+  const selectedSplat = splats.find((s) => s.id === selectedSplatId) ?? null;
 
   const selectedGroupMemberCount = selectedConstraintGroupId
     ? constraints.filter((c) => c.groupId === selectedConstraintGroupId).length
@@ -2406,6 +2520,8 @@ export function App() {
               volumes={volumes}
               constraintGroups={constraintGroups}
               constraints={constraints}
+              splats={splats}
+              splatLoadStates={splatLoadStates}
               selection={selection}
               flaggedIds={engine.state.flaggedCameras}
               perCamera={hierarchyRates}
@@ -2423,6 +2539,8 @@ export function App() {
               onAddVolume={handleAddVolume}
               onAddConstraintGroup={handleAddConstraintGroup}
               onAddConstraint={handleAddConstraint}
+              onAddSplat={handleAddSplat}
+              addSplatBlocker={addSplatBlocker}
               onDeleteCamera={handleDeleteCamera}
               onDeleteProbe={handleDeleteProbe}
               onDeleteSection={handleDeleteSection}
@@ -2437,6 +2555,8 @@ export function App() {
               onDeleteConstraint={handleDeleteConstraint}
               onDuplicateConstraintGroup={handleDuplicateConstraintGroup}
               onDuplicateConstraint={handleDuplicateConstraint}
+              onDeleteSplat={handleDeleteSplat}
+              onDuplicateSplat={handleDuplicateSplat}
               onReorder={handleReorder}
             />
           </div>
@@ -2454,7 +2574,15 @@ export function App() {
             ref={detailPanelRef}
             style={detailHeight != null ? { height: detailHeight, flex: '0 0 auto' } : undefined}
           >
-            {selectedConstraint ? (
+            {selectedSplat ? (
+              <SplatPanel
+                splat={selectedSplat}
+                loadState={splatLoadStates.get(selectedSplat.id)}
+                onRename={handleRenameSplat}
+                onChange={handleSplatChange}
+                onPreset={handleSplatPreset}
+              />
+            ) : selectedConstraint ? (
               <ConstraintPanel
                 constraint={selectedConstraint}
                 groups={constraintGroups}
@@ -2623,11 +2751,15 @@ export function App() {
               camerasVisible={gizmosVisible}
               zonesVisible={zonesVisible}
               constraintsVisible={constraintsVisible}
+              splatsVisible={splatsVisible}
+              geometryVisible={geometryVisible}
               onToggleCoverage={() => setOverlayOptions((o) => ({ ...o, visible: !o.visible }))}
               onToggleSections={() => setSectionsVisible((v) => !v)}
               onToggleCameras={() => setGizmosVisible((v) => !v)}
               onToggleZones={() => setZonesVisible((v) => !v)}
               onToggleConstraints={() => setConstraintsVisible((v) => !v)}
+              onToggleSplats={() => setSplatsVisible((v) => !v)}
+              onToggleGeometry={() => setGeometryVisible((v) => !v)}
             />
           </div>
           {(() => {
@@ -2740,6 +2872,16 @@ export function App() {
       {/* Scene-file dialogs (spec §14.7). Rendered last so the backdrop sits over
           the whole app; both open only once a folder is granted, so the picker
           runs from the button's own user activation (§14.5). */}
+      {/* The **Add 3DGS** dialog (`gaussian_splats.md` §3.2): a backdrop modal
+          like the other two, because it settles the same question — which file
+          on disk something points at (spec §14.7). */}
+      {addSplatFolder != null && (
+        <AddSplatDialog
+          folder={addSplatFolder}
+          onAdd={handleAddSplatCommit}
+          onCancel={() => setAddSplatFolder(null)}
+        />
+      )}
       {loadDialogFolder != null && (
         <LoadSceneDialog
           folder={loadDialogFolder}

@@ -7,7 +7,16 @@ import {
   type EntityMenuHandlers,
 } from '../src/ui/entityMenu.ts';
 
-const KINDS: DeletableKind[] = ['camera', 'probe', 'section', 'zone', 'volume', 'constraintGroup', 'constraint'];
+const KINDS: DeletableKind[] = [
+  'camera',
+  'probe',
+  'section',
+  'zone',
+  'volume',
+  'constraintGroup',
+  'constraint',
+  'splat',
+];
 
 /** A handler bundle that records which callback fired, and with what id. */
 function spies() {
@@ -21,6 +30,7 @@ function spies() {
     onDeleteVolume: spy('deleteVolume'),
     onDeleteConstraintGroup: spy('deleteConstraintGroup'),
     onDeleteConstraint: spy('deleteConstraint'),
+    onDeleteSplat: spy('deleteSplat'),
     onDuplicateCamera: spy('duplicateCamera'),
     onDuplicateProbe: spy('duplicateProbe'),
     onDuplicateSection: spy('duplicateSection'),
@@ -28,6 +38,7 @@ function spies() {
     onDuplicateVolume: spy('duplicateVolume'),
     onDuplicateConstraintGroup: spy('duplicateConstraintGroup'),
     onDuplicateConstraint: spy('duplicateConstraint'),
+    onDuplicateSplat: spy('duplicateSplat'),
   };
   return { handlers, calls };
 }
@@ -64,4 +75,17 @@ test('duplicateHandlers: every kind routes to exactly one handler, and it is its
     duplicateHandlers(handlers)[kind](`${kind}-1`);
     assert.deepEqual(calls, [`duplicate${kind[0].toUpperCase()}${kind.slice(1)}:${kind}-1`]);
   }
+});
+
+test('a splat reaches its own delete and duplicate handlers (`gaussian_splats.md` §6.3, §6.4)', () => {
+  // `splat` is the newest member of `DeletableKind`, so it is exactly the kind
+  // the old bare-`else` chain would have swallowed into `onDeleteVolume`. The
+  // `Record` return type is what made wiring it a compile error instead.
+  const del = spies();
+  deleteHandlers(del.handlers).splat('splat-1');
+  assert.deepEqual(del.calls, ['deleteSplat:splat-1']);
+
+  const dup = spies();
+  duplicateHandlers(dup.handlers).splat('splat-1');
+  assert.deepEqual(dup.calls, ['duplicateSplat:splat-1']);
 });

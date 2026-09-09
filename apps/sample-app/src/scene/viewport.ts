@@ -1,6 +1,8 @@
 /**
  * Viewport (spec §2.2, §2.3, §2.4): Three.js `WebGPURenderer` (`three/webgpu`)
- * with automatic WebGL2 fallback, orbit/transform controls, and render loop.
+ * with automatic WebGL2 fallback, orbit/transform controls, and render loop,
+ * plus a second **`WebGLRenderer`** canvas stacked behind it for 3D Gaussian
+ * Splat captures (`scene/splatLayer.ts`, `gaussian_splats.md` §4).
  * `WebGPURenderer` initializes asynchronously, so `createViewport` is async and
  * awaits `renderer.init()` before the first frame. Driven imperatively; React
  * only owns the container ref.
@@ -53,6 +55,7 @@ import {
   type ViewId,
 } from './viewCameras.ts';
 import { createSceneLights } from './sceneLighting.ts';
+import { SPLAT_LAYER_CLEAR_COLOR, SplatLayer } from './splatLayer.ts';
 
 export type RenderBackend = 'webgpu' | 'webgl2';
 
@@ -98,6 +101,13 @@ export interface Viewport {
   /** The frame guide's current size in CSS pixels, or null (spec §2.4.1, §5.2). */
   cameraGuideSizePx(): { width: number; height: number } | null;
   renderer: THREE.WebGPURenderer;
+  /**
+   * The second, `WebGLRenderer` canvas behind this one, drawing the 3D Gaussian
+   * Splat captures (`gaussian_splats.md` §4). Always present as an object; its
+   * `available` is false when the browser gave no WebGL2 context, in which case
+   * the layer is inert and this canvas re-owns its opaque background (§9).
+   */
+  splats: SplatLayer;
   /** Which backend `WebGPURenderer` actually selected (spec §2.3). */
   renderBackend: RenderBackend;
   orbitControls: OrbitControls;
@@ -137,7 +147,15 @@ export async function createViewport(
   options: ViewportOptions = {},
 ): Promise<Viewport> {
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x1a1d22);
+  // The **WebGL splat layer owns the viewport background** (`gaussian_splats.md`
+  // §4.2): this canvas is created `alpha: true` with a null scene background, so
+  // it clears transparent and composites over the layer beneath. Measured on the
+  // real `volumetric.ts` material, that composite differs from the old
+  // opaque-background result by 0.07/255 in `max` mode and 0.12/255 in
+  // `additive` — invisible in both (§4.5). When the splat layer has no WebGL2
+  // context the background is restored here instead, so the viewport renders
+  // exactly as it did before (§9).
+  scene.background = null;
 
   // A steep-ish elevation keeps the optical path through the full-volume
   // coverage overlay short, so it reads as a translucent haze rather than a
@@ -185,12 +203,20 @@ export async function createViewport(
 
   // Prefers WebGPU; falls back to its own WebGL2 backend when navigator.gpu is
   // unavailable, so the demo always renders through one code path (spec §2.3).
-  const renderer = new THREE.WebGPURenderer({ antialias: true });
+  // The splat layer is built **first and unconditionally** — one code path
+  // whether or not a scene has a capture — because it owns the background and
+  // has to sit behind this canvas in DOM order (`gaussian_splats.md` §4.2).
+  const splats = new SplatLayer();
+  if (splats.canvas) container.appendChild(splats.canvas);
+  if (!splats.available) scene.background = new THREE.Color(SPLAT_LAYER_CLEAR_COLOR);
+
+  const renderer = new THREE.WebGPURenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   await renderer.init();
   // `backend` is typed as the abstract base; the WebGPU backend tags itself.
   const backend = renderer.backend as { isWebGPUBackend?: boolean } | undefined;
   const renderBackend: RenderBackend = backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
+  renderer.domElement.classList.add('viewport-main');
   container.appendChild(renderer.domElement);
 
   // Fixed light rig (spec §2.3.1) — see `sceneLighting.ts` for the rationale.
@@ -409,6 +435,9 @@ export async function createViewport(
     // (spec §2.4.1), which also re-derives the frame guide for the new aspect.
     applyCameraView();
     renderer.setSize(w, h);
+    // One observer, one `setSize` pair, so the two canvases cannot drift
+    // (`gaussian_splats.md` §4.2).
+    splats.setSize(w, h, window.devicePixelRatio);
   }
   const resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(container);
@@ -416,6 +445,12 @@ export async function createViewport(
 
   renderer.setAnimationLoop(() => {
     orbitControls.update();
+    // One animation loop: the splat layer draws first (it clears the
+    // background), then the transparent WebGPU scene composites over it, then
+    // the orientation gizmo. Both renderers are handed **the same camera
+    // object**, so the backdrop cannot lag the geometry by a frame during an
+    // orbit (`gaussian_splats.md` §4.2, §4.3).
+    splats.render(cameras[activeView]);
     renderer.render(scene, cameras[activeView]);
     // Mirror the live view, then draw the gizmo over the corner (it manages its
     // own viewport + depth clear, and handles the WebGPU y-origin, spec §2.4).
@@ -433,6 +468,9 @@ export async function createViewport(
     orientationGizmo.dispose();
     transformControls.dispose();
     orbitControls.dispose();
+    // Tears down the second renderer, the splat scene, every `SplatMesh`, and
+    // the decode cache (`gaussian_splats.md` §4.2).
+    splats.dispose();
     renderer.dispose();
     if (renderer.domElement.parentNode === container) {
       container.removeChild(renderer.domElement);
@@ -452,6 +490,7 @@ export async function createViewport(
     setCameraViewSource,
     cameraGuideSizePx,
     renderer,
+    splats,
     renderBackend,
     orbitControls,
     transformControls,

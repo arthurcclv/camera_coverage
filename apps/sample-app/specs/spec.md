@@ -82,6 +82,9 @@ apps/sample-app/
       samplingVolumeGizmos.ts  per-volume wireframe boxes + transform target (sampling_volumes.md §5)
       constraintGizmos.ts  per-constraint primitive handles + translucent dilation (camera_placement.md §6.1)
       polylineDraw.ts      the armed polyline draw mode, over §2.4.2's hit test (camera_placement.md §6.2)
+      splats.ts            SplatObject model + label + ids + clip-band → SDF box mapping (gaussian_splats.md §2, §5.4)
+      splatAssets.ts       which assets/ files the Add 3DGS dialog lists, and in what order (gaussian_splats.md §3.2)
+      splatLayer.ts        the second WebGL canvas: SparkRenderer, splat scene, stream load, decode cache, SplatEdit lifecycle (gaussian_splats.md §4)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
@@ -109,9 +112,11 @@ apps/sample-app/
       ZonePanel.tsx        selected-zone name + member count + per-zone stats (sampling_volumes.md §6.2)
       ConstraintGroupPanel.tsx  selected-group name + the Camera placement section: camera template + `Place cameras` (camera_placement.md §5)
       ConstraintPanel.tsx  selected-constraint kind + distance + geometry + vertex list (camera_placement.md §6)
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections groups + Zones and Constraints umbrellas, enable/visibility toggle, add "+" menu with its nested Constraint submenu, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
+      SplatPanel.tsx       selected-splat name + source + position/rotation/uniform scale + Flip 180° Z (gaussian_splats.md §7)
+      AddSplatDialog.tsx   the Add 3DGS dialog: the capture files found in assets/ (gaussian_splats.md §3.2)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections/Splats groups + Zones and Constraints umbrellas, enable/visibility toggle, add "+" menu with its nested Constraint submenu and its 3D Gaussian Splat… dialog entry, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
       OverlayControls.tsx  overlay mode + intensity scale + resolution slider
-      ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones/Constraints visibility checkboxes (§2.4)
+      ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones/Constraints/Splats/Geometry visibility checkboxes (§2.4)
       ViewSelector.tsx     top-middle View dropdown: Perspective/Top/Front/Right camera selection (§2.4)
       HeatmapLegend.tsx    legend renderer (caption + gradient + ticks); caller picks section (Turbo) vs coverage-overlay (hue) scale (§13.6, §9)
       SamplingVolumeControls.tsx  zone tool: useZones toggle, generate, levels, marked readout (sampling_volumes.md §6.3)
@@ -130,7 +135,7 @@ The app is a **three-column** flex layout (desktop only, §1):
   scene-file actions (`SceneFileControls`, §14.7) at the top, then the
   `SceneHierarchy` tree, then the selected entity's editor
   (`CameraPanel`/`ProbePanel`/`SectionPanel`/`VolumePanel`/`ZonePanel`/
-  `ConstraintGroupPanel`/`ConstraintPanel`) below it. The
+  `ConstraintGroupPanel`/`ConstraintPanel`/`SplatPanel`) below it. The
   hierarchy grows to fill the column and scrolls internally; the detail panel
   sits below (and shows a placeholder when nothing is selected). A **draggable
   divider** between the two resizes the split: dragging sets the detail panel's
@@ -191,6 +196,27 @@ throughput on the volumetric overlay's heavy additive overdraw (§9;
   backends.
 - `WebGPURenderer` initializes **asynchronously** (`await renderer.init()` before the
   first frame); viewport setup accounts for this.
+- **A second, `WebGLRenderer` canvas sits behind it** for 3D Gaussian Splat captures
+  (`gaussian_splats.md` §4). Spark, the splat renderer, requires a `WebGLRenderer` and
+  draws with GLSL `RawShaderMaterial`, which `WebGPURenderer` supports on neither
+  backend — so the splat layer is its own canvas, its own renderer, and its own scene.
+  The **WebGL canvas owns the viewport background** (it clears to `0x1a1d22`) and the
+  WebGPU canvas is created **`alpha: true`** with its scene's `background` set to
+  **`null`**, so it clears transparent and composites over the layer beneath. Both
+  renderers draw **the same camera objects** each frame — `three` and `three/webgpu`
+  share one `three.core.js`, so there is exactly one `PerspectiveCamera`/
+  `OrthographicCamera` class and no matrices need mirroring. The two canvases share no
+  **depth** buffer, so splats are always drawn behind every mesh and gizmo
+  (`gaussian_splats.md` §4.1). Making the WebGPU canvas transparent is **measured** not
+  to change the coverage overlay: composited over the WebGL layer it matches today's
+  opaque-background result to within 0.12/255 in both composite modes
+  (`gaussian_splats.md` §4.5).
+- **A capture appears a few frames after it loads.** Spark's sort runs in a worker, so
+  a `SplatMesh` emits no geometry for its first several frames even after its own
+  `initialized` promise resolves (`gaussian_splats.md` §4.4). Nothing may treat "loaded"
+  as "on screen", and `SparkRenderer`'s own mesh draws one triangle per frame
+  regardless of content, so draw-call counts say nothing about whether a capture is
+  visible.
 
 ### 2.3.1 Scene lighting
 
@@ -244,8 +270,11 @@ heatmap legend at its bottom-right (§13.6):
     switching `TransformControls`'s mode. Each shows its name as a tooltip on hover
     and is highlighted ("active") when its mode is current. **Scale** is a
     volume-only mode (`sampling_volumes.md` §5) — enabled only while a sampling
-    volume is selected (cameras keep Move/Rotate; probes and sections are
-    Move-only); on any other selection it falls back to Move.
+    volume is selected (cameras and **splats** keep Move/Rotate; probes and sections
+    are Move-only); on any other selection it falls back to Move. A **splat**'s scale
+    is deliberately **not** on the gizmo: it is a single uniform number edited in its
+    panel, because the per-axis scale gizmo would shear the capture's Gaussians
+    (`gaussian_splats.md` §2.1, §7).
   - Transform **space** toggle: a single icon button that flips the gizmo
     between **Local** and **Global** space (`TransformControls.setSpace`,
     mapping Local→`'local'` and Global→`'world'`). In Local space the gizmo
@@ -260,7 +289,7 @@ heatmap legend at its bottom-right (§13.6):
     selections that carry a placeable point — a **camera**, a **probe**, or a
     polyline constraint's **selected vertex** (`camera_placement.md` §6.2) — and
     disabled for a section, a zone, a sampling volume, a point or plane
-    constraint, or an empty selection. Highlighted ("active") while armed.
+    constraint, a splat, or an empty selection. Highlighted ("active") while armed.
     Specified in §2.4.2.
 - **Top-middle** — a **View selector** dropdown that chooses which camera the
   viewport renders through. The button shows the current view's name and a
@@ -330,6 +359,19 @@ heatmap legend at its bottom-right (§13.6):
     constraints are not analysis inputs (`camera_placement.md` §1.1), so hiding them
     cannot change any number. The layer toggle and the per-constraint/per-group
     flag hide independently; §2.4.3 covers the flag. Defaults to visible.
+  - **Splats** — a **master** show/hide-all for the 3D Gaussian Splat layer
+    (`gaussian_splats.md` §5.2): off hides every capture; on shows each per its own
+    row checkbox, parallel to how **Cameras** relates to per-camera state. Purely
+    visual — splats are not analysis inputs (`gaussian_splats.md` §1.1) — and
+    implemented as the splat scene's visibility, so hiding the layer costs nothing.
+    Defaults to visible.
+  - **Geometry** — shows/hides the **rendered** scene geometry (floor, walls, boxes,
+    glTF — §14.6) at once. It hides **drawing only**: the merged collision
+    `SceneMesh`, the workspace AABB, and every coverage result are untouched, so it
+    never marks the result stale. This is the row that makes a splat capture
+    visible — splats draw behind opaque, double-sided geometry (§2.3), so hiding the
+    model is how the real site is seen behind the same cameras and the same overlay
+    (`gaussian_splats.md` §5.3). Defaults to visible.
 
 The eye button renders as an icon button in a top-right toolbar strip and is
 highlighted ("active") while the dropdown is open.
@@ -368,9 +410,14 @@ the rig one view at a time. Consequently:
   disabled case specially; the coverage overlay simply shows no contribution from
   that camera, because it took no part in the run.
 - If the selection stops being a camera while the view is active — a probe,
-  section, zone, or volume is selected, or the selection is cleared — the
+  section, zone, volume, or splat is selected, or the selection is cleared — the
   viewport **reverts to Perspective**. An active Selected view therefore
   always implies a selected camera; there is no empty state to render.
+- **Splat captures render in this view too** (`gaussian_splats.md` §4.3): the splat
+  layer draws the same camera object the WebGPU renderer does, so with the geometry
+  layer hidden (§2.4) this view shows what the camera sees **of the real site** — the
+  closest the app gets to the question `apps/splat-camera-export` answers, live and
+  while aiming.
 - The view has **no remembered framing** and is never auto-fit: its framing is
   derived wholly from the selected camera, so there is nothing to remember. Like
   the other views it is transient state, never written to the scene file (§14).
@@ -438,7 +485,10 @@ placeable: a **camera** (§5), a **probe** (§12), and a **polyline constraint's
 selected vertex** (`camera_placement.md` §6.2). A section is a set of bounds
 rather than a point (§13.1), a zone has no transform at all, and a sampling
 volume's `position` is its box *centre* — placing it on a surface would bury half
-the box below that surface — so all three leave the button **disabled**. The
+the box below that surface — so all three leave the button **disabled**. A
+**splat** carries a `position` but is disabled too, for a different reason: its
+registration is a whole-capture frame, not a point to drop on a wall
+(`gaussian_splats.md` §7). The
 supported set is a single named list in the code, not a condition spelled out at
 each use site, and widening it is a deliberate edit that every consumer must be
 updated for.
@@ -491,6 +541,13 @@ to the ray**, so a camera body standing in front of a wall never blocks placemen
 on that wall. Geometry is rendered double-sided (§14.6), so a wall's far face is a
 valid target: the tool places on whichever surface is actually visible from the
 current viewpoint.
+
+**A splat capture is never a target**, even a visible one filling the click. It is
+on another canvas and not in the picked scene at all (§2.3), and the reason is not
+merely mechanical: a splat contributes no triangles to the collision mesh, so a
+camera mounted on a captured wall would be reported by every subsequent run as
+seeing straight through the surface it sits on (`gaussian_splats.md` §1.1). A click
+that lands only on a capture is a miss.
 
 When a section is **clipping** the geometry (§13.9), intersections lying outside
 the clip band are **discarded** and the nearest surviving intersection wins. The
@@ -546,13 +603,14 @@ load.
 ### 2.4.3 Disabled entities
 
 `enabled: false` — on a camera (§5.4), a section (§13.1), a zone
-(`sampling_volumes.md` §6.2), or a constraint / constraint group
-(`camera_placement.md` §3.1) — means the entity **draws nothing in the viewport**.
+(`sampling_volumes.md` §6.2), a constraint / constraint group
+(`camera_placement.md` §3.1), or a splat (`gaussian_splats.md` §5.1) — means the
+entity **draws nothing in the viewport**.
 Before this rule each kind chose its own answer: sections vanished, cameras and
 zones and constraints dimmed. A large layout disables in **bulk** — Apply parks its
 surplus cameras with this very flag (`camera_placement.md` §9.4) — and a dimmed body
 is still a body: at ninety-odd cameras the dim ramp is clutter that reads as a
-rendering fault rather than as an off switch. One rule, five kinds.
+rendering fault rather than as an off switch. One rule, six kinds.
 
 **Selection wins.** While an entity is the current selection it draws anyway, at a
 **selected-disabled** tier between selected and gone. Selection is now the only
@@ -580,6 +638,16 @@ dragged blind. The constraint's selected-disabled fill (0.06) is deliberately th
 same value a selected but **mount-excluded** constraint takes
 (`camera_placement.md` §4.1.1): both mean *selected, and contributing nothing*, and
 separate values would be a distinction with no decision behind it.
+
+**A splat is the one exception to "selection wins."** A disabled **splat**
+(`gaussian_splats.md` §5.1) stays hidden **even while selected**. The exception above
+exists so a gizmo's own wireframe is visible to the drag that needs it; a splat is
+not a gizmo but a photoreal capture filling the viewport, and re-drawing one the user
+has just explicitly hidden — because they clicked its row — would read as the
+checkbox not working rather than as a courtesy. There is no selected-disabled tier
+for it, and no partial opacity: the checkbox is honoured literally. Its
+`TransformControls` gizmo **still attaches**, so a hidden capture can be moved and
+re-ticked to check the result, which is the editability the rule was protecting.
 
 **A disabled group hides its constraints.** A group's `enabled: false` skips the
 whole group in the search (`camera_placement.md` §3.1), so every constraint under it
@@ -750,7 +818,11 @@ for **both**:
 
 `WorkspaceConfig` passed to `init`:
 
-- `worldMin` / `worldMax` — the room's AABB (with a small margin).
+- `worldMin` / `worldMax` — the room's AABB (with a small margin). Derived from the
+  merged **geometry** alone (§14.6): a **splat** capture contributes **no bounds**,
+  however far it extends, because it is not measured (`gaussian_splats.md` §1.1).
+  Widening the analysis volume to enclose a backdrop would add voxels nothing can
+  cover and dilute every reported rate.
 - `voxelSize` — see §6.
 - `chunkSizeXZ` — **derived per scene** via the SDK's `suggestChunkSizeXZ` (SDK spec §3),
   not pinned. On this app's default room that reproduces the 10 m the worked examples
@@ -799,9 +871,11 @@ for **both**:
 
 - **Select** a camera by clicking its frustum gizmo in the viewport or its camera
   node in the scene hierarchy (§5.5). Selection is **unified** across cameras, probes,
-  sections, zones, and volumes (§5.5, §12.4, §13.8; `sampling_volumes.md` §4.1, §5): the
-  viewport pick returns the nearest hit across cameras, probes, and **volumes**; sections
-  and zones are selected from the hierarchy only (they have no pickable viewport body).
+  sections, zones, volumes, constraint groups/constraints, and **splats** (§5.5, §12.4,
+  §13.8; `sampling_volumes.md` §4.1, §5; `gaussian_splats.md` §6.1): the
+  viewport pick returns the nearest hit across cameras, probes, and **volumes**; sections,
+  zones, constraint groups, and **splats** are selected from the hierarchy only (they
+  have no pickable viewport body — a splat's is on another canvas entirely, §2.4.2).
   Selecting any one entity deselects the others, so only one editor and at most one
   `TransformControls` gizmo is ever active.
 - **Deselect** by clicking empty space in the viewport (a click that hits no gizmo
@@ -871,7 +945,9 @@ Two kinds of numeric text field appear in the panels, sharing one commit/revert 
 
 - **Grouped vector fields** — position, rotation, and volume size (`sampling_volumes.md`
   §6.1): one row per vector — a group label (Position / Rotation / Size) followed by
-  three fields carrying dim axis letters **X / Y / Z**.
+  three fields carrying dim axis letters **X / Y / Z**. A **splat**'s Scale is
+  deliberately *not* one of these: it is a single uniform number in an ungrouped field,
+  because a per-axis scale would shear the capture (`gaussian_splats.md` §7).
 - **Slider value fields** — **every slider in the app** keeps its slider control but its
   formerly read-only value readout is an **editable numeric text field**: FOV and Range
   (§5.2), the resolution voxel size (§6), the section thickness / footprint / reveal-range
@@ -893,7 +969,8 @@ Shared behavior for every numeric text field:
 - **Invalid or empty** input (anything that is not a finite number) reverts to the
   last committed value on commit — the scene is never written a `NaN`.
 - A committed edit marks the result stale (§8.1) **once per commit**, like any other
-  camera/volume edit. Probe position is the exception — it never marks stale (§12.5).
+  camera/volume edit. Probe position is the exception — it never marks stale (§12.5), as
+  is every field of a **splat** (`gaussian_splats.md` §1.1).
   Focusing and blurring a field **without a real change** — no edit, or a value that
   rounds/clamps back to the one already stored — is **not** a commit and marks nothing
   stale.
@@ -991,13 +1068,16 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   and — for the region-of-interest tool — `{ kind: 'zone' }` (**both selectable and
   expandable**) and `{ kind: 'volume' }` (a selectable leaf), and — for the placement tool
   (`camera_placement.md` §7) — `{ kind: 'constraintGroup' }` (**both selectable and
-  expandable**) and `{ kind: 'constraint' }` (a selectable leaf). Nodes carry hierarchy and
+  expandable**) and `{ kind: 'constraint' }` (a selectable leaf), and — for splat
+  captures (`gaussian_splats.md` §2.2) — `{ kind: 'splat' }` (a selectable leaf).
+  Nodes carry hierarchy and
   identity only; entity payload stays in the canonical arrays — cameras in
   `CameraConfig[]` (§5), probes in `Probe[]` (§12.1), sections in `Section[]` (§13.1),
   zones in `Zone[]`, volumes in `SamplingVolume[]` (`sampling_volumes.md` §2), constraint
   groups in `ConstraintGroup[]` and constraints in `CameraConstraint[]`
-  (`camera_placement.md` §3.1) — which a node references by id. The tree is **derived** via
-  `buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints)`
+  (`camera_placement.md` §3.1), splats in `SplatObject[]` (`gaussian_splats.md` §2.1) —
+  which a node references by id. The tree is **derived** via
+  `buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats)`
   — no separate mutable node state.
 - **Structure.** Auto-derived collapsible groups at the root, one per entity type:
   a **"Cameras"** group over the camera nodes, (when any probes exist) a **"Probes"**
@@ -1007,8 +1087,12 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   (`sampling_volumes.md` §4.1), and (when any **constraint group** exists — including an
   empty one) a passive **"Constraints"** umbrella over **selectable+expandable constraint-group
   nodes**, each holding its constraint children (`camera_placement.md` §7) — the
-  user-created sub-groups (all other groups are auto-derived by type). The root order is
-  **Cameras → Probes → Sections → Zones → Constraints**, fixed. Rows are
+  user-created sub-groups (all other groups are auto-derived by type) — and (when any
+  splat exists) a **"Splats"** group over the splat nodes (`gaussian_splats.md` §2.2),
+  auto-derived by type like Cameras/Probes/Sections. The root order is
+  **Cameras → Probes → Sections → Zones → Constraints → Splats**, fixed; Splats sits
+  last because it is the only group that cannot change a number, and the order already
+  runs from analysis inputs toward presentation. Rows are
   **reorderable by drag within their own group** (§5.5.1); **reparenting** by drag is not
   offered — a volume changes zone from its panel instead (`sampling_volumes.md` §6.1), and
   a constraint changes group from its panel (`camera_placement.md` §7).
@@ -1032,6 +1116,13 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   and reachable rate (e.g. `3 constraints · 8 cams · 94%`); the search part is omitted when
   no search has run. **Constraint** rows carry an **enabled checkbox** and a badge with the
   constraint's kind and primitive measure (e.g. `polyline · 60 m`).
+  **Splat** rows carry an **enabled checkbox** (`gaussian_splats.md` §5.1) and a badge
+  reflecting **load state** — `41%` while loading, `4.2M splats` once loaded,
+  `⚠ missing from assets/` or `⚠ could not be decoded` on failure — and
+  `⚠ SOG bundle — use its .sog zip` for the one failure whose remedy is a
+  different file rather than a repair (`gaussian_splats.md` §6.2, §9). That state is **derived side state** held beside the
+  scene, like the retained per-run probe/section data (§12.3, §13.4) — never part of
+  the entity and never serialized. Nothing in the app blocks on a splat's load.
   A group header shows a caret, label, and passive child count.
 - **Labels.** A row's label is the entity's **resolved display name** — cameras
   (§5.6), probes (§12.1), sections (§13.1), and zones (`sampling_volumes.md` §6.2)
@@ -1040,10 +1131,18 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   exception: they keep showing the raw id (`volume-N`); volume names are out of scope
   (§15). Constraint groups and constraints resolve from their own **`name`**
   (`camera_placement.md` §3.1), falling back to `Group N` / `Constraint N`.
+  **Splats** resolve from their own `name` too, but fall back to the **basename of
+  their `src`** — `site.spz`, `yard-scan.ply` — not to `Splat N`
+  (`gaussian_splats.md` §2.3). It is the one documented exception to the ordinal
+  fallback, on the same ground §14.2 gives for scene files ("the filename is the
+  scene's name"): a splat's identity *is* its file, an ordinal would leave two
+  unnamed captures indistinguishable, and it makes a duplicated row read as a
+  duplicate rather than as an unrelated second capture.
 - **Selection.** The app holds a single **unified selection** — a camera, probe,
-  section, zone, *or* volume (`{ kind: 'camera' | 'probe' | 'section' | 'zone' |
-  'volume'; id } | null`) — so selecting one deselects the others and only one
-  `TransformControls` gizmo is ever attached. Clicking a camera, probe, section, or
+  section, zone, volume, constraint group, constraint, *or* splat
+  (`{ kind: 'camera' | 'probe' | 'section' | 'zone' | 'volume' | 'constraintGroup' |
+  'constraint' | 'splat'; id } | null`) — so selecting one deselects the others and
+  only one `TransformControls` gizmo is ever attached. Clicking a camera, probe, section, or
   volume node selects that entity (drives the §5.2 panel and gizmo). Clicking a **zone**
   node selects it (drives its panel); its own caret handles expand/collapse. A zone's
   row **enabled checkbox** (independent per zone, decoupled from selection) controls
@@ -1055,21 +1154,40 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   (`camera_placement.md` §6.1); a constraint **group** has no pickable body and is selected
   from the hierarchy only, like a zone. A selected polyline additionally carries a
   **vertex sub-selection**, which is not a node kind (`camera_placement.md` §6.1).
-  Clicking a group header (incl. the "Zones" and "Constraints" umbrellas) only
-  expands/collapses it and does not change the selection.
+  Clicking a **splat** node selects it (drives the `SplatPanel`,
+  `gaussian_splats.md` §7, and attaches
+  the gizmo); a splat's own **enabled checkbox** controls only whether the viewport
+  draws it (`gaussian_splats.md` §5.1). A splat is likewise selectable **from the
+  hierarchy only** — it is on the other canvas and not in the picked scene, and
+  §2.4.2 gives the reason a click must not reach it.
+  Clicking a group header (incl. the "Zones", "Constraints" and "Splats" umbrellas)
+  only expands/collapses it and does not change the selection.
 - **Adding entities.** The "Hierarchy" panel header **"+" menu** creates — **Camera**,
-  **Probe**, **Section**, **Zone**, **Volume**, or **Constraint ▸**.
+  **Probe**, **Section**, **Zone**, **Volume**, **Constraint ▸**, or
+  **3D Gaussian Splat…**.
   Cameras/probes/sections spawn at the **workspace center** with the next free id and
   auto-select. A **Zone** creates an empty zone (`zone-N`); a **Volume** adds a 1 m cube
   at the center into the target zone (creating "Zone 1" first if none exist)
   (`sampling_volumes.md` §4.1). Creating a camera or a volume marks the result stale
   (§8.1); creating a probe, section, or empty zone does not.
 
+  **3D Gaussian Splat… is the one entry that opens a dialog**, and the one entry that
+  is **not always enabled**. It creates nothing itself: it opens the **Add 3DGS**
+  dialog (§14.7), which lists the capture files already sitting in the scene folder's
+  `assets/` and adds a row referencing the chosen one, at an identity transform,
+  auto-selected (`gaussian_splats.md` §3.2). It needs a folder to read, so with **no
+  save target** — at boot, before any Load or Save (§14.1) — the entry is **disabled**
+  with the hint *"Load or save a scene first."* The app never writes into `assets/`;
+  the user puts the file there, which is what keeps §14.9's no-file-management rule
+  intact and what lets one capture serve every scene file in the folder. **No splat
+  action ever marks the result stale** — splats are not analysis inputs
+  (`gaussian_splats.md` §1.1), the same rule constraints follow.
+
   **Constraint ▸ is a submenu, and adds nothing itself.** It holds **Group**, **Point**,
   **Polyline**, and **Plane** (`camera_placement.md` §7). Four constraint entries
-  sitting flat among the five scene-entity rows made the menu read as nine peers, when
-  the constraint half is one feature's worth of choices; nesting them puts the top level
-  back to six rows and keeps "which kind of constraint" one level down, where the
+  sitting flat among the scene-entity rows made the menu read as nine peers, when
+  the constraint half is one feature's worth of choices; nesting them keeps the top
+  level short and keeps "which kind of constraint" one level down, where the
   question actually belongs. A **Group** creates an empty group; a **Point** spawns at
   the workspace centre; a **Plane** a 4 × 4 m rectangle there; **Polyline** arms the draw
   mode (§2.4, `camera_placement.md` §6.2) instead of spawning geometry, since a polyline
@@ -1086,8 +1204,8 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   constraints are not analysis inputs (`camera_placement.md` §1.1), and adding one "for
   symmetry" with zones would force a needless recompute.
 - **Row context menu.** **Right-clicking** a camera, probe, section, zone, volume,
-  constraint-group, or constraint row opens a context menu with two actions, **Duplicate**
-  (top) and **Delete** (bottom). Group headers have no context menu.
+  constraint-group, constraint, or splat row opens a context menu with two actions,
+  **Duplicate** (top) and **Delete** (bottom). Group headers have no context menu.
 - **Deleting entities.** The context-menu **Delete** action removes the row's entity.
   Deleting a **zone** removes it **and all its volumes**. Deleting the selected
   entity clears the selection; deleting a camera, a volume, or a non-empty zone marks the
@@ -1095,6 +1213,9 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   group does not. Deleting a **constraint group** removes it **and all its constraints**;
   deleting a constraint (directly or with its group) **unbinds** every camera that
   referenced it — the cameras and their positions stay (`camera_placement.md` §6.3).
+  Deleting a **splat** disposes its mesh, cancels an in-flight load, and releases its
+  decoded capture **only if it was the last row referencing that `src`**
+  (`gaussian_splats.md` §3.3); it never marks the result stale.
 - **Duplicating entities.** The context-menu **Duplicate** action creates a **deep copy**
   of the row's entity with the **next free id** (same id prefix) and **auto-selects** the
   copy. The copy carries **every property verbatim** — including `name` (copied exactly;
@@ -1119,10 +1240,15 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   - **Constraint** — the copy is added to the **same group** as the original, and no
     camera is bound to it (a binding is provenance for a specific camera, so it does not
     transfer).
+  - **Splat** — the copy carries the same **`src`**, so it is labelled by the same
+    filename (§5.6's exception above) and **shares the original's decoded capture**
+    rather than re-reading and re-decoding the file (`gaussian_splats.md` §3.3).
+    Duplicating to compare two registrations of one capture therefore costs a row, not
+    a second copy in memory.
 
   Duplicating a camera, a volume, or a **non-empty** zone marks the result stale (§8.1);
-  duplicating a probe, a section, an **empty** zone, a constraint, or a constraint group
-  does not (mirrors the add/delete stale rules above).
+  duplicating a probe, a section, an **empty** zone, a constraint, a constraint group,
+  or a splat does not (mirrors the add/delete stale rules above).
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
   (§15).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
@@ -1132,13 +1258,14 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 ### 5.5.1 Reordering rows (drag and drop)
 
 A row is **dragged to reorder it within its own group**. Draggable kinds: **camera**,
-**probe**, **section**, **zone**, **volume**, **constraint group**, and **constraint**. The
+**probe**, **section**, **zone**, **volume**, **constraint group**, **constraint**, and
+**splat**. The
 root group headers are **not** draggable — they are auto-derived by type and their order
-(Cameras → Probes → Sections → Zones → Constraints) is fixed.
+(Cameras → Probes → Sections → Zones → Constraints → Splats) is fixed.
 
 - **Order is array order.** The tree is derived from the canonical arrays (§5.5), so
   reordering a row **is** a reorder of that entity's array — `cameras`, `probes`,
-  `sections`, `zones`, or `volumes`. It therefore **round-trips in the scene file** with no
+  `sections`, `zones`, `volumes`, or `splats`. It therefore **round-trips in the scene file** with no
   new field and no format-version bump (§14.3). A **volume** is reordered **within the
   slots its own zone's volumes already occupy** in the (zone-interleaved) `volumes` array;
   no other element moves.
@@ -1163,7 +1290,9 @@ root group headers are **not** draggable — they are auto-derived by type and t
 - **No side effects.** Reordering **never changes the selection** (the detail panel and the
   viewport gizmo stay put) and **never marks the result stale or sampling-dirty** (§8.1) —
   array order is presentation-only, like a rename (§5.6). It is **not undoable** (the app
-  has no undo, §2.4.2); a stray drag is recovered by dragging back.
+  has no undo, §2.4.2); a stray drag is recovered by dragging back. For **splats** this
+  is doubly true: Spark sorts every Gaussian globally by view depth across all captures,
+  so splat row order does not even affect **draw** order (`gaussian_splats.md` §6.6).
 
 ### 5.6 Camera name
 
@@ -1347,6 +1476,15 @@ retained masks through `aggregateRetained` (§3.3) rather than recomputing
 never marks stale or sampling-dirty: it permutes an array whose order is display-only, and
 results are keyed by entity id, not array position.
 
+**No splat action ever marks stale.** Adding, deleting, duplicating, moving, scaling,
+renaming, or toggling a **splat** (`gaussian_splats.md` §1.1) leaves both flags alone,
+as does either of the **Splats**/**Geometry** layer toggles (§2.4). A splat contributes
+no triangles to the collision mesh, no bounds to the workspace AABB (§4.2), and no
+voxels to any marked set, so there is nothing for a recompute to produce differently —
+the same rule, for the same reason, that constraints follow
+(`camera_placement.md` §1.1). Hiding the geometry **layer** is likewise presentational:
+the merged `SceneMesh` is untouched, so the standing result stays valid and displayed.
+
 ---
 
 ## 9. Coverage visualization
@@ -1461,7 +1599,15 @@ viewport's top-right toolbar (§2.4), not here:
   so the slider sweeps a clean rainbow; it defaults to **red** (`hue = 0`). Rendered
   with a rainbow-gradient track. Sits immediately **before** Intensity scale.
 - **Intensity scale** — the renderer's global brightness multiplier
-  (`intensityScale`).
+  (`intensityScale`). It is also the dial for reading the overlay **against a splat
+  capture** (`gaussian_splats.md` §4.5): the fog and the geometry share one framebuffer
+  and are unaffected by the splat layer, but a capture sits on the canvas *beneath*, so
+  the fog composites **over** it rather than max-blending against it — where the two
+  overlap the capture is covered, more so at higher intensity. Turning the overlay off
+  entirely is the **Coverage** row of the layer menu (§2.4). Neither is adjusted
+  automatically when a capture is visible: coupling one layer's appearance to another
+  layer's state would override a setting the user chose (the same reasoning that keeps
+  the **Geometry** row a manual toggle).
 
 The overlay color is a single user-picked hue shared by both modes (the mode fixes
 *which* voxels and the `intensity` mapping, not the hue). The old flat overlay's
@@ -1967,19 +2113,33 @@ section stats."*; retained run diverged from the live scene → the numbers plus
 ### 13.9 Clip (geometry cross-section)
 
 Exactly **one section at a time** can hide all **scene geometry** (floor, walls, boxes,
-glTF — §14.6) outside a band along its **normal (collapse axis)**, giving a CAD-style
+glTF — §14.6) **and every splat capture** (`gaussian_splats.md` §5.4) outside a band
+along its **normal (collapse axis)**, giving a CAD-style
 cross-section into the scene at the heatmap plane. Which section that is — if any — is the
 scene-level **`clipSectionId`** (§14.1); it is **independent of selection**. The band is
 **`clipRange` metres wide, centred on the cut plane** `(min + max) / 2` (§13.2):
 `[mid − clipRange/2, mid + clipRange/2]`. Because it is centred on the plane, it
 **follows the slab** as the section is dragged (§13.8).
 
-- **Scope — geometry only.** The scene geometry group is a **`ClippingGroup`** (the
+- **Scope — geometry and splats.** The scene geometry group is a **`ClippingGroup`** (the
   WebGPU renderer's clipping path; `Material.clippingPlanes` is not honoured there), and
   the clip sets its two world clipping planes (at the band bounds, intersecting), which
   clip every descendant mesh — floor, walls, boxes, glTF. The coverage overlay (§9),
   cameras, probes, and the section's own heatmap and outline planes (§13.5) live outside
   that group and are **never** clipped.
+- **Splats clip by a different mechanism, to the same band.** Captures are drawn by a
+  `WebGLRenderer` on the second canvas (§2.3), where `ClippingGroup` does not exist, so
+  the band is applied as a **Spark SDF erase**: **one** inverted `SplatEdit` on the
+  splat scene — not one per capture — holding a `BOX` SDF at `opacity: 0`, which zeroes
+  the alpha of every Gaussian outside the band. Spark evaluates an edit on **world-space**
+  splat centres, and an edit parented outside any capture applies to **every** capture,
+  so a single world-space box clips the whole layer. The edit is added when a clip
+  becomes active and removed when it clears, so an unclipped scene does no per-frame
+  work for it. Leaving captures unclipped was rejected: a cutaway exists to see inside,
+  and the full capture standing behind the cut geometry would defeat it and read as a
+  bug. The band → box mapping is a **pure, tested function** of the band and the
+  workspace AABB alone — no capture's position, rotation or scale enters it
+  (`gaussian_splats.md` §5.4).
 - **Single, button-driven.** A **Clip toggle button** in the section's `SectionPanel`
   (§13.6) sets `clipSectionId`: clicking it on a section that is **not** the clipping one
   makes it the sole clip (any other section's clip turns off); clicking it on the section
@@ -2000,10 +2160,11 @@ scene-level **`clipSectionId`** (§14.1); it is **independent of selection**. Th
 ## 14. Scene file (import / export)
 
 The scene can be saved to and loaded from a **named scene file** inside a **scene
-folder** on disk — a portable representation of the geometry, cameras, probes, and
-sections. One folder holds **any number** of scene files sharing its one `assets/`, so
+folder** on disk — a portable representation of the geometry, cameras, probes,
+sections, and splat captures. One folder holds **any number** of scene files sharing its
+one `assets/`, so
 variants of the same site (a night-shift layout, a 96-camera build-out) sit side by side
-without duplicating GLB bytes. This uses the **File System Access API**
+without duplicating GLB or capture bytes. This uses the **File System Access API**
 (`showDirectoryPicker`), so import/export is available only in Chromium-based browsers;
 where the API is absent the controls are hidden (§14.7).
 
@@ -2022,7 +2183,8 @@ split) are **not** part of the scene file — they remain app-local.
   `{ geometry: GeometryObject[], cameras: Camera[], probes: Probe[],
   sections: Section[], clipSectionId: string | null, zones: Zone[],
   volumes: SamplingVolume[], useZones: boolean,
-  constraintGroups: ConstraintGroup[], constraints: CameraConstraint[] }`. A
+  constraintGroups: ConstraintGroup[], constraints: CameraConstraint[],
+  splats: SplatObject[] }`. A
   **`Camera`** is the app camera
   entity — `CameraConfig` extended with a `name` (§5.6), an **`enabled`** flag
   (§5.4), `aimLocked`, and an optional **`constraintId`** (§5,
@@ -2031,8 +2193,16 @@ split) are **not** part of the scene file — they remain app-local.
   only place the SDK type is required — so probe/section/zone **and camera** names all
   live on their own entities (no side map). `clipSectionId` is the section currently
   clipping the scene (§13.9), or `null`.
+  A **`SplatObject`** is one 3D Gaussian Splat capture — `{ id, name, src, enabled,
+  position, rotation, scale }`, with a **uniform** `scale: number` (a non-uniform scale
+  would shear the capture's Gaussians) — referencing a file under the scene folder's
+  `assets/` (§14.2). It is a **separate array, deliberately not a fourth
+  `GeometryObject` kind**: a capture contributes no triangles, so it would break §14.6's
+  "every geometry object contributes to occlusion", and it is selectable and editable,
+  which §14.9 rules out for geometry (`gaussian_splats.md` §2.1).
   `defaultScene()` seeds `zones`/`volumes` **empty**, `useZones` **false**,
-  `constraintGroups`/`constraints` **empty** (`camera_placement.md` §9), and
+  `constraintGroups`/`constraints` **empty** (`camera_placement.md` §9),
+  `splats` **empty** (`gaussian_splats.md` §2.1), and
   `clipSectionId` **null** (`sampling_volumes.md` §9); the default cameras
   (`cameras/defaults.ts`) carry **blank** names, so they display as `Camera N`.
 - The startup scene is **constructed in code** as a `Scene` from today's defaults
@@ -2051,6 +2221,7 @@ split) are **not** part of the scene file — they remain app-local.
   dense-96cam.json    # …and another
   assets/
     shelf.glb         # GLB/GLTF files referenced by the scene files
+    site.spz          # 3DGS capture files, likewise (gaussian_splats.md §3.1)
     ...
 ```
 
@@ -2064,6 +2235,14 @@ split) are **not** part of the scene file — they remain app-local.
   (e.g. `assets/shelf.glb`), resolved through the picked directory handle — so every
   scene file in a folder resolves assets identically, which is exactly what lets them
   share one `assets/`.
+- A **splat**'s `src` follows the **same rule** (e.g. `assets/site.spz`), validated by
+  the same `isSafeAssetPath` and copied by the same cross-folder Save As… (§14.5).
+  Accepted extensions are the single-file capture formats — `.spz`, `.sog`, `.ply`,
+  `.splat`, `.ksplat`; a bare PCSOGS bundle (a `meta.json` plus sibling `.webp`
+  payloads) is **not** supported, since the `.sog` zip carries the same data in one
+  file (`gaussian_splats.md` §3.1). Sharing one `assets/` matters more here than for
+  GLB: a site capture can run to hundreds of megabytes, and every scene variant in the
+  folder reads that one copy.
 - Referencing anything outside the folder (absolute paths, URLs, `..` segments) is
   invalid and rejected on import (§14.8).
 - **The filename is the scene's name.** A scene file carries no `name` field: a name
@@ -2080,6 +2259,12 @@ split) are **not** part of the scene file — they remain app-local.
   from 2 for camera constraints). The reader **accepts 1, 2, and 3**: a v1 file reads with
   empty `zones`/`volumes` and `useZones` false, and a v1 or v2 file reads with empty
   `constraintGroups`/`constraints`. A version **> 3** is rejected (§14.8).
+  **Splats did not bump it.** `splats` reads as `[]` when absent, so every existing file
+  loads unchanged — the same additive precedent `name`, `clipRange`, the camera
+  `enabled` flag and the section footprint bounds set below. A bump to `4` was rejected
+  precisely because a version > 3 is rejected *outright*: a scene carrying a visual
+  backdrop would become unopenable by an older build, when an older reader can simply
+  ignore a key it does not know (`gaussian_splats.md` §8).
 - **Coordinates / units** — world space, meters, right-handed **Y-up**: the same frame
   as the SDK and glTF. Rotations are **quaternions `[x, y, z, w]`** throughout (matching
   `CameraConfig.rotation`, §5.1).
@@ -2115,7 +2300,7 @@ split) are **not** part of the scene file — they remain app-local.
   **no format-version bump** (added under `2`), exactly like `clipRange`/`clipSectionId`/the
   camera `enabled` flag.
 - **Array order is significant.** The order of `cameras`, `probes`, `sections`, `zones`,
-  `volumes`, `constraintGroups`, and `constraints` is the **hierarchy display order**
+  `volumes`, `constraintGroups`, `constraints`, and `splats` is the **hierarchy display order**
   (§5.5), preserved verbatim on read and
   write. Drag-reordering (§5.5.1) rewrites these arrays in place; there is no separate
   order field and none is needed, so reordering is **not** a format change. A
@@ -2151,6 +2336,15 @@ split) are **not** part of the scene file — they remain app-local.
   The **pool, the search result, and the selected camera count are not persisted** —
   derived data invalidated by any scene change (`camera_placement.md` §3.3.1), the same
   line drawn for the zone tool's generation levels.
+- **`splats`** — the 3D Gaussian Splat captures (`gaussian_splats.md` §8). Each is
+  `{ id, src, enabled, position, rotation, scale }` plus **`name` when non-blank**, with
+  `scale` a **single number** (uniform, `> 0`) rather than a `[x,y,z]` triple — the one
+  transform in this format that is not a `Vec3` scale, because a non-uniform scale
+  shears the capture's Gaussians. `enabled` is **optional on read** (default `true`) and
+  — since splats are enabled by default — **omitted on write when `true`**, exactly like
+  the camera flag. A blank/missing `name` reads back as the **capture's filename**, not
+  as `Splat N` (§5.5). **Additive at `formatVersion` 3, no bump** (above). Load state —
+  progress, splat count, or a load failure — is derived and **never persisted**.
 - **Ids** are unique within each category; duplicates are rejected (§14.8).
 
 Sketch:
@@ -2197,6 +2391,13 @@ Sketch:
     { "id": "con-2", "groupId": "cg-1", "name": "North wall", "enabled": true,
       "kind": "plane", "distance": 0.3,
       "position": [0,4,-9.6], "rotation": [0,0,0,1], "size": [18,3] }
+  ],
+  "splats": [
+    { "id": "splat-1", "src": "assets/site.spz",
+      "position": [0,0,0], "rotation": [0,0,0,1], "scale": 1 },
+    { "id": "splat-2", "name": "North dock", "src": "assets/dock.sog",
+      "enabled": false,
+      "position": [12,0,-40], "rotation": [0,0.707,0,0.707], "scale": 0.98 }
   ]
 }
 ```
@@ -2225,14 +2426,28 @@ scene file within it:
    `formatVersion`, id uniqueness (per category), object `kind`s, asset-path safety
    (§14.2), and — for sampling — every `volume.zoneId` referencing an existing zone
    and `size` components > 0 (`sampling_volumes.md` §9). Import replaces
-   `zones`/`volumes`/`useZones` too (each zone's `enabled` flag comes from the file).
+   `zones`/`volumes`/`useZones` too (each zone's `enabled` flag comes from the file),
+   and `splats` — each with a safe `src` (§14.2), a finite `scale > 0`, a 4-tuple
+   `rotation`, and a boolean `enabled` when present (`gaussian_splats.md` §8).
 5. Load **every** referenced GLB/GLTF via `GLTFLoader` (from `three/examples`, no new
    npm dependency). Any missing-file or parse failure aborts the import.
+
+   **Splat captures are deliberately *not* part of this gate.** A missing or
+   undecodable capture leaves the import successful and reports on the row instead
+   (§14.8, `gaussian_splats.md` §9): the geometry is what coverage is measured against,
+   so a broken GLB invalidates the scene, while a capture is a backdrop that cannot
+   change a single number — refusing to open a 96-camera layout over it would be the
+   wrong trade. Captures load **asynchronously and non-blockingly** after the import
+   commits, so a hundreds-of-megabyte read never delays the scene appearing.
 6. Only if all of the above succeed: build the merged collision mesh (§14.6),
    **cancel any in-flight compute** (`camera-coverage-sdk` §13.2 — an actual abort, not
    just a discarded result), replace the `Scene`, clear the coverage overlay
    and the retained per-run probe/section data (they read "no-data", §12.3/§13.4, until
-   the next run), **re-initialize the engine against the new collision mesh (§8) — a load,
+   the next run), **dispose every loaded capture and the decode cache**
+   (`gaussian_splats.md` §3.3 — driven from here, not inferred by the splat layer:
+   two scene files in one folder share an asset loader, so the layer cannot see
+   that the scene changed) and start the incoming scene's capture loads,
+   **re-initialize the engine against the new collision mesh (§8) — a load,
    not a run**, and **require an explicit Run** (§8) — import never auto-computes.
 7. A successful load sets the save target to `{ folder, filename }` (§14.5) and stores
    the loaded scene's serialization as the new dirty-check baseline.
@@ -2326,16 +2541,24 @@ scene file within it:
   when a target exists, plus a stable `id` so the app keeps its own
   remembered-directory bucket instead of following the last folder used anywhere in the
   origin.
-- An in-place **Save** writes **only the scene file** — the GLB/GLTF bytes are already
+- An in-place **Save** writes **only the scene file** — the GLB/GLTF and capture bytes
+  are already
   in the folder, and are shared with every other scene file there. A `gltf` object whose
   `src` is absent from the folder is a **dangling reference** and will fail a later
   import (§14.8); it also aborts a cross-folder Save As…, which cannot copy a file that
-  isn't there. Bundling/embedding asset bytes into the scene file stays out of scope
-  (§14.9) — copies are ordinary files.
+  isn't there. A **splat** whose `src` is absent is the deliberate asymmetry: it is
+  survivable on **import** (the row reports it, §14.8) but still **aborts a cross-folder
+  Save As…**, because a copy cannot invent bytes and a destination that is supposed to
+  hold a complete scene would silently not
+  (`gaussian_splats.md` §9). Bundling/embedding asset bytes into the scene file stays
+  out of scope (§14.9) — copies are ordinary files.
 - **Assets follow a cross-folder Save As…** — a save into a folder that is *not* the
-  target's copies every `gltf` asset the scene references (§14.2) from the target folder
+  target's copies every asset the scene references (§14.2) — every `gltf` `src` **and
+  every splat `src`**, deduplicated across the two by `planAssetCopy(geometry, splats)`
+  — from the target folder
   to the same relative path under the destination, creating intermediate folders as
-  needed, so the new folder is a self-contained scene. Only referenced `src` paths are
+  needed, so the new folder is a self-contained scene. A capture referenced by two
+  splat rows (`gaussian_splats.md` §3.3) copies **once**. Only referenced `src` paths are
   copied, and each is copied once; unreferenced files under the source's `assets/` are
   left behind (a cross-folder Save As… therefore also prunes). Bytes are re-read from
   the target folder at save time — nothing is retained in memory after import (§14.4) —
@@ -2372,18 +2595,30 @@ scene file within it:
   each mesh's geometry transformed by (node world-matrix × object transform) and
   de-indexed into world-space positions/indices. Non-mesh glTF nodes (embedded lights /
   cameras) are ignored. All triangles are merged into the single indexed `SceneMesh`
-  passed to `engine.loadScene` (§4.1).
+  passed to `engine.loadScene` (§4.1). This statement is **exact**, and is one of the
+  two reasons a splat capture is not a `GeometryObject` (§14.1): a capture has no
+  triangles to contribute, so it occludes nothing and is absent from the `SceneMesh`.
+- **The Geometry layer toggle hides drawing only** (§2.4). Unticking it sets the render
+  group invisible; the merged `SceneMesh`, the workspace AABB, and every standing
+  coverage result are untouched, so the toggle never marks the result stale (§8.1). It
+  exists because splats draw **behind** this group (§2.3) — hiding the model is how the
+  real capture is seen with the same cameras and the same overlay
+  (`gaussian_splats.md` §5.3).
 - **Workspace** — the AABB passed to `init` (§4.2) is derived from the merged geometry's
   bounds (with the existing margin), so imported geometry extending beyond the default
-  room is still covered.
+  room is still covered. Splats contribute **no** bounds (§4.2).
 
 ### 14.7 UI controls
 
 - **Load…** (import, §14.4), **Save**, and **Save As…** (export, §14.5) actions in a
   **"Scene"** panel at the top of the left panel (§2.2), above the scene hierarchy.
-- Load… and Save As… open **centred modal dialogs over a dimmed backdrop** — the app's
-  only backdrop modals (`ai/VISUAL_DESIGN.md`). Both genuinely block: they settle the
-  scene's identity on disk, and one of them can discard unsaved work. **Escape**
+- Load…, Save As…, and **Add 3DGS** open **centred modal dialogs over a dimmed
+  backdrop** — the app's
+  only backdrop modals (`ai/VISUAL_DESIGN.md`). All three genuinely block: each settles
+  a reference to a **file on disk** — which scene is loaded, which file Save writes, or
+  which capture a splat row points at — and one of them can discard unsaved work. That
+  shared question is why Add 3DGS is a modal card rather than a popover hanging off the
+  "+" menu, despite being reached from a menu. **Escape**
   cancels, matching the existing dialog's key handling; the commit button is the primary
   action. **Keyboard and pointer**: in the Load list, **ArrowUp/ArrowDown** walk the
   **loadable** rows only — an unselectable row is listed to explain its absence, not to be
@@ -2407,6 +2642,21 @@ scene file within it:
     and the inline overwrite / asset-clash warning beneath it (§14.5), which turns the
     commit button into **Replace**. An invalid name disables commit and states the rule.
     Buttons: **Cancel**, **Save**.
+  - **Add 3DGS** — opened from the hierarchy's **"+" → 3D Gaussian Splat…** (§5.5), the
+    only "+" entry that opens a dialog. It lists the capture files **already present in
+    the scene folder's `assets/`** — root of `assets/` only, non-recursive, the same
+    flatness rule §14.2 applies to scene files — filtered to the accepted extensions
+    (§14.2) and sorted **case-insensitively and stably**, exactly as the Load list is,
+    so a folder's contents do not reshuffle between openings. Each row shows the
+    filename and its **byte size**; no file is read or decoded to build the list, only
+    its metadata. A file this scene already references is **still listed and still
+    selectable** — two rows on one capture is how two registrations are compared
+    (`gaussian_splats.md` §3.3). It opens on the **first selectable row**, and its
+    list takes the **same keyboard as the Load list** — Arrow keys over the
+    selectable rows only, clamped at both ends, Enter or a double-click to commit —
+    through the same shared `moveListSelection` (§14.7's list rule). Committing adds
+    a splat row at an identity transform and auto-selects it. A folder with no `assets/`, or none holding an accepted file,
+    says so and offers no commit. Buttons: **Cancel**, **Add**.
   - **Overwrite scene file?** — the confirmation of §14.5: a short card, no folder line
     and no fields, stating what would be replaced. Buttons: **Cancel**, **Overwrite**.
     It is the one dialog that may sit **over another** (the Save-as dialog it was
@@ -2459,18 +2709,33 @@ scene file within it:
 | Export write fails | keep in-memory scene **and the target**, show error |
 | Write permission denied on first save | keep in-memory scene and the target, show error |
 | Target folder renamed / deleted / unmounted on save | keep in-memory scene and the target, show error (Save As… redirects) |
-| Referenced asset missing from the source folder on a cross-folder Save As… | abort before writing the scene file, keep target, show error naming the asset |
+| Referenced asset missing from the source folder on a cross-folder Save As… | abort before writing the scene file, keep target, show error naming the asset (splat captures included — a copy cannot invent bytes) |
 | Asset copy fails (read, write, or quota) | abort before writing the scene file, keep target, show error naming the asset |
+| Unsafe splat `src` (absolute / URL / `..` / outside folder) | abort the import, keep current scene, show error (as for `gltf`) |
+| Duplicate splat id, non-positive or non-finite `scale`, malformed `rotation`, non-boolean `enabled` | abort the import, keep current scene, show error |
+| Referenced splat capture **missing** from `assets/` | **import succeeds**; the row badges `⚠ missing from assets/`; nothing is drawn; no coverage number changes (§14.4 step 5) |
+| Referenced splat capture unreadable or **fails to decode** | **import succeeds**; the row badges `⚠ could not be decoded`; nothing is drawn; no coverage number changes |
+| Referenced splat `src` is a PCSOGS `meta.json` — only reachable by hand-editing, since the Add dialog never offers one | **import succeeds**; the row badges `⚠ SOG bundle — use its .sog zip`, naming the remedy rather than the bare failure |
+| No `assets/` folder, or it holds no accepted capture | the **Add 3DGS** dialog says so and offers no commit (§14.7) |
+| No save target yet (boot) | the "+" menu's **3D Gaussian Splat…** entry is disabled: *"Load or save a scene first."* (§5.5) |
+| No WebGL2 context for the splat layer | the layer is inert, the viewport renders as today with its own opaque background restored, and splat rows badge `⚠ no WebGL context` (§2.3) |
+| Spark's dynamic import fails | the affected rows badge `⚠ could not be decoded`; nothing else is affected (§2.3) |
 
 ### 14.9 Out of scope for this feature
 
-- In-app geometry **authoring** — no add / move / scale / delete of geometry via gizmos
+- In-app **`geometry`** authoring — no add / move / scale / delete of geometry via gizmos
   or panels, and geometry is not selectable/editable like cameras/probes/sections. The
-  geometry list is authored by editing the scene file or via export (§14.5).
+  geometry list is authored by editing the scene file or via export (§14.5). This rule
+  is scoped to the **`geometry` array**: a **splat** lives in its own `splats` array and
+  *is* addable, selectable, and editable, which is one of the two reasons it is not a
+  fourth `GeometryObject` kind (§14.1, `gaussian_splats.md` §2.1).
 - Embedding or bundling assets (data-URI, zip) — assets stay file references (§14.5).
 - **File management** — no renaming, duplicating or deleting scene files from within the
-  app. The Load dialog lists what is on disk; rearranging it is the OS's job. (Save As…
-  under a new name is the supported way to fork a scene.)
+  app, and **nothing is ever written into `assets/`**: a splat capture is dropped in by
+  the user and merely **referenced** (`gaussian_splats.md` §3.2), never copied or
+  transcoded in-app. The Load and Add 3DGS dialogs list what is on disk; rearranging it
+  is the OS's job. (Save As… under a new name is the supported way to fork a scene, and
+  it is the one operation that does copy asset bytes, §14.5.)
 - Non-Chromium browsers (no File System Access API).
 - Additional primitive kinds (cylinder, sphere, …) — use GLB for arbitrary shapes.
 
@@ -2492,14 +2757,21 @@ scene file within it:
   [`sampling_volumes.md`](./sampling_volumes.md); its §13 lists that feature's own
   out-of-scope items — subtractive volumes, an OBB SDK region, multi-zone
   membership, simultaneous multi-zone overlays, per-zone colors.)
-- In-app scene *editing* — adding/removing/transforming geometry through the UI. The
+- **3D Gaussian Splat captures shipped** — real-site captures as hierarchy items with a
+  visibility checkbox, [`gaussian_splats.md`](./gaussian_splats.md); its §13 lists that
+  feature's own out-of-scope items (splats as occluders, depth interaction with
+  geometry, viewport picking, in-app import/transcoding, PCSOGS bundles, streaming LOD,
+  assisted registration).
+- In-app scene *editing* — adding/removing/transforming **geometry** through the UI. The
   scene file (§14) can carry imported geometry (including GLB meshes), but authoring it
-  in-app is out of scope.
+  in-app is out of scope. (Splat captures are a separate array and *are* authorable,
+  §14.9.)
 - Auto-persisting layouts across reloads (localStorage / autosave); explicit
   scene-file import/export is §14.
 - Scene-hierarchy: further entity types (lights, meshes), user-created groups beyond
   zones, **reparenting by drag**, reordering the root type groups, and keyboard navigation
-  / keyboard reordering. (Drag **reordering within a group** shipped, §5.5.1.)
+  / keyboard reordering. (Drag **reordering within a group** shipped, §5.5.1; **splats**
+  shipped as the newest entity type, `gaussian_splats.md` §2.2.)
 - Probes: richer per-camera detail (distance / angle), sub-voxel visibility (a true
   per-point ray cast instead of reusing the voxel mask), and sightlines for
   non-selected probes.
@@ -2592,3 +2864,18 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
   sections, and the main stats panel). Toggled per zone from its hierarchy row
   checkbox, decoupled from selection; toggling is a client-side re-filter, not a
   recompute (`sampling_volumes.md` §7.3).
+- **3D Gaussian Splat** (3DGS, **capture**) — a photogrammetric reconstruction of a
+  real place stored as millions of oriented, coloured 3D Gaussians rather than
+  triangles, rendered by projecting each to screen and blending them back-to-front.
+  It has **no surface**: nothing to intersect a ray against, which is why it can be
+  looked at but never measured (`gaussian_splats.md` §1).
+- **Splat** (the entity) — a `SplatObject`: one scene-hierarchy item referencing one
+  capture file under `assets/`, with a visibility checkbox and a registration
+  transform. Like a camera constraint and unlike a sampling volume, it is **not** a
+  coverage input — it changes no number (`gaussian_splats.md` §2.1).
+- **Registration** — the position / rotation / **uniform** scale that takes a
+  capture's arbitrary reconstructed frame into the scene's metric Y-up frame. The
+  same notion `apps/splat-camera-export` calls an **alignment**
+  (`gaussian_splats.md` §7).
+- **Splat layer** — the second, `WebGLRenderer` canvas behind the main viewport
+  canvas that draws the captures, and its eye-menu master toggle (§2.3, §2.4).

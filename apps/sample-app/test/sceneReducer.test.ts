@@ -10,12 +10,16 @@ import type { SceneCamera } from '../src/cameras/camera.ts';
 import type { Probe } from '../src/scene/probeVisibility.ts';
 import type { Section } from '../src/scene/sectionHeatmap.ts';
 import type { SamplingVolume, Zone } from '../src/scene/samplingVolumes.ts';
+import type { SplatObject } from '../src/scene/splats.ts';
 import type { Scene } from '../src/scene/sceneModel.ts';
 
 const cam = (id: string): SceneCamera => ({ id, name: '', enabled: true, position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60, aspect: 16 / 9, near: 0.1, far: 30 });
 const probe = (id: string): Probe => ({ id, name: '', position: [0, 0, 0] });
 const zone = (id: string, enabled = true): Zone => ({ id, name: id, enabled });
 const volume = (id: string, zoneId: string): SamplingVolume => ({ id, zoneId, position: [0, 0, 0], rotation: [0, 0, 0, 1], size: [1, 1, 1] });
+const splat = (id: string, src = 'assets/site.spz', overrides: Partial<SplatObject> = {}): SplatObject => ({
+  id, name: '', src, enabled: true, position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1, ...overrides,
+});
 const section = (id: string): Section => ({
   id, orientation: 'horizontal', min: 0, max: 2, minA: 0, maxA: 4, minB: 0, maxB: 6,
   aggregation: 'mean', enabled: true, clipRange: 1, name: '',
@@ -23,7 +27,7 @@ const section = (id: string): Section => ({
 
 /** A base doc state; `hasRunOnce` defaults true so stale-marking is exercisable. */
 function base(overrides: Partial<SceneDocState> = {}): SceneDocState {
-  const scene: Scene = { geometry: [], cameras: [cam('cam-1')], probes: [], sections: [], clipSectionId: null, zones: [], volumes: [], useZones: false, constraintGroups: [], constraints: [] };
+  const scene: Scene = { geometry: [], cameras: [cam('cam-1')], probes: [], sections: [], clipSectionId: null, zones: [], volumes: [], useZones: false, constraintGroups: [], constraints: [], splats: [] };
   return { ...initSceneState(scene), hasRunOnce: true, ...overrides };
 }
 
@@ -32,7 +36,7 @@ const run = (state: SceneDocState, ...actions: SceneAction[]): SceneDocState =>
 
 // --- init ------------------------------------------------------------------
 test('initSceneState selects the first camera and starts clean', () => {
-  const s = initSceneState({ geometry: [], cameras: [cam('cam-1'), cam('cam-2')], probes: [], sections: [], clipSectionId: null, zones: [], volumes: [], useZones: false, constraintGroups: [], constraints: [] });
+  const s = initSceneState({ geometry: [], cameras: [cam('cam-1'), cam('cam-2')], probes: [], sections: [], clipSectionId: null, zones: [], volumes: [], useZones: false, constraintGroups: [], constraints: [], splats: [] });
   assert.deepEqual(s.selection, { kind: 'camera', id: 'cam-1' });
   assert.equal(s.stale, false);
   assert.equal(s.hasRunOnce, false);
@@ -313,7 +317,7 @@ test('reorderEntity is a no-op for an unknown id or a position that changes noth
 // --- sceneReplaced ---------------------------------------------------------
 test('sceneReplaced resets flags, forces sampling re-apply, keeps collapse, selects first camera', () => {
   const start = base({ stale: true, hasRunOnce: true, collapsedIds: new Set(['group:cameras']) });
-  const s = run(start, { type: 'sceneReplaced', doc: { cameras: [cam('cam-9')], probes: [], sections: [], clipSectionId: null, zones: [], volumes: [], useZones: false, constraintGroups: [], constraints: [] } });
+  const s = run(start, { type: 'sceneReplaced', doc: { cameras: [cam('cam-9')], probes: [], sections: [], clipSectionId: null, zones: [], volumes: [], useZones: false, constraintGroups: [], constraints: [], splats: [] } });
   assert.deepEqual(s.selection, { kind: 'camera', id: 'cam-9' });
   assert.equal(s.stale, false);
   assert.equal(s.hasRunOnce, false);
@@ -693,4 +697,173 @@ test('a move is clamped like any other position write', () => {
     disables: [],
   });
   assert.deepEqual(s.cameras[0].position, [5, 5, 5]);
+});
+
+// --- 3D Gaussian Splats (`gaussian_splats.md` §1.1, §3.2, §6) ---------------
+// The load-bearing rule for every test below: **no splat action marks either
+// flag**. A capture contributes no triangles, no bounds and no voxels, so there
+// is nothing a recompute could produce differently (§1.1) — the same rule
+// constraints follow. Each case asserts it explicitly rather than trusting the
+// reducer's shape, because a future `samplingInput(state)` slipped into one of
+// these branches would otherwise fire a recompute on a backdrop edit.
+
+test('addSplat appends the next id at an identity transform, selects it, and marks nothing (§3.2)', () => {
+  const s = run(base(), { type: 'addSplat', src: 'assets/site.spz' });
+  assert.equal(s.splats.length, 1);
+  assert.equal(s.splats[0].id, 'splat-1');
+  assert.equal(s.splats[0].src, 'assets/site.spz');
+  assert.equal(s.splats[0].name, '');
+  assert.equal(s.splats[0].enabled, true);
+  assert.deepEqual(s.splats[0].position, [0, 0, 0]);
+  assert.deepEqual(s.splats[0].rotation, [0, 0, 0, 1]);
+  assert.equal(s.splats[0].scale, 1);
+  assert.deepEqual(s.selection, { kind: 'splat', id: 'splat-1' });
+  assert.equal(s.stale, false);
+  assert.equal(s.samplingDirty, false);
+});
+
+test('a second splat on the same file is a legitimate second row (§3.2, §3.3)', () => {
+  const s = run(
+    base(),
+    { type: 'addSplat', src: 'assets/site.spz' },
+    { type: 'addSplat', src: 'assets/site.spz' },
+  );
+  assert.deepEqual(s.splats.map((x) => x.id), ['splat-1', 'splat-2']);
+  assert.deepEqual(s.splats.map((x) => x.src), ['assets/site.spz', 'assets/site.spz']);
+});
+
+test('deleting a splat clears a matching selection and marks nothing (§6.3)', () => {
+  const start = base({ splats: [splat('splat-1'), splat('splat-2')], selection: { kind: 'splat', id: 'splat-1' } });
+  const s = run(start, { type: 'deleteEntity', kind: 'splat', id: 'splat-1' });
+  assert.deepEqual(s.splats.map((x) => x.id), ['splat-2']);
+  assert.equal(s.selection, null);
+  assert.equal(s.stale, false);
+  assert.equal(s.samplingDirty, false);
+
+  // Deleting a *different* row leaves the selection where it was.
+  const other = run(start, { type: 'deleteEntity', kind: 'splat', id: 'splat-2' });
+  assert.deepEqual(other.selection, { kind: 'splat', id: 'splat-1' });
+});
+
+test('duplicating a splat copies it verbatim under a fresh id and selects the copy (§6.4)', () => {
+  const original = splat('splat-1', 'assets/dock.sog', {
+    name: 'North dock',
+    enabled: false,
+    position: [12, 0, -40],
+    rotation: [0, 0.707, 0, 0.707],
+    scale: 0.98,
+  });
+  const s = run(base({ splats: [original] }), { type: 'duplicateEntity', kind: 'splat', id: 'splat-1' });
+  assert.equal(s.splats.length, 2);
+  const copy = s.splats[1];
+  assert.equal(copy.id, 'splat-2');
+  // Same `src`, so the copy is labelled by the same filename and **shares the
+  // original's decode** rather than re-reading a 400 MB capture (§3.3, §6.4).
+  assert.equal(copy.src, 'assets/dock.sog');
+  assert.equal(copy.name, 'North dock');
+  assert.equal(copy.enabled, false);
+  assert.deepEqual(copy.position, [12, 0, -40]);
+  assert.deepEqual(copy.rotation, [0, 0.707, 0, 0.707]);
+  assert.equal(copy.scale, 0.98);
+  assert.deepEqual(s.selection, { kind: 'splat', id: 'splat-2' });
+  assert.equal(s.stale, false);
+  // The transform arrays are copied, not shared, so one row's gizmo cannot move
+  // the other's.
+  assert.notEqual(copy.position, original.position);
+  assert.notEqual(copy.rotation, original.rotation);
+});
+
+test('toggling a splat flips only whether the viewport draws it (§5.1)', () => {
+  const s = run(base({ splats: [splat('splat-1')] }), { type: 'toggleEnabled', kind: 'splat', id: 'splat-1' });
+  assert.equal(s.splats[0].enabled, false);
+  assert.equal(s.stale, false);
+  assert.equal(s.samplingDirty, false);
+  const back = run(s, { type: 'toggleEnabled', kind: 'splat', id: 'splat-1' });
+  assert.equal(back.splats[0].enabled, true);
+});
+
+test('changeSplat writes the registration and marks nothing (§1.1, §7)', () => {
+  const s = run(base({ splats: [splat('splat-1')] }), {
+    type: 'changeSplat',
+    id: 'splat-1',
+    patch: { position: [1, 2, 3], scale: 0.5 },
+  });
+  assert.deepEqual(s.splats[0].position, [1, 2, 3]);
+  assert.equal(s.splats[0].scale, 0.5);
+  assert.equal(s.stale, false);
+  assert.equal(s.samplingDirty, false);
+});
+
+test('renaming a splat is a display-label write only (§2.3)', () => {
+  const s = run(base({ splats: [splat('splat-1')] }), {
+    type: 'renameEntity',
+    kind: 'splat',
+    id: 'splat-1',
+    name: 'Yard scan',
+  });
+  assert.equal(s.splats[0].name, 'Yard scan');
+  assert.equal(s.stale, false);
+});
+
+test('Flip 180° Z replaces the rotation, so pressing it twice is idempotent (§7)', () => {
+  const once = run(base({ splats: [splat('splat-1')] }), { type: 'splatPreset', id: 'splat-1', preset: 'flipZ' });
+  assert.deepEqual(once.splats[0].rotation, [0, 0, 1, 0]);
+  // Composition would drift back to identity here; replacement does not.
+  const twice = run(once, { type: 'splatPreset', id: 'splat-1', preset: 'flipZ' });
+  assert.deepEqual(twice.splats[0].rotation, [0, 0, 1, 0]);
+  assert.equal(twice.stale, false);
+});
+
+test('Reset transform returns the whole registration to identity (§7)', () => {
+  const moved = splat('splat-1', 'assets/site.spz', {
+    position: [5, 6, 7],
+    rotation: [0, 0, 1, 0],
+    scale: 2.5,
+  });
+  const s = run(base({ splats: [moved] }), { type: 'splatPreset', id: 'splat-1', preset: 'reset' });
+  assert.deepEqual(s.splats[0].position, [0, 0, 0]);
+  assert.deepEqual(s.splats[0].rotation, [0, 0, 0, 1]);
+  assert.equal(s.splats[0].scale, 1);
+  assert.equal(s.stale, false);
+});
+
+test('a splat gizmo drag writes position and rotation, never scale (§7)', () => {
+  const s = run(base({ splats: [splat('splat-1', 'assets/site.spz', { scale: 0.9 })] }), {
+    type: 'transformApplied',
+    change: { kind: 'splat', id: 'splat-1', position: [2, 0, -3], rotation: [0, 1, 0, 0] },
+  });
+  assert.deepEqual(s.splats[0].position, [2, 0, -3]);
+  assert.deepEqual(s.splats[0].rotation, [0, 1, 0, 0]);
+  // Scale is panel-only: a per-axis gizmo drag would shear the Gaussians (§2.1).
+  assert.equal(s.splats[0].scale, 0.9);
+  assert.equal(s.stale, false);
+});
+
+test('splat rows reorder within their group, changing nothing else (§6.6)', () => {
+  const start = base({ splats: [splat('splat-1'), splat('splat-2'), splat('splat-3')] });
+  const s = run(start, { type: 'reorderEntity', kind: 'splat', id: 'splat-3', beforeId: 'splat-1' });
+  assert.deepEqual(s.splats.map((x) => x.id), ['splat-3', 'splat-1', 'splat-2']);
+  assert.deepEqual(s.selection, start.selection);
+  assert.equal(s.stale, false);
+  assert.equal(s.samplingDirty, false);
+});
+
+test('a replaced scene takes its splats and drops the old ones (spec §14.4)', () => {
+  const start = base({ splats: [splat('splat-1')] });
+  const s = run(start, {
+    type: 'sceneReplaced',
+    doc: {
+      cameras: [cam('cam-9')],
+      probes: [],
+      sections: [],
+      clipSectionId: null,
+      zones: [],
+      volumes: [],
+      useZones: false,
+      constraintGroups: [],
+      constraints: [],
+      splats: [splat('splat-7', 'assets/other.ply')],
+    },
+  });
+  assert.deepEqual(s.splats.map((x) => x.id), ['splat-7']);
 });

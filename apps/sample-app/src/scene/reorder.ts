@@ -8,8 +8,8 @@
  *    for last), rejecting anything that isn't a legal sibling slot.
  * 2. **The splice** — {@link moveBefore} / {@link moveVolumeBefore} rewrite the
  *    canonical arrays. Order *is* the persistence (§14.3): reordering a row is
- *    reordering `cameras`/`probes`/`sections`/`zones`/`volumes`, which serialize in
- *    order, so no separate order field exists.
+ *    reordering `cameras`/`probes`/`sections`/`zones`/`volumes`/`splats`, which
+ *    serialize in order, so no separate order field exists.
  *
  * The volume case is the subtle one. A zone's rows are derived by filtering the
  * global `volumes` array (`buildSceneTree`), and that array interleaves zones
@@ -27,7 +27,11 @@ export type ReorderableKind =
   | 'zone'
   | 'volume'
   | 'constraintGroup'
-  | 'constraint';
+  | 'constraint'
+  /** `gaussian_splats.md` §6.6 — row order is presentation only; Spark sorts
+   * every Gaussian globally by view depth, so it does not even affect draw
+   * order. */
+  | 'splat';
 
 /** The vertical extent of one rendered row, in the scroll container's client space. */
 export interface RowBox {

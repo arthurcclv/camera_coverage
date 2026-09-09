@@ -25,7 +25,9 @@ spec change:
 
 1. **Read** the relevant section of `specs/spec.md` (or the feature docs beside it:
    `specs/volumetric_rendering.md` for the overlay, `specs/sampling_volumes.md` for
-   zones, `specs/aim_optimization.md` for the aim optimizer) first.
+   zones, `specs/aim_optimization.md` for the aim optimizer,
+   `specs/camera_placement.md` for constraint-driven placement, and
+   `specs/gaussian_splats.md` for splat captures) first.
 2. **Write the spec edit** describing the new/changed behavior and **get approval**
    before coding.
 3. **Implement** against the approved spec.
@@ -81,6 +83,41 @@ Then add a test — for the reducer transition and/or the pure function.
   the event wiring: **verify the drag threshold, Escape-cancel, and edge auto-scroll
   in `npm run dev`** — jsdom has no layout, so `getBoundingClientRect` would return
   zeros and any test of those would be testing its own stubs.
+
+## Working on the splat layer
+
+Nothing here is reachable from `node --test`: Spark needs a WebGL2 context,
+workers and wasm. Two rules follow.
+
+- **Put the decision in `scene/splats.ts` or `scene/splatAssets.ts`, never in
+  `scene/splatLayer.ts`.** The layer is canvas creation, the `SparkRenderer`, the
+  stream load, `mesh.visible`, the `SplatEdit` lifecycle and disposal — and is
+  deliberately untested. If a change to it needs a judgement (which files are
+  listed, what a badge says, where the clip box goes), that judgement belongs in
+  one of the pure two, with a test (`gaussian_splats.md` §11).
+- **What must be verified in `npm run dev`, against a real capture:** that the
+  capture appears at all, that the WebGPU canvas still composites over it, that
+  the clip cuts it, that the orthographic elevations project it correctly, and
+  that hiding **Geometry** reveals it. Drop a `.spz`/`.sog`/`.ply` into a scene
+  folder's `assets/`, Load that scene, then **+ → 3D Gaussian Splat…**.
+
+Two traps worth knowing before you debug the layer:
+
+- **`SplatMesh.initialized` resolves before anything renders.** Spark's sort runs
+  in a worker and the mesh emits no geometry for its first several frames (measured:
+  the first real draw call at frame 7–8). Never treat "loaded" as "on screen" — a
+  first-frame screenshot or a pixel assertion right after the await reads an empty
+  layer.
+- **`SparkRenderer`'s own mesh draws one triangle every frame regardless of
+  content**, so a non-zero draw-call or triangle count is not evidence a capture
+  is visible.
+
+If a `three` import starts resolving to the wrong build, the rule lives in
+`vite.config.ts`: the alias's `customResolver` sends `scene/splatLayer.ts` and
+`@sparkjsdev/spark` to the classic build and everyone else to `three/webgpu`, and
+`optimizeDeps.exclude` keeps dev from pre-bundling a second copy of
+`three.core.js`. The production build is the fastest check — a mismatch shows up
+as *"X is not exported by three.webgpu.js"* rather than as a runtime failure.
 
 ## Running against a local SDK change
 

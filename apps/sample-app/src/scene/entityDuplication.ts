@@ -12,6 +12,7 @@ import type { Probe } from './probeVisibility.ts';
 import type { Section } from './sectionHeatmap.ts';
 import type { SamplingVolume, Zone } from './samplingVolumes.ts';
 import type { CameraConstraint, ConstraintGroup } from '../placement/region.ts';
+import type { SplatObject } from './splats.ts';
 
 /** Next free `prefix-N` id given the existing ids (spec §5.5). */
 export function nextFreeId(prefix: string, ids: string[]): string {
@@ -126,4 +127,26 @@ export function duplicateConstraintGroup(
   // (`camera_placement.md` §7), but editing one group's list must not edit the
   // other's.
   return { group: { ...src, id: newGroupId, zoneIds: [...src.zoneIds] }, constraints: copies };
+}
+
+/**
+ * Verbatim copy of splat `id` with the next free `splat-N` id, or null if
+ * absent (`gaussian_splats.md` §6.4).
+ *
+ * Carries **every** property, `src` included — so the copy is labelled by the
+ * same filename (§2.3), reads as an obvious duplicate rather than an unrelated
+ * second capture, and **shares the original's decode** (§3.3): duplicating to
+ * compare two registrations of one capture costs a row, not a second copy of a
+ * 400 MB capture in memory. `position`/`rotation` are copied out so moving one
+ * row's gizmo cannot move the other's.
+ */
+export function duplicateSplat(splats: SplatObject[], id: string): SplatObject | null {
+  const src = splats.find((s) => s.id === id);
+  if (!src) return null;
+  return {
+    ...src,
+    id: nextFreeId('splat', splats.map((s) => s.id)),
+    position: [...src.position] as SplatObject['position'],
+    rotation: [...src.rotation] as SplatObject['rotation'],
+  };
 }

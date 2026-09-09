@@ -86,6 +86,27 @@ body {
 .viewport canvas {
   display: block;
 }
+/* Two stacked canvases (`gaussian_splats.md` §4.2): the WebGL splat layer
+   behind, owning the viewport background, and the transparent WebGPU canvas
+   over it. Both are absolutely positioned so they overlay exactly; each
+   renderer sets its own pixel width/height, which wins over the inset.
+
+   The splat canvas takes `z-index: 0` and the main one keeps `auto`, so DOM
+   order (splats appended first) puts geometry above the backdrop while the
+   toolbars' own `z-index: 1` still sits above both. It is also
+   `pointer-events: none`: OrbitControls, TransformControls and every pick keep
+   receiving events on the main canvas alone — which is the mechanical half of
+   why a splat is never viewport-pickable (§6.5). */
+.viewport canvas.viewport-splats,
+.viewport canvas.viewport-main {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+.viewport canvas.viewport-splats {
+  z-index: 0;
+  pointer-events: none;
+}
 /* An armed viewport tool — "Place on surface" (spec §2.4.2) or the polyline draw
    mode (`camera_placement.md` §6.2): the next click lands a position, so the
    whole viewport reads as a click target. */
@@ -735,6 +756,17 @@ button.tree-caret:focus-visible {
 .menu li:hover {
   background: #2c66c9;
   color: #fff;
+}
+/* An unavailable entry (the "+" menu's **3D Gaussian Splat…** before a scene
+   folder exists, `gaussian_splats.md` §3.2): dimmed, no hover lift, and its
+   `title` carries the reason. */
+.menu li.disabled {
+  color: #5a626e;
+  cursor: not-allowed;
+}
+.menu li.disabled:hover {
+  background: transparent;
+  color: #5a626e;
 }
 
 /* Nested submenu (spec §5.5, VISUAL_DESIGN.md → Menu → Submenu). The parent row
@@ -1411,4 +1443,46 @@ button.tree-caret:focus-visible {
   display: flex;
   gap: 2px;
   flex: 0 0 auto;
+}
+
+/* --- 3D Gaussian Splats (gaussian_splats.md §5.2, §6.2, §7) ---------------- */
+
+/* Splat rows: amber swatch — its own hue again, so a capture is never mistaken
+   for a sampling volume (teal) or a constraint (violet). The pairing is
+   deliberate: teal and violet are analysis inputs, amber is the one entity kind
+   that cannot change a number (gaussian_splats.md §1.1). */
+.tree-row .dot.splat-dot {
+  background: #d0a88b;
+}
+
+/* Load-state badge (§6.2). The neutral state reuses `.rate`'s tabular numerals
+   so `41%` → `4.2M splats` does not jitter the row; a failure — a missing or
+   undecodable capture — takes the warning amber the stale badge already uses,
+   because it is the same kind of statement: something is not what it looks. */
+.tree-row .rate.splat-error,
+.badge.splat-error {
+  color: #ffb84d;
+}
+.badge.splat-error {
+  background: #3a2d18;
+}
+
+/* Neutral badge for the SplatPanel header's load state, matching `.badge.zone`'s
+   quiet treatment — it is a readout, not a warning. */
+.badge.splat {
+  background: #1f2a44;
+  color: #7fb8e6;
+}
+
+/* The read-only `src` row in the SplatPanel (§7): monospace, ellipsized, with
+   the full path on hover, since a nested path outruns the panel. */
+.splat-source {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #9aa3b0;
 }

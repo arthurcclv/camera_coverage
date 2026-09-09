@@ -6,6 +6,407 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Splats: the clip is re-applied when a decode lands, and disposal is split in two
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §3.3, §4.2, §5.4.
+
+Two things about the splat layer's lifecycle are not obvious from the outside, and
+both bit in review.
+
+**The clip cannot be applied once and forgotten.** The section clip is a single
+world-space `SplatEdit` on the splat scene (below), and `SplatEdit`/`SplatEditSdf`
+are Spark classes — which do not exist until Spark's dynamic import resolves, i.e.
+until the **first capture load**. A scene *opened* with `clipSectionId` already set
+therefore reaches `applyClip` before there is anything to construct it with, and
+load completion is not a scene edit, so no further `sync` follows to try again. The
+symptom was a cross-section that cut the model and left the capture standing whole
+behind it, until any unrelated edit re-synced.
+
+**Decision.** The layer holds the current band as state and re-applies it when a
+decode lands, rather than only when `sync` pushes one. The band itself stays a pure
+function of the section and the workspace AABB (`clipBandToSdfBox`), computed in
+`SceneView`; what the layer keeps is only *the latest one*.
+
+**And `mesh.dispose()` is not per-row teardown.** Spark's `SplatMesh.dispose()`
+disposes its `packedSplats` — the decode §3.3 *shares* between every row on that
+`src` — so a row-level `detach` must only `removeFromParent()`, and the refcounted
+`releaseUnreferenced` owns freeing the decode. The one place a mesh may dispose
+itself is `releaseAll`, where every row and every decode go at once; Spark's
+`PackedSplats.dispose()` guards each buffer it frees, so the entry loop disposing
+the same decode again is harmless. This is why the two teardown paths look
+asymmetric, and why the asymmetry is deliberate.
+
+---
+
+## Splats: a scene replacement releases the decode cache from App, not from the layer
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §3.3, §8;
+[`../specs/spec.md`](../specs/spec.md) §14.4.
+
+The layer can see one kind of replacement by itself: a new **asset loader** means a
+new scene folder, and a decode keyed by a folder-relative `src` is about different
+bytes the moment the folder differs. That check is real and stays.
+
+It is not sufficient. App memoizes the loader on the save target's **folder**
+(deliberately — a plain Save must not re-decode a resident capture), and §14.2's
+whole point is that one folder holds many scene files. Importing a sibling variant
+therefore keeps the loader identical while replacing the scene, and the outgoing
+scene's decode for `assets/site.spz` would be handed to the incoming one purely
+because both names match.
+
+**Decision.** `SplatLayer.releaseAll()` is public and `SceneView.releaseSplats()`
+exposes it; App's one scene-replacement path (`applyScene`) calls it beside
+`clearCoverage()`, where every other replacement side effect already lives. The
+alternative — threading a scene generation counter through `SceneViewState` — would
+put an epoch in the snapshot that nothing else needs, to say something App already
+knows at the exact moment it happens.
+
+---
+
+## Splats: a hand-referenced PCSOGS manifest is its own failure kind
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §3.1, §9.
+
+A PCSOGS bundle (a `meta.json` plus sibling `.webp` payloads) cannot be decoded
+from one file, so the Add dialog lists it **with its reason** and refuses to commit
+it. But a hand-edited `scene.json` can reference one, and then the row's badge is
+the only place the app can say anything — and the remedy is a *different file*, not
+a repair, which the generic `⚠ could not be decoded` badge actively hides.
+
+**Decision.** `SplatLoadFailure` gains a `sogBundle` member with its own badge
+(`⚠ SOG bundle — use its .sog zip`), and a pure `splatDecodeFailure(src)` decides
+between it and `undecodable` in the tested module rather than inside the layer's
+`catch`. Rejected: an optional `reason` string on the error state — one field used
+by exactly one case, and it would have left `FAILURE_BADGE`'s exhaustive `Record`
+no longer the single place a badge's text is decided.
+
+---
+
+## Splats: two stacked canvases, not a renderer migration
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.1, §4.2.
+
+Spark's `SparkRendererOptions.renderer` is typed `THREE.WebGLRenderer` and
+required, and the splats themselves draw with GLSL `RawShaderMaterial` into
+`WebGLRenderTarget`s — a material class `WebGPURenderer` supports on neither its
+WebGPU nor its WebGL2 backend. Three.js 0.185 has no native splat renderer to
+substitute.
+
+**Decision.** A second `WebGLRenderer` on its own canvas, stacked *behind* the
+WebGPU one, with its own scene. The two alternatives were weighed and rejected:
+migrating the viewport to `WebGLRenderer` means rewriting the coverage fog (TSL),
+the constraint gizmos (`PointsNodeMaterial`), and the clip (`ClippingGroup`) — the
+visual core of the app; an offscreen render plus per-frame
+`readRenderTargetPixels` puts a GPU→CPU→GPU stall in the frame loop.
+
+**The cost, stated plainly: the two canvases share no depth buffer.** Splats are
+always drawn behind every mesh and gizmo and never occlude them. The eye menu's
+**Geometry** row is what makes that usable rather than a defect — the default room
+is floor plus four opaque, double-sided walls, so without it a capture would be
+entirely hidden.
+
+**Both renderers are handed the same camera object**, not a mirrored copy, so the
+backdrop cannot lag the geometry by a frame during an orbit. What the spike
+measured, and what the whole arrangement rests on: `three` and `three/webgpu`
+import their core classes from the same `three.core.js`, so there is exactly one
+`PerspectiveCamera`/`OrthographicCamera`/`Object3D` class in the bundle and Spark's
+`camera instanceof THREE.OrthographicCamera` branch resolves correctly on the
+viewport's cameras. Spark's orthographic projection was checked directly: a 10 m
+slab in a known top-down ortho frustum measured 195 × 210 px against 200 × 200 px
+predicted, the overshoot being the splats' own radius.
+
+**The WebGL layer owns the background.** It clears to `0x1a1d22` — the colour
+`scene.background` used to carry — and the WebGPU canvas is `alpha: true` with
+`scene.background = null`. Measured on the real `volumetric.ts` material, the
+composited result differs from the old opaque-background one by **0.07/255 in
+`max` mode and 0.12/255 in `additive`**: invisible in both. The layer is
+constructed unconditionally so there is one code path whether or not a scene has
+a capture, which also means the classic `three` build lands in the main chunk
+(~350 kB raw / ~85 kB gzipped) — a cost the spec accepted on the belief that
+`WebGLRenderer` was "already in the bundle"; it is not, because of the
+`three → three/webgpu` alias. Spark itself is still dynamically imported and
+chunked separately.
+
+---
+
+## `three` resolves per-importer, and nothing three-shaped is pre-bundled
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.1, §4.3.
+
+The app aliases bare `three` to `three/webgpu` so its objects and the
+OrbitControls/TransformControls/GLTFLoader addons share one build. Two importers
+cannot live with that: `scene/splatLayer.ts` needs `WebGLRenderer`, and
+`@sparkjsdev/spark` needs `WebGLRenderer` *and* writes its GLSL `splatDefines`
+include into `THREE.ShaderChunk`. `three/webgpu` exports neither, and an ES module
+namespace is sealed, so it cannot be polyfilled.
+
+**Decision.** Keep the one alias entry and make it importer-conditional through
+its **`customResolver`**, returning the classic build's absolute path for those
+two and the WebGPU build's for everyone else. A second `find` entry cannot express
+this — an alias pattern sees the specifier, never who imported it. Absolute paths
+also stop the alias matching its own output.
+
+An `enforce: 'pre'` plugin was tried first and **does not work**: Vite's own
+`vite:alias` is itself in the pre bucket and runs ahead of user plugins, so the
+alias had already rewritten `three` to `three/webgpu` before the hook saw it. The
+production build said so out loud —
+*"WebGLRenderer is not exported by three.webgpu.js"*.
+
+**And `optimizeDeps.exclude` covers `three`, `three/webgpu`, `three/tsl` and
+Spark.** Dev pre-bundling resolves a dep's imports with its own esbuild pass, so
+`three` was pre-bundled from `three.webgpu.js` into a chunk carrying its **own**
+copy of `three.core.js`. That is a second set of core classes, which breaks
+exactly the identity the shared-camera design rests on — `instanceof` would fail
+and the orthographic elevations would misrender, silently. Excluding them makes
+every three import resolve to the raw ESM files, verified in dev by both builds
+importing the identical `three.core.js` URL. Each is a single file, so the cost is
+one request apiece.
+
+---
+
+## `splats[]` is its own array, not a fourth `GeometryObject` kind
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §2.1;
+[`../specs/spec.md`](../specs/spec.md) §14.1, §14.6, §14.9.
+
+Reusing `geometry` would have bought the `assets/` `src` resolution and the
+asset-copy machinery for free. It was rejected anyway, because it breaks two
+statements that are currently absolute and useful:
+
+- §14.6 — "**every** geometry object contributes to occlusion". Every member of
+  `geometry` reduces to world-space triangles in the one `SceneMesh`. A capture
+  has none, so `buildStaticGeometry` would need a silently-skipping branch and the
+  array's contract would soften to "most of these occlude".
+- §14.9 — geometry "is not selectable/editable like cameras/probes/sections". A
+  splat row is selectable, editable, addable, and deletable by design.
+
+**Decision.** A separate top-level `splats: SplatObject[]`, which keeps both
+statements literally true and costs only explicit plumbing. §14.9's
+non-authorable rule is now scoped to the **`geometry` array** rather than to
+"geometry" loosely.
+
+**Uniform `scale: number`, not a `Vec3`.** A Gaussian's shape is a covariance, not
+a mesh: a non-uniform scale shears every Gaussian in the capture into visible
+smears. `apps/splat-camera-export/src/align/alignment.ts` reached the same
+conclusion for the same reason, so the two apps agree. That is the *whole*
+reason — the clip is specified in world space and never inverse-transforms a
+registration, so it imposes no requirement of its own.
+
+---
+
+## No splat action marks the coverage result stale
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §1.1;
+[`../specs/spec.md`](../specs/spec.md) §8.1.
+
+A capture contributes no triangles to the merged collision mesh, no bounds to the
+workspace AABB, and no voxels to any marked set. Nothing about it can change a
+coverage number, so adding, deleting, duplicating, moving, scaling, renaming or
+toggling one leaves both `stale` and `samplingDirty` alone — the rule constraints
+already follow (`camera_placement.md` §1.1), and the reason a splat is not a
+**Place on surface** target and does not affect the viewport auto-fit.
+
+The reducer tests assert this per action rather than trusting the reducer's shape:
+a `samplingInput(state)` slipped into one of those branches later would otherwise
+fire a full recompute on a backdrop edit, and the symptom (a 96-camera scene
+re-running because a picture moved) is a long way from the cause.
+
+Both **layer** toggles are presentational for the same reason. Hiding **Geometry**
+sets the render group invisible and touches neither the `SceneMesh` nor the AABB
+nor any standing result, so the displayed numbers stay valid and displayed.
+
+---
+
+## The clip cuts splats with one world-space SDF erase, not one edit per capture
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §5.4;
+[`../specs/spec.md`](../specs/spec.md) §13.9.
+
+The geometry clip is two world planes on a `ClippingGroup` — the WebGPU renderer's
+clipping path, which does not exist on the splat layer's `WebGLRenderer`. Leaving
+captures unclipped was rejected outright: a cutaway exists to see inside, and the
+full capture standing behind the cut geometry defeats it and reads as a bug.
+
+**Decision.** One inverted `SplatEdit` on the splat **scene** holding a single
+`BOX` SDF at `opacity: 0`. Two facts from Spark's source make that enough: an edit
+is applied *after* the mesh's object→world transform, so it evaluates on
+**world-space** splat centres; and an edit not parented under any `SplatMesh` is
+collected as a **global** edit and applied to every editable mesh. So one
+world-space box clips the whole layer, and it is added only when a clip becomes
+active — an unclipped scene does no per-frame work for it.
+
+`SplatEditSdf.scale` is the box's **half-extents** and `radius` is corner
+rounding: Spark's `BOX` case is the standard rounded-box SDF
+(`abs(p) - sizes.xyz + sizes.w`), and it encodes the SDF's transform with the
+scale forced to 1, so `scale` really is a size parameter rather than part of that
+transform. `radius: 0` gives the sharp band the geometry clip has.
+
+`clipBandToSdfBox(band, worldMin, worldMax)` is the tested unit, and its signature
+is the point: **no capture's registration is an argument**. In-plane extent comes
+from the workspace AABB, matching the geometry clip's infinite planes closely
+enough that a band clamped to the full extent erases nothing.
+
+---
+
+## Hide, don't unload; and one decode per `src`
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §3.3, §5.1.
+
+Unticking a splat row sets `mesh.visible = false` and does nothing else. The
+capture stays decoded and resident, so re-ticking is instant — which is the whole
+point of a checkbox, and what makes flipping between the modelled room and the
+real site a usable comparison. Unloading on untick would make re-ticking a
+multi-second load with a progress bar, which a checkbox must not be. The
+consequence is explicit and the user's to manage: several large captures cost
+their memory whether or not they are ticked. Memory is freed on **delete** or on
+scene replacement.
+
+That is affordable only because decodes are **cached by `src` and refcounted by
+referencing rows**: two rows on one file cost one read, one decode, and one set of
+GPU textures while keeping fully independent transforms and visibility. So
+duplicating a row to compare two registrations costs a row, not a second copy of a
+400 MB capture — and the **Add 3DGS** dialog can keep offering a file the scene
+already references.
+
+One mechanical trap this creates: `SplatMesh.dispose()` disposes its own
+`packedSplats`. Rows therefore never call it — a row teardown just detaches the
+mesh, and the cache disposes the `PackedSplats` when the last reference goes.
+
+---
+
+## A capture's file is not part of the import gate
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §9;
+[`../specs/spec.md`](../specs/spec.md) §14.4, §14.5, §14.8.
+
+A missing or undecodable `gltf` aborts an import: the geometry is what coverage is
+measured against. A capture is a backdrop that cannot change a single number, so
+refusing to open a 96-camera layout over it would be the wrong trade.
+
+**Decision.** Splat validation (id uniqueness, safe `src`, finite `scale > 0`, a
+4-tuple rotation, a boolean `enabled`) joins the all-or-nothing pass; the **bytes**
+do not. Captures load asynchronously after the import commits, and a row that
+cannot draw **reports its own state** — the same choice the Load dialog makes for
+an invalid `*.json`, listed with its reason so a stray file is visibly excluded
+rather than mysteriously absent. Entries are never silently dropped, which would
+lose the reference on the next Save.
+
+**The one deliberate asymmetry:** a missing capture still **aborts a cross-folder
+Save As…**. A copy cannot invent bytes, and a destination that is supposed to hold
+a complete scene would silently not.
+
+---
+
+## `formatVersion` stays 3
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §8;
+[`../specs/spec.md`](../specs/spec.md) §14.3.
+
+`splats` reads as `[]` when absent, so every existing file loads unchanged — the
+same additive precedent `name`, `clipRange`, the camera `enabled` flag and the
+section footprint bounds already set, none of which bumped the version.
+
+A bump to `4` was rejected **because a version > 3 is rejected outright**: a scene
+carrying a visual backdrop would become unopenable by an older build, which is a
+steep price when an older reader can simply ignore a key it does not know.
+
+---
+
+## A splat row is labelled by its filename, not `Splat N`
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §2.3;
+[`../specs/spec.md`](../specs/spec.md) §5.5.
+
+Every other entity falls back to an ordinal. A splat's identity *is* its file, and
+the app already treats a filename as authoritative for exactly this reason:
+§14.2, on scene files — "the filename is the scene's name … a name inside the file
+would drift from the filename the moment either changed."
+
+It also keeps two unnamed rows on two different captures distinguishable, which
+`Splat 1` / `Splat 2` would not, and makes a **duplicate** row read as an obvious
+duplicate rather than as a second, unrelated capture. `name` still round-trips and
+is still omitted on write when blank, so an unnamed splat has no `name` key at all.
+
+---
+
+## Fog over a capture is left to the controls that already exist
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.5;
+[`../specs/spec.md`](../specs/spec.md) §9.2.
+
+Geometry and the coverage fog still share one framebuffer, so
+`volumetric_rendering.md` §4's "the scene color acts as a per-channel floor" holds
+exactly as before for everything the engine measures. A **capture** is on the layer
+*beneath*, so the fog no longer max-blends against it — it composites **over** it.
+Where the two overlap, the fog covers the capture rather than tinting it, more
+strongly at higher intensity.
+
+**Decision.** Document it; do not mechanise it. The controls it calls for already
+exist and are already in the user's hands: the eye menu's **Coverage** row turns
+the overlay off outright (Coverage on to judge coverage, off to read the site), and
+**Overlay intensity scale** dials the fog down against a bright backdrop, which is
+exactly the knob it already is. Auto-coupling the overlay's appearance to whether a
+splat is visible — like auto-ghosting the geometry when one is enabled — makes one
+layer's look depend on another layer's state, which is surprising and overrides a
+setting the user chose deliberately.
+
+---
+
+## A LOD load parks the splats under `lodSplats`, and `numSplats` reads 0
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.4, §6.2.
+
+**The symptom.** Every capture badged `0 splats` — while rendering perfectly.
+
+**The cause.** Loading with `lod: true` sends Spark's worker down its LOD branch,
+and that branch returns `{ lodSplats: … }` **only** — no top-level `packedArray`.
+`PackedSplats.initialize` then takes its empty branch and leaves `numSplats` at
+`0`. Nothing was broken: `SplatMesh.update` looks for `lodSplats` itself, so the
+mesh drew the whole capture. Only the badge, which read `numSplats` directly, was
+wrong. The same shape also comes back from a *non*-LOD load whose encoding carries
+`lodOpacity`.
+
+**Decision.** `decodedSplatCount(packed)` in the pure module, falling back to
+`lodSplats.numSplats`, and unconditionally rather than keyed on our own `lod`
+flag — the `lodOpacity` path would have slipped through that. The number it
+reports is what Spark is **holding** after its LoD build, which can differ from
+the file's original count; holding is what costs frames, so that is the honest
+figure for a badge whose whole job is to explain frame cost.
+
+**Why this belongs in `splats.ts` and not in the layer.** It is a one-line read
+that looks like plumbing, which is exactly how it shipped untested. Taking
+`{ numSplats, lodSplats? }` structurally — rather than Spark's `PackedSplats` —
+keeps it reachable from `node --test` with no Spark import, and the regression now
+has a test.
+
+---
+
+## `loaded` means decoded, and the capture appears a few frames later
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.4, §6.2.
+
+`SplatMesh.initialized` resolves **before** anything renders: Spark's
+accumulate/sort runs in a worker, and the mesh emits no geometry for its first
+several frames. Measured, the first real draw call landed on **frame 7–8** for a
+20 k-splat mesh — a fifth of a second at 60 Hz, and the delay is sort work, not
+file size.
+
+**Decision.** The row's `loaded` badge is driven by `initialized`, and the gap is
+accepted rather than papered over: a "decoding…" sub-state would exist only to
+describe a fifth of a second. What must *not* happen is code that reads
+`initialized` as "the capture is on screen" — a first-frame screenshot, an
+auto-fit, or a test asserting pixels right after the await would all read an empty
+layer. A related trap for anything inspecting the layer: `SparkRenderer`'s own mesh
+draws **one triangle every frame** regardless of content, so a non-zero draw-call
+or triangle count is no evidence a capture is visible.
+
+`SparkRendererOptions.onDirty` is Spark's "I have new sort/LOD results, re-render"
+callback — the correct signal for a repaint, and the hook to reach for if the
+viewport ever moves off a continuous animation loop. It is deliberately not wired
+today.
+
+---
+
 ## Overwriting a file is confirmed, wherever the write came from
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §14.5, §14.7, §14.8.
