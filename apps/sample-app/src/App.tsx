@@ -13,7 +13,6 @@ import {
   type Vec3,
 } from '@linkervision/camera-coverage-sdk';
 
-import { type RenderBackend } from './scene/viewport.ts';
 import { cameraLabel, toCameraConfig, type SceneCamera } from './cameras/camera.ts';
 import { type Probe, type ProbeVisibilityResult } from './scene/probeVisibility.ts';
 import {
@@ -377,7 +376,6 @@ export function App() {
     ...DEFAULT_OVERLAY_OPTIONS,
     involvedCameraCount: cameras.length,
   });
-  const [renderBackend, setRenderBackend] = useState<RenderBackend | null>(null);
   const [voxelSize, setVoxelSize] = useState(DEFAULT_VOXEL_SIZE);
   const debouncedVoxelSize = useDebounced(voxelSize, DEBOUNCE_MS);
   const [initializedVoxelSize, setInitializedVoxelSize] = useState<number | null>(null);
@@ -943,44 +941,36 @@ export function App() {
   );
 
   // --- SceneView: the imperative Three.js bridge, created once (spec §2.3).
-  // `WebGPURenderer.init()` is async, so creation runs in an async IIFE with a
-  // cancel guard. App pushes state in through one `sync()` effect below and gets
-  // resolved selection/transform events back via the registered callbacks; the
-  // ~21 mirror refs and the fan-out effects this replaced now live in SceneView.
+  // Synchronous now that the renderer is `WebGLRenderer` — the async IIFE and its
+  // cancel guard that `WebGPURenderer.init()` forced are gone. App pushes state in
+  // through one `sync()` effect below and gets resolved selection/transform events
+  // back via the registered callbacks; the ~21 mirror refs and the fan-out effects
+  // this replaced now live in SceneView.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    let cancelled = false;
-    (async () => {
-      const view = await SceneView.create(container, setCameraGuide);
-      if (cancelled) {
-        view.dispose();
-        return;
-      }
-      // Picking is inert in the placement mode (§5): the inspector that would
-      // show the picked entity is hidden, so a selection change there is a
-      // silent state edit the user cannot see.
-      view.onSelect((next, vertex) => {
-        if (placementModeRef.current) return;
-        dispatch({ type: 'selectionChanged', selection: next });
-        // One click decides both (`camera_placement.md` §6.1): a handle hit names
-        // the vertex, a body hit names none and falls back to the last.
-        setVertexSelection(
-          vertex === null || next?.kind !== 'constraint' ? null : { id: next.id, vertex },
-        );
-      });
-      view.onTransform(applyTransformChange);
-      // Load progress/failure arrives here rather than being polled: derived
-      // side state, pushed up as the splat layer reads (`gaussian_splats.md` §6.2).
-      view.onSplatLoadStates(setSplatLoadStates);
-      viewRef.current = view;
-      setRenderBackend(view.renderBackend);
-      setViewportReady(true);
-    })();
+    const view = SceneView.create(container, setCameraGuide);
+    // Picking is inert in the placement mode (§5): the inspector that would
+    // show the picked entity is hidden, so a selection change there is a
+    // silent state edit the user cannot see.
+    view.onSelect((next, vertex) => {
+      if (placementModeRef.current) return;
+      dispatch({ type: 'selectionChanged', selection: next });
+      // One click decides both (`camera_placement.md` §6.1): a handle hit names
+      // the vertex, a body hit names none and falls back to the last.
+      setVertexSelection(
+        vertex === null || next?.kind !== 'constraint' ? null : { id: next.id, vertex },
+      );
+    });
+    view.onTransform(applyTransformChange);
+    // Load progress/failure arrives here rather than being polled: derived
+    // side state, pushed up as the splat layer reads (`gaussian_splats.md` §6.2).
+    view.onSplatLoadStates(setSplatLoadStates);
+    viewRef.current = view;
+    setViewportReady(true);
 
     return () => {
-      cancelled = true;
       viewRef.current?.dispose();
       viewRef.current = null;
       setViewportReady(false);
@@ -992,7 +982,7 @@ export function App() {
   // --- clip band along the clipping section's normal (spec §13.9), or null.
   // Pure and derived: recomputed on clip selection, section drag, or geometry
   // swap, then applied to the geometry by SceneView.sync (which rebuilds the
-  // ClippingGroup on a room swap). Never triggers compute(). -------------------
+  // clip planes on a room swap). Never triggers compute(). --------------------
   const clipBand = useMemo(() => {
     const clipped = clipSectionId ? sections.find((s) => s.id === clipSectionId) : undefined;
     return clipped ? sectionClipBand(clipped, room.worldMin, room.worldMax) : null;
@@ -2854,7 +2844,6 @@ export function App() {
           <StatsPanel
             summary={displaySummary}
             computeBackend={engine.state.backend}
-            renderBackend={renderBackend}
             voxelSize={debouncedVoxelSize}
             cameraNameById={cameraNameById}
           />

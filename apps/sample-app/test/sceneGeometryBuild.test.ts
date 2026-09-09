@@ -9,7 +9,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { buildStaticGeometrySync, forceDoubleSided, swapGeometry } from '../src/scene/sceneGeometryBuild.ts';
+import {
+  buildStaticGeometrySync,
+  clipBandPlanes,
+  forceDoubleSided,
+  setGeometryClippingPlanes,
+  swapGeometry,
+} from '../src/scene/sceneGeometryBuild.ts';
 import { defaultGeometry } from '../src/scene/buildRoom.ts';
 
 /** Every mesh material's `side` under a root, flattened across material arrays. */
@@ -114,4 +120,76 @@ test('the first swap has nothing to detach and simply attaches (spec §14.4)', (
   const first = buildStaticGeometrySync(defaultGeometry());
   swapGeometry(scene, null, first);
   assert.equal(first.group.parent, scene);
+});
+
+// --- Clip planes are per-material now (spec §13.9) ---------------------------
+//
+// This replaced a `ClippingGroup`, which clipped its whole subtree from one node.
+// Per-material state does **not** propagate: a mesh whose material never had the
+// planes written to it simply renders uncut — no error, no wrong number, just a
+// cross-section that leaves part of the model standing. These pin the two paths
+// that produce materials the planes have not reached yet.
+
+/** Every mesh material's `clippingPlanes` under a root, flattened. */
+function allClippingPlanes(root: THREE.Object3D): (THREE.Plane[] | null)[] {
+  const planes: (THREE.Plane[] | null)[] = [];
+  root.traverse((obj) => {
+    if (!(obj instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const m of materials) planes.push(m.clippingPlanes);
+  });
+  return planes;
+}
+
+const BAND = { axis: 1 as const, min: 1, max: 2 };
+
+test('a fresh build starts unclipped', () => {
+  const build = buildStaticGeometrySync(defaultGeometry());
+  for (const planes of allClippingPlanes(build.group)) {
+    assert.ok(planes === null || planes.length === 0, 'nothing is cut until a clip is set');
+  }
+});
+
+test('setting the clip writes the planes onto every mesh material, not just the group', () => {
+  const build = buildStaticGeometrySync(defaultGeometry());
+  const planes = clipBandPlanes(BAND);
+  setGeometryClippingPlanes(build, planes);
+
+  const applied = allClippingPlanes(build.group);
+  assert.ok(applied.length > 1, 'the default room is several meshes — the point of the test');
+  for (const p of applied) {
+    assert.deepEqual(p, planes, 'a material the planes never reached renders uncut');
+  }
+});
+
+test('clearing the clip removes the planes from every material', () => {
+  const build = buildStaticGeometrySync(defaultGeometry());
+  setGeometryClippingPlanes(build, clipBandPlanes(BAND));
+  setGeometryClippingPlanes(build, []);
+  for (const p of allClippingPlanes(build.group)) {
+    assert.deepEqual(p, [], 'an empty array reads as "not clipped" in three');
+  }
+});
+
+test('a swapped-in build does not inherit the outgoing build\'s clip', () => {
+  // The regression this whole test block exists for. `ClippingGroup` clipped
+  // whatever was under it, so an import/reset (spec §14.4) kept cutting for free.
+  // Now the incoming build's materials have never seen the planes, and it is
+  // `SceneView.sync` — keyed on the room identity, not only the band — that has
+  // to re-apply them. If that key is ever narrowed to the band alone, this fails.
+  const scene = new THREE.Scene();
+  const first = buildStaticGeometrySync(defaultGeometry());
+  swapGeometry(scene, null, first);
+  setGeometryClippingPlanes(first, clipBandPlanes(BAND));
+
+  const second = buildStaticGeometrySync(defaultGeometry());
+  swapGeometry(scene, first, second);
+  for (const p of allClippingPlanes(second.group)) {
+    assert.ok(p === null || p.length === 0, 'the incoming build is uncut until re-applied');
+  }
+
+  // ...and re-applying reaches it.
+  const planes = clipBandPlanes(BAND);
+  setGeometryClippingPlanes(second, planes);
+  for (const p of allClippingPlanes(second.group)) assert.deepEqual(p, planes);
 });

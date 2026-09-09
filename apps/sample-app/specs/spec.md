@@ -195,8 +195,9 @@ no device, no adapter, no canvas, no thread:
 
 **Compute is WebGPU.** The SDK acquires its own `GPUAdapter`/`GPUDevice` through
 `navigator.gpu` inside the worker, and falls back to the CPU reference when WebGPU is
-unavailable (§3.2). It never touches the viewport's renderer, and the Stats panel
-reports the two as separate lines because they genuinely are.
+unavailable (§3.2). It never touches the viewport's renderer. Only the *compute*
+backend is surfaced in the UI — the `RunBar` badge (§3.2) — because it is the only
+one of the two that is still a choice.
 
 **The viewport renders with Three.js's classic `WebGLRenderer`** (the `three` build,
 not `three/webgpu`), on **one** canvas.

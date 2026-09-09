@@ -1,11 +1,11 @@
 /**
- * Viewport (spec §2.2, §2.3, §2.4): Three.js `WebGPURenderer` (`three/webgpu`)
- * with automatic WebGL2 fallback, orbit/transform controls, and render loop,
- * plus a second **`WebGLRenderer`** canvas stacked behind it for 3D Gaussian
- * Splat captures (`scene/splatLayer.ts`, `gaussian_splats.md` §4).
- * `WebGPURenderer` initializes asynchronously, so `createViewport` is async and
- * awaits `renderer.init()` before the first frame. Driven imperatively; React
- * only owns the container ref.
+ * Viewport (spec §2.2, §2.3, §2.4): Three.js `WebGLRenderer` (WebGL2), orbit /
+ * transform controls, and the render loop. **One canvas, one scene, one depth
+ * buffer** — the 3D Gaussian Splat captures draw into this renderer too, as a
+ * `Group` in this scene (`scene/splatLayer.ts`, `gaussian_splats.md` §4), so a
+ * capture is occluded by the geometry in front of it like any other content.
+ * `WebGLRenderer` constructs synchronously, so `createViewport` is synchronous.
+ * Driven imperatively; React only owns the container ref.
  *
  * The viewport renders through one of five **view cameras** chosen by the
  * top-middle View selector (spec §2.4): a `perspective` camera (full orbit),
@@ -33,7 +33,7 @@
  * SDK's WebGPU *compute* backend (spec §3.2); the two are selected and reported
  * separately.
  */
-import * as THREE from 'three/webgpu';
+import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 // Aliased to OrientationGizmo — the bare name collides with the app's notion of
@@ -55,9 +55,7 @@ import {
   type ViewId,
 } from './viewCameras.ts';
 import { createSceneLights } from './sceneLighting.ts';
-import { SPLAT_LAYER_CLEAR_COLOR, SplatLayer } from './splatLayer.ts';
-
-export type RenderBackend = 'webgpu' | 'webgl2';
+import { VIEWPORT_CLEAR_COLOR, SplatLayer } from './splatLayer.ts';
 
 /**
  * The selected camera's pose + lens, as the **Selected** view needs it (spec
@@ -100,16 +98,13 @@ export interface Viewport {
   setCameraViewSource(source: CameraViewSource | null): void;
   /** The frame guide's current size in CSS pixels, or null (spec §2.4.1, §5.2). */
   cameraGuideSizePx(): { width: number; height: number } | null;
-  renderer: THREE.WebGPURenderer;
+  renderer: THREE.WebGLRenderer;
   /**
-   * The second, `WebGLRenderer` canvas behind this one, drawing the 3D Gaussian
-   * Splat captures (`gaussian_splats.md` §4). Always present as an object; its
-   * `available` is false when the browser gave no WebGL2 context, in which case
-   * the layer is inert and this canvas re-owns its opaque background (§9).
+   * The 3D Gaussian Splat captures, as a `Group` in this viewport's scene
+   * (`gaussian_splats.md` §4). Always present; a scene with no capture holds an
+   * empty group and pays nothing for it.
    */
   splats: SplatLayer;
-  /** Which backend `WebGPURenderer` actually selected (spec §2.3). */
-  renderBackend: RenderBackend;
   orbitControls: OrbitControls;
   transformControls: TransformControls;
   dispose(): void;
@@ -142,10 +137,10 @@ function ringSpriteMaterial(color: string): THREE.SpriteMaterial {
   return new THREE.SpriteMaterial({ map: texture, toneMapped: false, transparent: true });
 }
 
-export async function createViewport(
+export function createViewport(
   container: HTMLElement,
   options: ViewportOptions = {},
-): Promise<Viewport> {
+): Viewport {
   const scene = new THREE.Scene();
   // The **WebGL splat layer owns the viewport background** (`gaussian_splats.md`
   // §4.2): this canvas is created `alpha: true` with a null scene background, so
@@ -201,23 +196,23 @@ export async function createViewport(
   let cameraViewSource: CameraViewSource | null = null;
   let cameraGuide: CameraViewFit['guide'] | null = null;
 
-  // Prefers WebGPU; falls back to its own WebGL2 backend when navigator.gpu is
-  // unavailable, so the demo always renders through one code path (spec §2.3).
-  // The splat layer is built **first and unconditionally** — one code path
-  // whether or not a scene has a capture — because it owns the background and
-  // has to sit behind this canvas in DOM order (`gaussian_splats.md` §4.2).
-  const splats = new SplatLayer();
-  if (splats.canvas) container.appendChild(splats.canvas);
-  if (!splats.available) scene.background = new THREE.Color(SPLAT_LAYER_CLEAR_COLOR);
-
-  const renderer = new THREE.WebGPURenderer({ antialias: true, alpha: true });
+  // WebGL2 (spec §2.3). `antialias: false` on Spark's advice — MSAA does not
+  // improve Gaussian splatting and costs real performance, and the captures now
+  // share this framebuffer.
+  const renderer = new THREE.WebGLRenderer({ antialias: false });
   renderer.setPixelRatio(window.devicePixelRatio);
-  await renderer.init();
-  // `backend` is typed as the abstract base; the WebGPU backend tags itself.
-  const backend = renderer.backend as { isWebGPUBackend?: boolean } | undefined;
-  const renderBackend: RenderBackend = backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
+  // Required for `Material.clippingPlanes`, which is how a section's clip
+  // cross-sections the geometry (spec §13.9, `setGeometryClippingPlanes`).
+  renderer.localClippingEnabled = true;
   renderer.domElement.classList.add('viewport-main');
   container.appendChild(renderer.domElement);
+  scene.background = new THREE.Color(VIEWPORT_CLEAR_COLOR);
+
+  // The splat layer is built **unconditionally** — one code path whether or not a
+  // scene has a capture (`gaussian_splats.md` §4.2). It owns no renderer; it holds
+  // this one only so Spark can construct its `SparkRenderer` against it.
+  const splats = new SplatLayer(renderer);
+  scene.add(splats.group);
 
   // Fixed light rig (spec §2.3.1) — see `sceneLighting.ts` for the rationale.
   scene.add(...Object.values(createSceneLights()));
@@ -237,7 +232,7 @@ export async function createViewport(
     camera: THREE.Camera;
     location: { top: number | null; right: number; bottom: number; left: number | null };
     setLabels(labelX: string, labelY: string, labelZ: string): void;
-    render(renderer: THREE.WebGPURenderer): void;
+    render(renderer: THREE.WebGLRenderer): void;
     dispose(): void;
   };
   orientationGizmo.setLabels('X', 'Y', 'Z');
@@ -435,9 +430,6 @@ export async function createViewport(
     // (spec §2.4.1), which also re-derives the frame guide for the new aspect.
     applyCameraView();
     renderer.setSize(w, h);
-    // One observer, one `setSize` pair, so the two canvases cannot drift
-    // (`gaussian_splats.md` §4.2).
-    splats.setSize(w, h, window.devicePixelRatio);
   }
   const resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(container);
@@ -445,15 +437,12 @@ export async function createViewport(
 
   renderer.setAnimationLoop(() => {
     orbitControls.update();
-    // One animation loop: the splat layer draws first (it clears the
-    // background), then the transparent WebGPU scene composites over it, then
-    // the orientation gizmo. Both renderers are handed **the same camera
-    // object**, so the backdrop cannot lag the geometry by a frame during an
-    // orbit (`gaussian_splats.md` §4.2, §4.3).
-    splats.render(cameras[activeView]);
+    // One render call. `SparkRenderer` is an `Object3D` in this scene, so the
+    // captures draw as part of it, into the same depth buffer
+    // (`gaussian_splats.md` §4.1, §4.2).
     renderer.render(scene, cameras[activeView]);
     // Mirror the live view, then draw the gizmo over the corner (it manages its
-    // own viewport + depth clear, and handles the WebGPU y-origin, spec §2.4).
+    // own viewport + depth clear, spec §2.4).
     // autoClear is disabled so the gizmo's internal render composites over the
     // scene instead of clearing its viewport to the opaque black clear-color.
     orientationGizmo.camera = cameras[activeView];
@@ -491,7 +480,6 @@ export async function createViewport(
     cameraGuideSizePx,
     renderer,
     splats,
-    renderBackend,
     orbitControls,
     transformControls,
     dispose,

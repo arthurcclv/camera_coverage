@@ -86,26 +86,15 @@ body {
 .viewport canvas {
   display: block;
 }
-/* Two stacked canvases (`gaussian_splats.md` §4.2): the WebGL splat layer
-   behind, owning the viewport background, and the transparent WebGPU canvas
-   over it. Both are absolutely positioned so they overlay exactly; each
-   renderer sets its own pixel width/height, which wins over the inset.
-
-   The splat canvas takes `z-index: 0` and the main one keeps `auto`, so DOM
-   order (splats appended first) puts geometry above the backdrop while the
-   toolbars' own `z-index: 1` still sits above both. It is also
-   `pointer-events: none`: OrbitControls, TransformControls and every pick keep
-   receiving events on the main canvas alone — which is the mechanical half of
-   why a splat is never viewport-pickable (§6.5). */
-.viewport canvas.viewport-splats,
+/* One canvas (`spec.md` §2.3): splats draw into the same renderer as everything
+   else, so there is no second canvas to stack or keep in sync. Absolutely
+   positioned so the renderer's own pixel width/height wins over the container's
+   layout, and it keeps `z-index: auto` so the toolbars' own `z-index: 1` sits
+   above it. */
 .viewport canvas.viewport-main {
   position: absolute;
   top: 0;
   left: 0;
-}
-.viewport canvas.viewport-splats {
-  z-index: 0;
-  pointer-events: none;
 }
 /* An armed viewport tool — "Place on surface" (spec §2.4.2) or the polyline draw
    mode (`camera_placement.md` §6.2): the next click lands a position, so the

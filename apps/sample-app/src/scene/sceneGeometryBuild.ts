@@ -10,7 +10,6 @@
  * synchronously, exactly like the old `buildRoom()`.
  */
 import * as THREE from 'three';
-import { ClippingGroup } from 'three/webgpu';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import type { SceneMesh, Vec3 } from '@linkervision/camera-coverage-sdk';
 import type { ClipBand } from './sectionHeatmap.ts';
@@ -31,12 +30,11 @@ export interface GeometryBuild {
   /** Merged geometry mesh, world space — pass directly to `engine.loadScene`. */
   sceneMesh: SceneMesh;
   /**
-   * Renderable geometry, ready to add to the Three.js scene. A `ClippingGroup`
-   * (not a plain `Group`) so a section's clip can cross-section every mesh
-   * inside it (spec §13.9) — the WebGPU renderer only honours clipping planes set
-   * on a `ClippingGroup` scene node, not `Material.clippingPlanes`.
+   * Renderable geometry, ready to add to the Three.js scene. A section's clip
+   * cross-sections every mesh inside it by way of the meshes' own
+   * `Material.clippingPlanes` (spec §13.9, `setGeometryClippingPlanes`).
    */
-  group: ClippingGroup;
+  group: THREE.Group;
   worldMin: Vec3;
   worldMax: Vec3;
 }
@@ -150,9 +148,9 @@ export function forceDoubleSided(root: THREE.Object3D): void {
 function finishBuild(collisionPieces: TriMesh[], renderPieces: THREE.Object3D[]): GeometryBuild {
   const merged = mergeTris(collisionPieces);
   const { worldMin, worldMax } = computeWorkspaceBounds(merged);
-  const group = new ClippingGroup();
-  // Off until a section clip sets planes (spec §13.9); disabled = no clipping.
-  group.enabled = false;
+  const group = new THREE.Group();
+  // No clipping until a section clip sets planes (spec §13.9); the materials are
+  // built with `clippingPlanes` unset, which is "not clipped".
   for (const piece of renderPieces) group.add(piece);
   forceDoubleSided(group);
   return { sceneMesh: { positions: merged.positions, indices: merged.indices }, group, worldMin, worldMax };
@@ -222,15 +220,30 @@ export function clipBandPlanes(band: ClipBand): THREE.Plane[] {
 }
 
 /**
- * Apply (or clear) clip clipping planes on a built geometry group (spec
- * §13.9). The group is a `ClippingGroup`, so its `clippingPlanes` clip every
- * descendant mesh (floor/walls/boxes and any glTF meshes) uniformly. Pass an
- * empty array to disable clipping. This is the WebGPU renderer's clipping path —
- * `Material.clippingPlanes` is not honoured there.
+ * Apply (or clear) the clip's planes on a built geometry group (spec §13.9), by
+ * writing them onto **every descendant mesh's material** — floor, walls, boxes,
+ * and any glTF meshes. Pass an empty array to disable clipping.
+ *
+ * The renderer must have `localClippingEnabled` on for `Material.clippingPlanes`
+ * to be read at all (`viewport.ts` sets it once).
+ *
+ * **This does not propagate.** The `ClippingGroup` this replaced clipped its whole
+ * subtree from one node, so a mesh added later inherited the clip for free; per-
+ * material state does not, and a material that never gets the planes written to it
+ * simply renders uncut. Every path that produces new materials — a geometry
+ * rebuild, and the import/reset swap of spec §14.4 — therefore has to call this
+ * again. `SceneView.sync` does, keying on the room identity as well as the band.
+ * `test/sceneGeometryBuild.test.ts` pins that.
  */
 export function setGeometryClippingPlanes(build: GeometryBuild, planes: THREE.Plane[]): void {
-  build.group.clippingPlanes = planes;
-  build.group.enabled = planes.length > 0;
+  // An empty array reads as "no clipping" in three, so one assignment covers both
+  // applying and clearing. The same array instance is shared by every material:
+  // the planes are only ever replaced wholesale, never mutated in place.
+  build.group.traverse((obj) => {
+    if (!(obj instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const m of materials) m.clippingPlanes = planes;
+  });
 }
 
 function disposeMaterial(material: THREE.Material): void {
@@ -250,9 +263,9 @@ function disposeMaterial(material: THREE.Material): void {
  * whose GPU resources are already gone — and React's `useEffect` runs *after*
  * paint, so a dispose done in the state update is guaranteed to be followed by at
  * least one such frame. It shows up with a clip band active because those meshes
- * sit under a `ClippingGroup`: the renderer's cached pipelines for them are keyed
- * on material state that disposal has just invalidated, so the frame draws
- * garbage rather than nothing, and the bad cache entry outlives the frame.
+ * carry clipping planes: the renderer's cached programs for them are keyed on
+ * material state that disposal has just invalidated, so the frame draws garbage
+ * rather than nothing, and the bad cache entry outlives the frame.
  */
 export function swapGeometry(scene: THREE.Object3D, prev: GeometryBuild | null, next: GeometryBuild): void {
   if (prev) {

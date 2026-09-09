@@ -1,6 +1,7 @@
 /**
  * Tests for the voxel volumetric renderer's pure-TS reference math
- * (specs/volumetric_rendering.md §6). The TSL fragment node mirrors these.
+ * (specs/volumetric_rendering.md §6), plus a source-parity check on the GLSL
+ * fragment shader that mirrors it.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,6 +10,8 @@ import {
   voxelContribution,
   maxContribution,
   compositeContributions,
+  VERTEX_SHADER,
+  FRAGMENT_SHADER,
   type Vec3,
 } from '../src/scene/volumetric.ts';
 
@@ -135,4 +138,45 @@ test('max composite of a set equals its brightest element per channel', () => {
 test('empty contribution set composites to black in both modes', () => {
   assert.deepEqual(compositeContributions('additive', []), [0, 0, 0]);
   assert.deepEqual(compositeContributions('max', []), [0, 0, 0]);
+});
+
+// --- Shader source parity (specs/volumetric_rendering.md §6) ------------------
+//
+// A shader cannot execute under `node --test`, so nothing here proves the GLSL
+// is *right*. What it catches is a term silently dropped or a name silently
+// renamed in an edit — the failure mode that produced no error and no wrong
+// number back when this was a TSL node graph. Deliberately a weak test, kept
+// because without it the port from the reference above has no automated link at
+// all.
+
+test('the fragment shader still carries every term of the reference', () => {
+  const src = FRAGMENT_SHADER;
+  // slabChord: per-component slab, entry clamped to 0, chord clamped to 0.
+  assert.match(src, /vec3 tmin = min\(t1, t2\)/, 'slab min');
+  assert.match(src, /vec3 tmax = max\(t1, t2\)/, 'slab max');
+  assert.match(src, /float tEnter = max\(max\(max\(tmin\.x, tmin\.y\), tmin\.z\), 0\.0\)/);
+  assert.match(src, /float tExit = min\(min\(tmax\.x, tmax\.y\), tmax\.z\)/);
+  assert.match(src, /float chord = max\(tExit - tEnter, 0\.0\)/, 'chord must clamp at 0');
+  // The per-component reciprocal: a scalar collapse here breaks the ray in some
+  // view quadrants, which is why the reference and the shader both spell it out.
+  assert.match(src, /vec3 invDir = 1\.0 \/ rd/);
+  // voxelContribution / maxContribution, selected by the mode uniform.
+  assert.match(src, /float pathTerm = mix\(chord, 1\.0, uMaxMode\)/, 'max mode drops the chord');
+  assert.match(src, /vColor \* vIntensity \* pathTerm \* uIntensityScale/);
+});
+
+test('the two shader stages agree on the varyings and attribute names they share', () => {
+  // The names are the whole contract between the stages, and between the shader
+  // and `allocate()`'s `setAttribute` calls. A mismatch fails at shader compile
+  // in the browser and nowhere else.
+  for (const varying of ['vCenter', 'vHalf', 'vIntensity', 'vColor', 'vWorldPos']) {
+    assert.match(VERTEX_SHADER, new RegExp(`varying \\w+ ${varying};`), `vertex ${varying}`);
+    assert.match(FRAGMENT_SHADER, new RegExp(`varying \\w+ ${varying};`), `fragment ${varying}`);
+  }
+  // `color` is Three.js's own vertex-colour attribute and `half` is a reserved
+  // word in GLSL ES; both collide at compile time, hence the `a` prefix.
+  for (const attr of ['aCenter', 'aHalf', 'aIntensity', 'aColor']) {
+    assert.match(VERTEX_SHADER, new RegExp(`attribute \\w+ ${attr};`), `vertex ${attr}`);
+  }
+  assert.doesNotMatch(VERTEX_SHADER, /attribute \w+ (color|half);/, 'reserved/colliding name');
 });

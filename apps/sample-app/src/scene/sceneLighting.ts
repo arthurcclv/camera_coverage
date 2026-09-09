@@ -9,7 +9,7 @@
  * sets the floor brightness no surface falls below.
  *
  * Kept out of `viewport.ts` so the rig's invariants are testable without a
- * `WebGPURenderer` (which needs a real GPU adapter). Unit-tested in
+ * a live renderer (which needs a real GPU context). Unit-tested in
  * `test/sceneLighting.test.ts`, which asserts the §2.3.1 table exactly.
  */
 import * as THREE from 'three';

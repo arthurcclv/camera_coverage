@@ -1,17 +1,16 @@
 /**
  * The pool scatter (`camera_placement.md` §5.2, §13).
  *
- * Two properties carry this overlay, and both are the kind that fail silently:
+ * The property that carries this overlay is that its dots are sized in **screen**
+ * space: the same overlay has to read on a 6 m demo room and on the real
+ * 440 × 201 × 1120 m site, and a world-space dot small enough for the first is
+ * sub-pixel in the second. That does not show up as a crash or a wrong number,
+ * which is why it is pinned here rather than left to a constant nobody re-checks.
  *
- * - It is drawn as an **instanced `Sprite`**, not `THREE.Points`. WebGPU's point
- *   primitives are fixed at one pixel — three's own `PointsNodeMaterial` says so
- *   — so as Points the scatter rendered, one pixel wide, and was invisible.
- * - Its dots are sized in **screen** space. The same overlay has to read on a 6 m
- *   demo room and on the real 440 × 201 × 1120 m site, and a world-space dot
- *   small enough for the first is sub-pixel in the second.
- *
- * Neither shows up as a crash or a wrong number, which is why both are pinned
- * here rather than left to constants nobody re-checks.
+ * (The scatter was an instanced `Sprite` while the app rendered through
+ * `WebGPURenderer`, whose point primitives are fixed at one pixel. On WebGL2 a
+ * plain `THREE.Points` honours `gl_PointSize`, so that workaround is gone —
+ * `ai/DECISIONS.md`.)
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,29 +20,37 @@ import { RenderOrder } from '../src/scene/renderOrder.ts';
 import { segmentPairs } from '../src/scene/polylineDraw.ts';
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 
-function spriteNamed(overlay: PlacementOverlay, name: string): THREE.Sprite {
-  const sprite = overlay.group.children.find(
-    (c): c is THREE.Sprite => (c as THREE.Sprite).isSprite && c.name === name,
+function pointsNamed(overlay: PlacementOverlay, name: string): THREE.Points {
+  const points = overlay.group.children.find(
+    (c): c is THREE.Points => (c as THREE.Points).isPoints && c.name === name,
   );
-  assert.ok(sprite, `expected an instanced Sprite named ${name}, not THREE.Points`);
-  return sprite;
+  assert.ok(points, `expected a THREE.Points named ${name}`);
+  return points;
 }
 
-const scatterOf = (overlay: PlacementOverlay) => spriteNamed(overlay, 'placement-pool-dots');
-const draftDotsOf = (overlay: PlacementOverlay) => spriteNamed(overlay, 'polyline-draft-vertices');
+/** How many dots the set actually draws — its geometry draw range (§5.2). */
+function drawnCount(points: THREE.Points): number {
+  return points.geometry.drawRange.count;
+}
+
+const scatterOf = (overlay: PlacementOverlay) => pointsNamed(overlay, 'placement-pool-dots');
+const draftDotsOf = (overlay: PlacementOverlay) => pointsNamed(overlay, 'polyline-draft-vertices');
 
 function positionsAt(...xs: number[]): { position: Vec3; count: number }[] {
   return xs.map((x, i) => ({ position: [x, 2, 0] as Vec3, count: i + 1 }));
 }
 
-test('the scatter is an instanced Sprite, because WebGPU points are 1 pixel', () => {
+test('the scatter is one THREE.Points that is never frustum-culled', () => {
   const overlay = new PlacementOverlay();
-  const sprite = scatterOf(overlay);
-  assert.ok(!(sprite as unknown as THREE.Points).isPoints);
-  // Each instance is placed by the material's `positionNode`, so the sprite's own
-  // transform never leaves the origin — culling against it would drop the whole
-  // scatter the moment the origin left the frustum.
-  assert.equal(sprite.frustumCulled, false);
+  const points = scatterOf(overlay);
+  // Every dot carries its own world position, so the object's own transform never
+  // leaves the origin — culling against it would drop the whole scatter the
+  // moment the origin left the frustum.
+  assert.equal(points.frustumCulled, false);
+  // A `position` attribute from construction: the animation loop draws this
+  // object before any dot exists, and three caches an empty attribute set on that
+  // first frame (`CONVENTIONS.md`).
+  assert.ok(points.geometry.getAttribute('position'), 'must never reach the scene attribute-less');
   overlay.dispose();
 });
 
@@ -62,40 +69,40 @@ test('the dots are sized in screen space, so they read at any site scale', () =>
   overlay.dispose();
 });
 
-test('an empty pool hides the scatter and draws no instances', () => {
+test('an empty pool hides the scatter and draws no dots', () => {
   const overlay = new PlacementOverlay();
   overlay.setPool([], new Set());
   assert.equal(scatterOf(overlay).visible, false);
-  assert.equal(scatterOf(overlay).count, 0);
+  assert.equal(drawnCount(scatterOf(overlay)), 0);
   overlay.setPool(positionsAt(0, 1, 2), new Set());
   assert.equal(scatterOf(overlay).visible, true);
-  assert.equal(scatterOf(overlay).count, 3, 'one instance per candidate position');
+  assert.equal(drawnCount(scatterOf(overlay)), 3, 'one dot per candidate position');
   overlay.dispose();
 });
 
-test('a smaller pool draws fewer instances rather than leaving the old ones', () => {
+test('a smaller pool draws fewer dots rather than leaving the old ones', () => {
   // The count slider re-sets the pool on every tick (§5.2). The buffers are
-  // reused; `count` is what stops the stale tail being drawn.
+  // reused; the draw range is what stops the stale tail being drawn.
   const overlay = new PlacementOverlay();
   overlay.setPool(positionsAt(0, 1, 2, 3), new Set());
   overlay.setPool(positionsAt(0, 1), new Set());
-  assert.equal(scatterOf(overlay).count, 2);
+  assert.equal(drawnCount(scatterOf(overlay)), 2);
   overlay.dispose();
 });
 
 test('the buffers grow for a bigger pool and are then reused', () => {
   const overlay = new PlacementOverlay();
-  const material = () => scatterOf(overlay).material as THREE.Material & { positionNode: unknown };
+  const positionAttr = () => scatterOf(overlay).geometry.getAttribute('position');
   overlay.setPool(positionsAt(...Array.from({ length: 10 }, (_, i) => i)), new Set());
-  const first = material().positionNode;
-  // Still inside the same capacity: re-pointing the node would recompile the
-  // shader, and this runs on every count-slider tick.
+  const first = positionAttr();
+  // Still inside the same capacity: reallocating would drop the uploaded buffer,
+  // and this runs on every count-slider tick.
   overlay.setPool(positionsAt(...Array.from({ length: 200 }, (_, i) => i)), new Set());
-  assert.equal(material().positionNode, first, 'a pool inside capacity must not rebuild the nodes');
+  assert.equal(positionAttr(), first, 'a pool inside capacity must not reallocate');
   // Past it, the buffers grow.
   overlay.setPool(positionsAt(...Array.from({ length: 900 }, (_, i) => i)), new Set());
-  assert.notEqual(material().positionNode, first);
-  assert.equal(scatterOf(overlay).count, 900);
+  assert.notEqual(positionAttr(), first);
+  assert.equal(drawnCount(scatterOf(overlay)), 900);
   overlay.dispose();
 });
 
@@ -106,13 +113,13 @@ test('the draft draws a dot per committed vertex, and none for the cursor', () =
   const overlay = new PlacementOverlay();
   overlay.setDraftVertices([[0, 2, 0]]);
   assert.equal(draftDotsOf(overlay).visible, true, 'one clicked vertex must already show');
-  assert.equal(draftDotsOf(overlay).count, 1);
+  assert.equal(drawnCount(draftDotsOf(overlay)), 1);
   overlay.setDraftVertices([
     [0, 2, 0],
     [3, 2, 0],
     [6, 2, 0],
   ]);
-  assert.equal(draftDotsOf(overlay).count, 3, 'one dot per vertex, and the cursor is not one');
+  assert.equal(drawnCount(draftDotsOf(overlay)), 3, 'one dot per vertex, and the cursor is not one');
   // A committed or cancelled draft leaves no dots behind.
   overlay.setDraftVertices([]);
   assert.equal(draftDotsOf(overlay).visible, false);

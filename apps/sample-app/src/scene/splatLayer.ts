@@ -1,42 +1,27 @@
 /**
- * The splat layer (`gaussian_splats.md` §4): a second, **`WebGLRenderer`**
- * canvas stacked behind the main `WebGPURenderer` one, its own `Scene`
- * holding a `SparkRenderer` plus one `SplatMesh` per row, the streamed load
+ * The splat layer (`gaussian_splats.md` §4): a `Group` **inside the viewport's own
+ * scene** holding a `SparkRenderer` plus one anchor per row, the streamed load
  * path, the per-`src` decode cache, and the clip's `SplatEdit` lifecycle.
  *
- * **Why a second canvas.** Spark requires a `WebGLRenderer`
- * (`SparkRendererOptions.renderer`) and draws splats with GLSL
- * `RawShaderMaterial` into `WebGLRenderTarget`s — a material class
- * `WebGPURenderer` supports on neither of its backends — while the app's
- * viewport is committed to `three/webgpu` (TSL coverage fog, `PointsNodeMaterial`
- * constraint gizmos, `ClippingGroup` clipping). Migrating the viewport would mean
- * rewriting the visual core; an offscreen render plus per-frame
- * `readRenderTargetPixels` would put a GPU→CPU→GPU stall in the frame loop
- * (§4.1). The cost, stated plainly: the two canvases share no **depth** buffer,
- * so splats are always drawn behind every mesh and gizmo — which is what the
- * eye menu's **Geometry** row exists to make usable (§5.3).
+ * **No renderer of its own.** Spark requires a `WebGLRenderer`
+ * (`SparkRendererOptions.renderer`, plus `renderer.properties`/`state`/
+ * `initTexture`/`xr`), and since the viewport *is* a `WebGLRenderer` (`spec.md`
+ * §2.3) the captures simply draw into it. That is what gives geometry and splats
+ * **one depth buffer**: a capture is occluded by the walls in front of it and
+ * occludes what stands behind it, instead of being painted behind everything on a
+ * separate canvas (§4.1).
  *
- * **`three`, not `three/webgpu`.** This is the one module that imports the
- * classic build: `WebGLRenderer` and `ShaderChunk` (which Spark writes its
- * `splatDefines` include into) exist only there. `vite.config.ts` routes bare
- * `three` here — and inside `@sparkjsdev/spark` — to that build, and everywhere
- * else to `three/webgpu`. Both builds import their core classes from the same
- * `three.core.js`, so there is exactly one `Object3D`/`PerspectiveCamera`/
- * `OrthographicCamera` class in the bundle: the viewport's camera objects can be
- * handed straight to this renderer, and `TransformControls` (a `three/webgpu`
- * import) can attach to an anchor created here (§4.3).
+ * The `SparkRenderer` is an `Object3D`, so it draws when the scene draws — this
+ * module owns no canvas, no clear colour, no `setSize`, and no render call.
  *
- * This module is deliberately **thin and untested** — canvas creation, the
- * `SparkRenderer`, the stream load, `mesh.visible`, the `SplatEdit` lifecycle,
- * and disposal. Every judgement it would otherwise make inline lives in the pure
- * `splats.ts` / `splatAssets.ts` (`gaussian_splats.md` §11).
+ * This module is deliberately **thin and untested** — the `SparkRenderer`, the
+ * stream load, `mesh.visible`, the `SplatEdit` lifecycle, and disposal. Every
+ * judgement it would otherwise make inline lives in the pure `splats.ts` /
+ * `splatAssets.ts` (`gaussian_splats.md` §11).
  */
-// Named imports, not a namespace one, so rollup can tree-shake the classic
-// build down to the handful of classes this module actually needs rather than
-// pulling all of `three.module.js` into the main chunk alongside
-// `three.webgpu.js` (`gaussian_splats.md` §4.2 — a scene with no capture should
-// pay as little as possible).
-import { Object3D, Scene, WebGLRenderer, type Camera } from 'three';
+// Named imports, not a namespace one, so rollup can tree-shake `three` down to
+// the handful of classes this module actually needs.
+import { Group, Object3D, type WebGLRenderer } from 'three';
 import type {
   PackedSplats,
   SparkRenderer,
@@ -58,8 +43,8 @@ import {
 } from './splats.ts';
 import type { GizmoAttachable } from './gizmoSet.ts';
 
-/** The viewport background the WebGL layer owns permanently (§4.2). */
-export const SPLAT_LAYER_CLEAR_COLOR = 0x1a1d22;
+/** The viewport background (§4.2) — owned by `scene.background`, as it always was. */
+export const VIEWPORT_CLEAR_COLOR = 0x1a1d22;
 
 /**
  * Resolves a splat's folder-relative `src` to its bytes (`gaussian_splats.md`
@@ -105,22 +90,24 @@ function progressFraction(event: ProgressEvent): number | null {
 
 /**
  * The splat layer. Created eagerly by `createViewport` (one code path whether or
- * not a scene has a capture, §4.2); `available` is false when the browser gave
- * no WebGL2 context, in which case the layer is inert and every row badges
- * `⚠ no WebGL context` (§9).
+ * not a scene has a capture, §4.2) and added to the viewport's scene.
  */
 export class SplatLayer implements GizmoAttachable {
-  /** The canvas to stack behind the main one, or null when unavailable. */
-  readonly canvas: HTMLCanvasElement | null;
-  private readonly renderer: WebGLRenderer | null;
   /**
-   * The layer's own scene — the `SparkRenderer`, the row anchors, and the clip
-   * edit, nothing else. No lights (splats carry their own colour), no grid, no
-   * gizmos. A scene shared with the WebGPU renderer was rejected: that renderer
-   * would try to compile Spark's `RawShaderMaterial`, and Three.js layer masks
-   * live on the **camera**, which the two renderers deliberately share (§4.3).
+   * The layer's group inside the viewport scene — the `SparkRenderer`, the row
+   * anchors, and the clip edit, nothing else. Hiding the layer is this group's
+   * `visible`, which Spark's own `traverseVisible` collection then skips (§5.2).
    */
-  private readonly scene = new Scene();
+  readonly group = new Group();
+  /**
+   * The viewport's renderer — Spark needs it to construct its `SparkRenderer`
+   * (§4.1). Held, never driven: this layer issues no render call of its own.
+   */
+  private readonly renderer: WebGLRenderer;
+
+  constructor(renderer: WebGLRenderer) {
+    this.renderer = renderer;
+  }
 
   /**
    * One anchor per row, holding that row's registration (`gaussian_splats.md`
@@ -162,32 +149,6 @@ export class SplatLayer implements GizmoAttachable {
   private loader: SplatAssetLoader | null = null;
   private disposed = false;
 
-  constructor() {
-    let renderer: WebGLRenderer | null = null;
-    try {
-      // `antialias: false` on Spark's own advice — WebGL MSAA does not improve
-      // Gaussian splatting and costs real performance.
-      renderer = new WebGLRenderer({ antialias: false, alpha: false });
-    } catch {
-      // No WebGL2 context: the layer stays inert and the viewport renders as it
-      // did before, with its own opaque background restored (§9).
-      renderer = null;
-    }
-    this.renderer = renderer;
-    this.canvas = renderer?.domElement ?? null;
-    if (renderer) {
-      // The WebGL canvas owns the viewport background permanently, so the WebGPU
-      // canvas above it can clear transparent (§4.2).
-      renderer.setClearColor(SPLAT_LAYER_CLEAR_COLOR, 1);
-      renderer.domElement.classList.add('viewport-splats');
-    }
-  }
-
-  /** Whether the layer can draw at all (§9). */
-  get available(): boolean {
-    return this.renderer !== null;
-  }
-
   /**
    * Register the callback for a change in any row's load state (§6.2). The map
    * is keyed by **splat id**, so App holds it exactly as the spec's derived side
@@ -197,23 +158,6 @@ export class SplatLayer implements GizmoAttachable {
   onLoadStates(handler: (states: ReadonlyMap<string, SplatLoadState>) => void): void {
     this.loadStateHandler = handler;
     this.emitLoadStates();
-  }
-
-  setSize(width: number, height: number, pixelRatio: number): void {
-    if (!this.renderer) return;
-    this.renderer.setPixelRatio(pixelRatio);
-    this.renderer.setSize(width, height);
-  }
-
-  /**
-   * Draw the layer through **the very same camera object** the WebGPU renderer
-   * is about to use (§4.3) — no mirroring, no matrix copying, so the backdrop
-   * cannot lag the geometry by a frame during an orbit, and Spark's
-   * `camera instanceof THREE.OrthographicCamera` branch resolves correctly on
-   * the three orthographic elevations.
-   */
-  render(camera: Camera): void {
-    this.renderer?.render(this.scene, camera);
   }
 
   /** The row's `TransformControls` attach target — its anchor (§5.1, §7). */
@@ -246,7 +190,7 @@ export class SplatLayer implements GizmoAttachable {
     // target, so a plain Save does not re-decode a resident capture.
     if (this.loader !== null && state.loader !== this.loader) this.releaseAll();
     this.loader = state.loader;
-    this.scene.visible = state.visible;
+    this.group.visible = state.visible;
 
     // `src` → the live rows referencing it, built in the same pass that walks
     // the rows rather than re-derived in `releaseUnreferenced`: this loop
@@ -262,7 +206,7 @@ export class SplatLayer implements GizmoAttachable {
       if (!anchor) {
         anchor = new Object3D();
         this.anchors.set(splat.id, anchor);
-        this.scene.add(anchor);
+        this.group.add(anchor);
       }
       anchor.position.set(splat.position[0], splat.position[1], splat.position[2]);
       anchor.quaternion.set(splat.rotation[0], splat.rotation[1], splat.rotation[2], splat.rotation[3]);
@@ -279,7 +223,7 @@ export class SplatLayer implements GizmoAttachable {
 
     for (const [id, anchor] of [...this.anchors]) {
       if (seen.has(id)) continue;
-      this.scene.remove(anchor);
+      this.group.remove(anchor);
       this.anchors.delete(id);
       this.detach(id);
     }
@@ -323,15 +267,13 @@ export class SplatLayer implements GizmoAttachable {
     this.disposed = true;
     this.clearClip();
     this.releaseAll();
-    for (const anchor of this.anchors.values()) this.scene.remove(anchor);
+    for (const anchor of this.anchors.values()) this.group.remove(anchor);
     this.anchors.clear();
     if (this.sparkRenderer) {
-      this.scene.remove(this.sparkRenderer);
+      this.group.remove(this.sparkRenderer);
       this.sparkRenderer.dispose();
       this.sparkRenderer = null;
     }
-    this.renderer?.dispose();
-    this.canvas?.remove();
   }
 
   // --- loading (`gaussian_splats.md` §3.3, §4.4) -----------------------------
@@ -342,10 +284,6 @@ export class SplatLayer implements GizmoAttachable {
    * decode, and **one** set of GPU textures (§3.3).
    */
   private attach(splat: SplatObject): void {
-    if (!this.available) {
-      this.reportNoWebgl(splat);
-      return;
-    }
     let entry = this.captures.get(splat.src);
     if (!entry) {
       entry = { refs: new Set(), state: { status: 'loading', progress: null }, packed: null, token: 0 };
@@ -460,12 +398,12 @@ export class SplatLayer implements GizmoAttachable {
     const spark = this.spark;
     if (!anchor || !spark) return;
     if (!this.sparkRenderer) {
-      // Constructed once, on the first load, and added to the splat scene.
+      // Constructed once, on the first load, and added to the splat group.
       // `onDirty` is Spark's "I have new sort/LOD results, re-render" signal —
       // the hook to use if the viewport ever moves off a continuous animation
       // loop, which it has not (§4.4).
-      this.sparkRenderer = new spark.SparkRenderer({ renderer: this.renderer! });
-      this.scene.add(this.sparkRenderer);
+      this.sparkRenderer = new spark.SparkRenderer({ renderer: this.renderer });
+      this.group.add(this.sparkRenderer);
     }
     // `lod` is deliberately absent: with `packedSplats` supplied, Spark reads the
     // level-of-detail data off the **shared decode** (`packedSplats.lodSplats`,
@@ -515,23 +453,6 @@ export class SplatLayer implements GizmoAttachable {
 
   private fail(entry: CacheEntry, failure: SplatLoadFailure): void {
     entry.state = { status: 'error', failure };
-    this.emitLoadStates();
-  }
-
-  /**
-   * Badge a row on an **inert** layer (§9). This is the one state that is set
-   * before any load: with no WebGL2 context there is nothing to load *into*, so
-   * the entry exists only to carry the badge — which is why it seeds a cache
-   * entry rather than going through {@link fail}, and why it never starts a
-   * load.
-   */
-  private reportNoWebgl(splat: SplatObject): void {
-    const state: SplatLoadState = { status: 'error', failure: 'noWebgl' };
-    const entry =
-      this.captures.get(splat.src) ?? { refs: new Set<string>(), state, packed: null, token: 0 };
-    entry.state = state;
-    entry.refs.add(splat.id);
-    this.captures.set(splat.src, entry);
     this.emitLoadStates();
   }
 
@@ -585,7 +506,7 @@ export class SplatLayer implements GizmoAttachable {
       });
       // Added to the **scene**, not under any `SplatMesh`, which is what makes
       // Spark collect it as a global edit applying to every capture (§5.4).
-      this.scene.add(edit);
+      this.group.add(edit);
       this.clipEdit = { edit, sdf };
     }
     const { sdf } = this.clipEdit;
@@ -597,7 +518,7 @@ export class SplatLayer implements GizmoAttachable {
 
   private clearClip(): void {
     if (!this.clipEdit) return;
-    this.scene.remove(this.clipEdit.edit);
+    this.group.remove(this.clipEdit.edit);
     this.clipEdit = null;
   }
 }

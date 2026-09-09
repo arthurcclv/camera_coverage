@@ -4,29 +4,24 @@
  * volumetric fog. Callers supply, per voxel, a {center, size, intensity, color};
  * one global `intensityScale` knob controls overall brightness.
  *
- * A single GPU-instanced unit cube (proxy geometry) is drawn with a TSL node
- * material whose fragment node slab-tests the view ray against each instance's
- * world-space AABB and accumulates `color * intensity * chord * intensityScale`
- * with additive, order-independent blending. The chord-length term gives soft
- * volumetric falloff at cube edges instead of hard cube silhouettes.
+ * A single GPU-instanced unit cube (proxy geometry) is drawn with a GLSL
+ * `ShaderMaterial` whose fragment shader slab-tests the view ray against each
+ * instance's world-space AABB and accumulates
+ * `color * intensity * chord * intensityScale` with additive, order-independent
+ * blending. The chord-length term gives soft volumetric falloff at cube edges
+ * instead of hard cube silhouettes.
  *
  * The slab/chord math is authored as the pure-TS reference below (unit-tested in
- * test/volumetric.test.ts); the TSL fragment node mirrors it, echoing the SDK's
- * "CPU reference is the tested truth" discipline. Because it is TSL, the same
- * shader compiles to WGSL on the WebGPU backend and GLSL on the WebGL2 fallback
- * (spec.md §2.3).
+ * test/volumetric.test.ts); the fragment shader mirrors it, echoing the SDK's
+ * "CPU reference is the tested truth" discipline. That mirroring carries the whole
+ * verification burden: a shader cannot run under `node --test`, so the reference is
+ * what is tested and the shader is held to it by review plus the source-parity
+ * assertion in that same test file (specs/volumetric_rendering.md §6).
+ *
+ * WebGL2 is the only render backend (spec.md §2.3), so there is one shader
+ * language and no cross-backend compilation step.
  */
-import * as THREE from 'three/webgpu';
-import {
-  cameraPosition,
-  positionWorld,
-  instancedBufferAttribute,
-  uniform,
-  mix,
-  float,
-  vec3,
-  vec4,
-} from 'three/tsl';
+import * as THREE from 'three';
 
 export type Vec3 = [number, number, number];
 
@@ -72,7 +67,7 @@ const INITIAL_CAPACITY = 1024;
  */
 export const MAX_INSTANCES = 2_000_000;
 
-// --- Pure-TS reference math (the tested truth the TSL node graph mirrors) ----
+// --- Pure-TS reference math (the tested truth the fragment shader mirrors) ---
 
 /**
  * Slab test of a ray against an axis-aligned box, returning the **chord length**
@@ -148,16 +143,103 @@ export function compositeContributions(mode: CompositeMode, contribs: Vec3[]): V
   return out;
 }
 
+// --- Shaders -----------------------------------------------------------------
+
+/**
+ * The proxy cube's vertex stage. Per-instance data is passed straight through
+ * as varyings and the world position is formed exactly as TSL's `positionWorld`
+ * did — `modelMatrix * instanceMatrix * position` — so the fragment stage sees
+ * the same ray it saw before the port.
+ *
+ * The attribute names are prefixed `a…` deliberately: `color` is a name Three.js
+ * already uses for its own vertex-color attribute, and `half` is a **reserved
+ * word** in GLSL ES. Either collision fails at shader compile, not at runtime.
+ */
+export const VERTEX_SHADER = /* glsl */ `
+  attribute vec3 aCenter;
+  attribute float aHalf;
+  attribute float aIntensity;
+  attribute vec3 aColor;
+
+  varying vec3 vCenter;
+  varying float vHalf;
+  varying float vIntensity;
+  varying vec3 vColor;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vCenter = aCenter;
+    vHalf = aHalf;
+    vIntensity = aIntensity;
+    vColor = aColor;
+    vec4 world = modelMatrix * instanceMatrix * vec4(position, 1.0);
+    vWorldPos = world.xyz;
+    gl_Position = projectionMatrix * viewMatrix * world;
+  }
+`;
+
+/**
+ * Fragment stage mirroring `slabChord` + `voxelContribution`: slab-test the view
+ * ray against the instance's world AABB, then accumulate the chord-scaled colour.
+ *
+ * `cameraPosition` is a uniform Three.js injects into every `ShaderMaterial`.
+ * Note it is the camera's world *position*, which makes the ray exact for a
+ * perspective camera and an approximation under the orthographic elevations —
+ * the same approximation the TSL version made, kept deliberately so the port
+ * changes nothing about what is drawn.
+ */
+export const FRAGMENT_SHADER = /* glsl */ `
+  uniform float uIntensityScale;
+  uniform float uMaxMode;
+
+  varying vec3 vCenter;
+  varying float vHalf;
+  varying float vIntensity;
+  varying vec3 vColor;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec3 ro = cameraPosition;
+    vec3 rd = normalize(vWorldPos - ro);
+
+    vec3 boxMin = vCenter - vec3(vHalf);
+    vec3 boxMax = vCenter + vec3(vHalf);
+
+    // Per-component inverse direction. \`rd\` is normalized and, for a perspective
+    // camera, its components are essentially never exactly zero, so a plain
+    // reciprocal is safe; the min/max slab formulation below stays robust for
+    // near-axis-parallel rays. (Must stay per-component — a scalar-collapsing
+    // op here breaks the ray in some view quadrants.)
+    vec3 invDir = 1.0 / rd;
+
+    vec3 t1 = (boxMin - ro) * invDir;
+    vec3 t2 = (boxMax - ro) * invDir;
+    vec3 tmin = min(t1, t2);
+    vec3 tmax = max(t1, t2);
+    float tEnter = max(max(max(tmin.x, tmin.y), tmin.z), 0.0);
+    float tExit = min(min(tmax.x, tmax.y), tmax.z);
+    float chord = max(tExit - tEnter, 0.0);
+
+    // Additive uses the chord (soft edges); max mode drops it to a flat 1.0 so the
+    // fragment value is the per-instance \`color*intensity*scale\` (§3). uMaxMode is 0
+    // in additive, 1 in max → mix picks chord vs 1.0.
+    float pathTerm = mix(chord, 1.0, uMaxMode);
+    vec3 rgb = vColor * vIntensity * pathTerm * uIntensityScale;
+
+    gl_FragColor = vec4(rgb, 1.0);
+  }
+`;
+
 // --- Renderer ----------------------------------------------------------------
 
 export class VoxelVolumetricRenderer {
   readonly object = new THREE.Group();
 
   private readonly geometry = new THREE.BoxGeometry(1, 1, 1);
-  private readonly intensityScaleUniform = uniform(DEFAULT_INTENSITY_SCALE);
+  private readonly intensityScaleUniform = { value: DEFAULT_INTENSITY_SCALE };
   // Selects the chord term in the fragment node: 0 → use chord (additive soft
   // falloff), 1 → use 1.0 (max mode, flat per-instance value). Mirrors §3.
-  private readonly maxModeUniform = uniform(DEFAULT_COMPOSITE_MODE === 'max' ? 1 : 0);
+  private readonly maxModeUniform = { value: DEFAULT_COMPOSITE_MODE === 'max' ? 1 : 0 };
   private compositeMode: CompositeMode = DEFAULT_COMPOSITE_MODE;
   private readonly matrix = new THREE.Matrix4();
 
@@ -169,7 +251,13 @@ export class VoxelVolumetricRenderer {
   private renderOrder = 0;
 
   private mesh: THREE.InstancedMesh | null = null;
-  private material: THREE.NodeMaterial | null = null;
+  /**
+   * Built **once**, in the constructor, and reused across every reallocation.
+   * A GLSL `ShaderMaterial` binds its instanced attributes **by name** off the
+   * geometry, so growing the buffers no longer has to rebuild the shader — which
+   * the TSL node graph did, because its nodes closed over the attribute *objects*.
+   */
+  private readonly material: THREE.ShaderMaterial;
   private centerArr = new Float32Array(0);
   private halfArr = new Float32Array(0);
   private intensityArr = new Float32Array(0);
@@ -180,6 +268,7 @@ export class VoxelVolumetricRenderer {
   private colorAttr: THREE.InstancedBufferAttribute | null = null;
 
   constructor() {
+    this.material = this.buildMaterial();
     this.allocate(INITIAL_CAPACITY);
   }
 
@@ -298,10 +387,8 @@ export class VoxelVolumetricRenderer {
   setCompositeMode(mode: CompositeMode): void {
     this.compositeMode = mode;
     this.maxModeUniform.value = mode === 'max' ? 1 : 0;
-    if (this.material) {
-      this.applyBlend(this.material);
-      this.material.needsUpdate = true; // force the render pipeline to pick up the blend change
-    }
+    this.applyBlend(this.material);
+    this.material.needsUpdate = true; // force the render pipeline to pick up the blend change
   }
 
   setVisible(visible: boolean): void {
@@ -322,7 +409,7 @@ export class VoxelVolumetricRenderer {
   dispose(): void {
     this.geometry.dispose();
     this.mesh?.dispose();
-    this.material?.dispose();
+    this.material.dispose();
   }
 
   private writeVoxel(i: number, v: Voxel): void {
@@ -359,9 +446,10 @@ export class VoxelVolumetricRenderer {
   }
 
   /**
-   * (Re)build the instanced mesh + node material at `capacity` instances,
-   * preserving any voxels already written. The TSL node graph binds to the
-   * freshly-created instanced attributes, so it is rebuilt alongside them.
+   * (Re)build the instanced mesh at `capacity` instances, preserving any voxels
+   * already written. The material is **not** rebuilt: the shader binds its
+   * instanced attributes by name off the geometry, so re-pointing those attributes
+   * is enough.
    */
   private allocate(capacity: number): void {
     const centerArr = new Float32Array(capacity * 3);
@@ -381,8 +469,16 @@ export class VoxelVolumetricRenderer {
       a.setUsage(THREE.DynamicDrawUsage);
     }
 
-    const material = this.buildMaterial(centerAttr, halfAttr, intensityAttr, colorAttr);
-    const mesh = new THREE.InstancedMesh(this.geometry, material, capacity);
+    // The instanced attributes live on the **shared** proxy geometry, bound by the
+    // names the shader declares. Only one mesh exists at a time (the outgoing one
+    // is retired below in the same call), so overwriting them here is safe and
+    // saves rebuilding the cube for every growth step.
+    this.geometry.setAttribute('aCenter', centerAttr);
+    this.geometry.setAttribute('aHalf', halfAttr);
+    this.geometry.setAttribute('aIntensity', intensityAttr);
+    this.geometry.setAttribute('aColor', colorAttr);
+
+    const mesh = new THREE.InstancedMesh(this.geometry, this.material, capacity);
     mesh.frustumCulled = false; // one draw call spanning the whole workspace
     mesh.renderOrder = this.renderOrder; // re-apply across rebuilds (setRenderOrder)
 
@@ -396,17 +492,15 @@ export class VoxelVolumetricRenderer {
     mesh.count = this.count;
     mesh.instanceMatrix.needsUpdate = true;
 
-    // Swap in the new mesh/material and retire the old ones.
+    // Swap in the new mesh and retire the old one. The material is not rebuilt
+    // and must not be disposed — it is shared across every allocation.
     const old = this.mesh;
-    const oldMaterial = this.material;
     if (old) this.object.remove(old);
     this.object.add(mesh);
     old?.dispose();
-    oldMaterial?.dispose();
 
     this.capacity = capacity;
     this.mesh = mesh;
-    this.material = material;
     this.centerArr = centerArr;
     this.halfArr = halfArr;
     this.intensityArr = intensityArr;
@@ -423,7 +517,7 @@ export class VoxelVolumetricRenderer {
    * `MaxEquation` (One/One factors, which the max equation ignores), so the
    * framebuffer keeps `max(src, dst)`.
    */
-  private applyBlend(material: THREE.NodeMaterial): void {
+  private applyBlend(material: THREE.ShaderMaterial): void {
     if (this.compositeMode === 'max') {
       material.blending = THREE.CustomBlending;
       material.blendEquation = THREE.MaxEquation;
@@ -438,50 +532,18 @@ export class VoxelVolumetricRenderer {
   }
 
   /**
-   * TSL fragment node mirroring `slabChord` + `voxelContribution`: slab-test the
-   * view ray against the instance's world AABB, then accumulate the chord-scaled
-   * color. Additive, depthWrite:false, depthTest:true (spec/volumetric §4).
+   * Build the one shared `ShaderMaterial`. Additive, `depthWrite:false`,
+   * `depthTest:true` (specs/volumetric_rendering.md §4).
    */
-  private buildMaterial(
-    centerAttr: THREE.InstancedBufferAttribute,
-    halfAttr: THREE.InstancedBufferAttribute,
-    intensityAttr: THREE.InstancedBufferAttribute,
-    colorAttr: THREE.InstancedBufferAttribute,
-  ): THREE.NodeMaterial {
-    const center = instancedBufferAttribute(centerAttr);
-    const half = instancedBufferAttribute(halfAttr);
-    const intensity = instancedBufferAttribute(intensityAttr);
-    const color = instancedBufferAttribute(colorAttr);
-
-    const ro = cameraPosition;
-    const rd = positionWorld.sub(ro).normalize();
-
-    const boxMin = center.sub(vec3(half));
-    const boxMax = center.add(vec3(half));
-
-    // Per-component inverse direction. `rd` is normalized and, for a perspective
-    // camera, its components are essentially never exactly zero, so a plain
-    // reciprocal is safe; the min/max slab formulation below stays robust for
-    // near-axis-parallel rays. (Must stay per-component — a scalar-collapsing
-    // op here breaks the ray in some view quadrants.)
-    const invDir = rd.reciprocal();
-
-    const t1 = boxMin.sub(ro).mul(invDir);
-    const t2 = boxMax.sub(ro).mul(invDir);
-    const tmin = t1.min(t2);
-    const tmax = t1.max(t2);
-    const tEnter = tmin.x.max(tmin.y).max(tmin.z).max(0.0);
-    const tExit = tmax.x.min(tmax.y).min(tmax.z);
-    const chord = tExit.sub(tEnter).max(0.0);
-
-    // Additive uses the chord (soft edges); max mode drops it to a flat 1.0 so the
-    // fragment value is the per-instance `color*intensity*scale` (§3). maxMode is 0
-    // in additive, 1 in max → mix picks chord vs 1.0.
-    const pathTerm = mix(chord, float(1.0), this.maxModeUniform);
-    const rgb = color.mul(intensity).mul(pathTerm).mul(this.intensityScaleUniform);
-
-    const material = new THREE.NodeMaterial();
-    material.fragmentNode = vec4(rgb, 1.0);
+  private buildMaterial(): THREE.ShaderMaterial {
+    const material = new THREE.ShaderMaterial({
+      vertexShader: VERTEX_SHADER,
+      fragmentShader: FRAGMENT_SHADER,
+      uniforms: {
+        uIntensityScale: this.intensityScaleUniform,
+        uMaxMode: this.maxModeUniform,
+      },
+    });
     material.transparent = true;
     this.applyBlend(material);
     material.depthWrite = false;

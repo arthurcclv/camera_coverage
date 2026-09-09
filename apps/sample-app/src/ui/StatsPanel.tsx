@@ -1,25 +1,21 @@
 /**
- * Coverage summary readout (spec §10). Reports both the compute backend
- * (WebGPU / CPU, §3.2) and the render backend (WebGPU / WebGL2, §2.3), which are
- * selected independently, plus the blind-spot count (§13).
+ * Coverage summary readout (spec §10): voxel size, overall coverage, valid
+ * voxels, the blind-spot count (§13), and the per-camera list.
+ *
+ * It does **not** name a backend — the compute one is a badge in `RunBar` (§3.2),
+ * and the render one is no longer a choice (WebGL2, spec §2.3).
  */
 import type { CoverageSummary } from '@linkervision/camera-coverage-sdk';
-import type { RenderBackend } from '../scene/viewport.ts';
 
 export interface StatsPanelProps {
   summary: CoverageSummary | null;
   computeBackend: 'webgpu' | 'cpu' | null;
-  renderBackend: RenderBackend | null;
   voxelSize: number;
   /** Camera id → display name (spec §5.6) for the per-camera list. */
   cameraNameById: Map<string, string>;
 }
 
-function renderBackendLabel(b: RenderBackend): string {
-  return b === 'webgpu' ? 'WebGPU' : 'WebGL2';
-}
-
-export function StatsPanel({ summary, computeBackend, renderBackend, voxelSize, cameraNameById }: StatsPanelProps) {
+export function StatsPanel({ summary, computeBackend, voxelSize, cameraNameById }: StatsPanelProps) {
   // Blind spots: valid voxels no enabled camera sees (§13). overallRate is the
   // covered fraction, so (1 − rate) of the valid voxels are blind spots.
   const blindSpots = summary ? Math.round(summary.validVoxels * (1 - summary.overallRate)) : 0;

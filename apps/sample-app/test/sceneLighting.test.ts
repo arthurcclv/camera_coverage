@@ -6,7 +6,7 @@
  * whole rationale is written about those numbers, so silently editing one is
  * spec drift. Then the *property* the numbers exist for: no direction is left
  * unlit, and the fill still opposes the key. `viewport.ts` itself cannot be
- * exercised here (it awaits `WebGPURenderer.init()`, which needs a GPU adapter),
+ * exercised here (it needs a real GPU context),
  * which is why the rig is its own pure module.
  */
 import { test } from 'node:test';

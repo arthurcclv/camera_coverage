@@ -29,7 +29,7 @@
 import * as THREE from 'three';
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 
-import { createViewport, type RenderBackend, type Viewport } from '../viewport.ts';
+import { createViewport, type Viewport } from '../viewport.ts';
 import { aimDelta } from '../../cameras/aim.ts';
 import { eulerToQuat, quatToEuler, type EulerAngles } from '../../cameras/math.ts';
 import type { CameraViewFit } from '../viewCameras.ts';
@@ -365,22 +365,18 @@ export class SceneView {
   }
 
   /**
-   * Build the viewport (async `WebGPURenderer.init`) and wire up the scene objects.
-   * `onCameraGuide` forwards the Selected view's frame-guide rect straight from
-   * the viewport to App, which renders the outline (spec §2.4.1).
+   * Build the viewport and wire up the scene objects. Synchronous — `WebGLRenderer`
+   * needs no `init()` (spec §2.3). `onCameraGuide` forwards the Selected view's
+   * frame-guide rect straight from the viewport to App, which renders the outline
+   * (spec §2.4.1).
    */
-  static async create(
+  static create(
     container: HTMLElement,
     onCameraGuide?: (guide: CameraViewFit['guide'] | null) => void,
-  ): Promise<SceneView> {
-    const viewport = await createViewport(container, { onCameraGuide });
-    return new SceneView(viewport);
+  ): SceneView {
+    return new SceneView(createViewport(container, { onCameraGuide }));
   }
 
-  /** Which backend `WebGPURenderer` selected (spec §2.3). */
-  get renderBackend(): RenderBackend {
-    return this.viewport.renderBackend;
-  }
 
   /**
    * Register the callback for a resolved viewport selection change (spec §5.2).
@@ -499,8 +495,10 @@ export class SceneView {
       swapGeometry(this.viewport.scene, prev?.room ?? null, next.room);
     }
 
-    // --- clip cross-section (spec §13.9): re-apply when the band or the room
-    // (which rebuilds the ClippingGroup) changed. -------------------------------
+    // --- clip cross-section (spec §13.9): re-apply when the band **or the room**
+    // changed. The room matters because the planes live on each mesh's material
+    // now, not on one group node, so a swapped-in build's materials have never
+    // seen them. -------------------------------------------------------------
     if (!prev || prev.clipBand !== next.clipBand || prev.room !== next.room) {
       setGeometryClippingPlanes(next.room, next.clipBand ? clipBandPlanes(next.clipBand) : []);
     }

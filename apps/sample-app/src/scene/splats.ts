@@ -159,9 +159,7 @@ export type SplatLoadFailure =
    * than a repair, so §9 gives it the reason instead of the bare undecodable
    * badge. The Add dialog never offers one (§3.1).
    */
-  | 'sogBundle'
-  /** No WebGL2 context, so the whole splat layer is inert (§4.2). */
-  | 'noWebgl';
+  | 'sogBundle';
 
 /**
  * Which failure a capture that **would not decode** reports
@@ -195,7 +193,6 @@ const FAILURE_BADGE: Record<SplatLoadFailure, string> = {
   missing: '⚠ missing from assets/',
   undecodable: '⚠ could not be decoded',
   sogBundle: '⚠ SOG bundle — use its .sog zip',
-  noWebgl: '⚠ no WebGL context',
 };
 
 /** Millions-of-splats readout, e.g. `4.2M splats` / `820k splats` (§6.2). */
@@ -263,8 +260,8 @@ export interface SdfBox {
 /**
  * The section clip's world band as an SDF box (`gaussian_splats.md` §5.4).
  *
- * `spec.md` §13.9 clips **geometry** with two world planes on a `ClippingGroup`,
- * which does not exist on the splat layer's `WebGLRenderer`; there the band is
+ * `spec.md` §13.9 clips **geometry** with two world planes on each mesh's material.
+ * A Gaussian has no rasterized surface for a plane to cut, so the band is instead
  * one inverted `SplatEdit` holding a `BOX` SDF at `opacity: 0`, which zeroes the
  * alpha of every Gaussian *outside* the box.
  *

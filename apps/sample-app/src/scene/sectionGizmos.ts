@@ -63,9 +63,11 @@ function noDataTexture(): THREE.DataTexture {
   return texture;
 }
 
-// A rectangle outline as 4 disconnected segments — this project's renderer
-// (three/webgpu, both the WebGPU and WebGL2 paths) doesn't support the
-// `THREE.LineLoop` primitive, only `Line`/`LineSegments`.
+// A rectangle outline as 4 disconnected segments. This was forced: the
+// `WebGPURenderer` this app used to render through supports no `THREE.LineLoop`
+// on either of its backends. The classic `WebGLRenderer` does, so a `LineLoop`
+// would work now — the segments are kept because they are correct, allocate the
+// same 8 vertices, and swapping them buys nothing but a diff.
 function outlineGeometry(width: number, height: number): THREE.BufferGeometry {
   const hw = width / 2;
   const hh = height / 2;

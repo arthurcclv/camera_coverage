@@ -100,7 +100,6 @@ test('a loaded capture reports its splat count, which is what costs frames (§4.
 test('each failure names itself, so a row explains its own absence (§9)', () => {
   assert.equal(splatBadge({ status: 'error', failure: 'missing' }), '⚠ missing from assets/');
   assert.equal(splatBadge({ status: 'error', failure: 'undecodable' }), '⚠ could not be decoded');
-  assert.equal(splatBadge({ status: 'error', failure: 'noWebgl' }), '⚠ no WebGL context');
 });
 
 test('a row the layer has not reported on yet shows no badge', () => {
@@ -155,9 +154,9 @@ test('isFlippedZ drives the preset button and ignores quaternion sign', () => {
 });
 
 // --- the clip band → SDF box mapping (§5.4) --------------------------------
-// `spec.md` §13.9 clips geometry with two world planes on a `ClippingGroup`,
-// which does not exist on the splat layer's `WebGLRenderer`; there the band is
-// one inverted BOX SDF at `opacity: 0`. The mapping is a pure function of the
+// `spec.md` §13.9 clips geometry with two world planes on each mesh's material.
+// A Gaussian has no rasterized surface for a plane to cut, so here the band is
+// one inverted BOX SDF at `opacity: 0` instead. The mapping is a pure function of the
 // band and the workspace AABB **alone** — no capture's registration enters it,
 // which is also why the clip imposes no uniform-scale requirement of its own.
 

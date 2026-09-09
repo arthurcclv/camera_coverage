@@ -27,8 +27,6 @@
  * session shows and hides, with no keyed reconcile.
  */
 import * as THREE from 'three';
-import { PointsNodeMaterial } from 'three/webgpu';
-import { instancedBufferAttribute } from 'three/tsl';
 import type { Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 import { RenderOrder } from './renderOrder.ts';
 import { PickableGizmoSet } from './gizmoSet.ts';
@@ -499,18 +497,17 @@ export function poolDotColor(
 }
 
 /**
- * A set of screen-space dots, drawn as one instanced `Sprite` (§5.2, §6.2).
+ * A set of screen-space dots, drawn as one `THREE.Points` (§5.2, §6.2).
  *
- * **A Sprite, not Points.** Under the WebGPU backend a `THREE.Points` draws point
- * primitives, and WebGPU's are **fixed at one pixel** — three's own
- * `PointsNodeMaterial` says so, and says the fix: use the material with a
- * `Sprite` and instancing. Drawn as Points the pool scatter was there, one pixel
- * wide, and invisible against the geometry; nothing about the data was wrong.
+ * **Screen-space sizing**, not world-space: the same overlay has to read on a 6 m
+ * demo room and on the real 440 × 201 × 1120 m site, where a dot small enough for
+ * the first is sub-pixel in the second (`camera_placement.md` §5.2). That is
+ * `sizeAttenuation: false`, and WebGL2 honours the `gl_PointSize` it implies.
  *
- * **And screen-space sizing**, which is a second, independent reason a
- * world-space point size cannot work: the same overlay has to read on a 6 m demo
- * room and on the real 440 × 201 × 1120 m site, where a dot small enough for the
- * first is sub-pixel in the second (`camera_placement.md` §5.2).
+ * (This was an instanced `Sprite` carrying a `PointsNodeMaterial` while the app
+ * rendered through `WebGPURenderer`, whose point primitives are fixed at one pixel
+ * — a `Points` cloud drew, one pixel wide, and could not be seen. That constraint
+ * left with the renderer; see `ai/DECISIONS.md`.)
  *
  * `depthWrite` is off because the dots are a *set*: they must not occlude each
  * other or the gizmos they sit on. `depthTest` stays on by default, so a pool
@@ -518,17 +515,18 @@ export function poolDotColor(
  * turns it off for a *draft*, whose dots sit exactly on the surface they were
  * clicked on and would otherwise z-fight it (`renderOrder.ts`).
  *
- * Shared by the pool scatter and the draft polyline's vertices because both
- * learned the same two lessons the hard way; the only differences are the dot
- * size, the starting capacity, and where the colour comes from.
+ * Shared by the pool scatter and the draft polyline's vertices; the only
+ * differences are the dot size, the starting capacity, and where the colour comes
+ * from.
  */
 class ScreenDots {
-  readonly sprite: THREE.Sprite;
+  readonly points: THREE.Points;
   /** True when the set draws above the scene rather than depth-testing into it. */
   readonly onTop: boolean;
-  /** Per-instance position and colour; grown in powers of two, reused otherwise. */
-  private positions: THREE.InstancedBufferAttribute | null = null;
-  private colors: THREE.InstancedBufferAttribute | null = null;
+  /** Per-point position and colour; grown in powers of two, reused otherwise. */
+  private positions: THREE.BufferAttribute | null = null;
+  private colors: THREE.BufferAttribute | null = null;
+  private readonly geometry = new THREE.BufferGeometry();
   private readonly scratch = new THREE.Color();
   /** Starting capacity; a constructor *parameter property* would not strip (`CONVENTIONS.md`). */
   private readonly minCapacity: number;
@@ -536,7 +534,11 @@ class ScreenDots {
   constructor(name: string, size: number, minCapacity: number, opts: { onTop?: boolean } = {}) {
     this.minCapacity = minCapacity;
     this.onTop = opts.onTop === true;
-    const material = new PointsNodeMaterial({
+    const material = new THREE.PointsMaterial({
+      size,
+      // Screen-space pixels, not world metres — the whole reason this class exists.
+      sizeAttenuation: false,
+      vertexColors: true,
       transparent: true,
       opacity: 0.9,
       depthWrite: false,
@@ -546,16 +548,19 @@ class ScreenDots {
       // behind a wall being hidden is information.
       depthTest: !this.onTop,
     });
-    material.size = size;
-    material.sizeAttenuation = false;
-    this.sprite = new THREE.Sprite(material);
-    this.sprite.name = name;
-    // Each instance is placed by `positionNode`, so the sprite's own transform
-    // stays at the origin — and culling it against that point would drop the
-    // whole set the moment the origin left the frustum.
-    this.sprite.frustumCulled = false;
-    this.sprite.count = 0;
-    this.sprite.renderOrder = this.onTop ? RenderOrder.draftOverlay : RenderOrder.volumeFill;
+    // A `position` attribute from the start: the animation loop is already running
+    // and will draw this object at least once before any dot exists
+    // (`CONVENTIONS.md`).
+    this.ensureCapacity(minCapacity);
+    this.points = new THREE.Points(this.geometry, material);
+    this.points.name = name;
+    // Every dot carries its own world position, so the object's own transform stays
+    // at the origin — and culling it against that point would drop the whole set
+    // the moment the origin left the frustum.
+    this.points.frustumCulled = false;
+    this.points.visible = false;
+    this.geometry.setDrawRange(0, 0);
+    this.points.renderOrder = this.onTop ? RenderOrder.draftOverlay : RenderOrder.volumeFill;
   }
 
   /**
@@ -570,8 +575,8 @@ class ScreenDots {
     colorAt: (item: T, index: number, target: THREE.Color) => THREE.Color,
   ): void {
     const n = items.length;
-    this.sprite.visible = n > 0;
-    this.sprite.count = n;
+    this.points.visible = n > 0;
+    this.geometry.setDrawRange(0, n);
     if (n === 0) return;
     this.ensureCapacity(n);
     const xyz = this.positions!.array as Float32Array;
@@ -588,29 +593,27 @@ class ScreenDots {
   }
 
   /**
-   * Grow the instance buffers, rebuilding the material's nodes only when they
-   * actually move.
-   *
-   * Re-pointing `positionNode`/`colorNode` recompiles the shader, and the pool's
-   * `set` runs on every tick of the count slider — so the buffers are sized in
-   * powers of two and written in place, and a recompile happens once per set that
-   * outgrows the last one rather than once per tick.
+   * Grow the point buffers, reallocating only when they actually outgrow the last
+   * size. The pool's `set` runs on every tick of the count slider, so the buffers
+   * are sized in powers of two and written in place; a reallocation happens once
+   * per set that outgrows the last one rather than once per tick.
    */
   private ensureCapacity(n: number): void {
     const have = this.positions ? this.positions.count : 0;
     if (n <= have) return;
     let capacity = Math.max(this.minCapacity, have);
     while (capacity < n) capacity *= 2;
-    this.positions = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
-    this.colors = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
-    const material = this.sprite.material as PointsNodeMaterial;
-    material.positionNode = instancedBufferAttribute(this.positions);
-    material.colorNode = instancedBufferAttribute(this.colors);
-    material.needsUpdate = true;
+    this.positions = new THREE.BufferAttribute(new Float32Array(capacity * 3), 3);
+    this.colors = new THREE.BufferAttribute(new Float32Array(capacity * 3), 3);
+    this.positions.setUsage(THREE.DynamicDrawUsage);
+    this.colors.setUsage(THREE.DynamicDrawUsage);
+    this.geometry.setAttribute('position', this.positions);
+    this.geometry.setAttribute('color', this.colors);
   }
 
   dispose(): void {
-    (this.sprite.material as THREE.Material).dispose();
+    this.geometry.dispose();
+    (this.points.material as THREE.Material).dispose();
   }
 }
 
@@ -699,9 +702,9 @@ export class PlacementOverlay {
     this.moves.name = MOVES_NAME;
     this.moves.renderOrder = RenderOrder.volumeFill;
     this.moves.visible = false;
-    this.group.add(this.scatter.sprite);
+    this.group.add(this.scatter.points);
     this.group.add(this.draft);
-    this.group.add(this.draftDots.sprite);
+    this.group.add(this.draftDots.points);
     this.group.add(this.moves);
   }
 
