@@ -123,7 +123,7 @@ the kind and id, since the `DeletableKind`s *are* the selectable kinds.
 - Runner is `node:test` (`node --test --experimental-strip-types
   "test/**/*.test.ts"`) with `node:assert/strict`. No framework, no bundler.
 - **Tests target pure functions and CPU-side Three.js objects — never the React
-  render tree or the GPU** (no `WebGPURenderer`, no `viewport.ts`, no render loop).
+  render tree or the GPU** (no renderer, no `viewport.ts`, no render loop).
   Most suites are pure: `sceneTree`, `coverageOverlay`, `transformSpace`,
   `volumetric`, `leftPanelSplit`, `probeVisibility`, `viewportSelection`,
   `sectionHeatmap`, `sceneReducer`, `coverageRun` (the run coordinator: generation
@@ -192,28 +192,22 @@ the kind and id, since the `DeletableKind`s *are* the selectable kinds.
 
 ## Rendering specifics
 
-- Import the renderer and TSL nodes from `three/webgpu` and `three/tsl`; scene
-  geometry uses bare `three` (aliased to `three/webgpu` — see
-  [DECISIONS.md](./DECISIONS.md)). Do not add a second `three` import path.
-- `createViewport` is **async** (`await renderer.init()` before the first frame);
-  the App setup effect runs an async IIFE with deferred teardown.
-- **Never draw a point cloud with `THREE.Points`.** WebGPU's point primitives are
-  fixed at one pixel, so a `Points` cloud renders and cannot be seen — a failure
-  with no error and no wrong number. Use an instanced `Sprite` with a
-  `PointsNodeMaterial` whose `positionNode`/`colorNode` are
-  `instancedBufferAttribute`s, set `count`, and set `frustumCulled = false` (the
-  object's own transform stays at the origin). `scene/constraintGizmos.ts`'s pool
-  scatter is the worked example — `ScreenDots` in that file is the shared
-  implementation, used by both the pool and the draw mode's draft vertices.
+- **One `three` import path: bare `three`.** The app uses the classic build
+  (`WebGLRenderer`, WebGL2) everywhere — no `three/webgpu`, no `three/tsl`, no Vite
+  alias. Custom shaders are GLSL `ShaderMaterial`s. Do not reintroduce a second
+  build; the two-copies-of-`three.core.js` hazard it used to carry is documented in
+  [DECISIONS.md](./DECISIONS.md).
+- `createViewport` is **synchronous** — `WebGLRenderer` needs no `init()`.
+- **Screen-space point clouds are `THREE.Points` + `PointsMaterial`** with
+  `sizeAttenuation: false` and `vertexColors: true`. World-space point sizing cannot
+  work here: the same overlay must read on a 6 m demo room and on the 440 × 201 ×
+  1120 m site, where a dot sized for the first is sub-pixel in the second. Check
+  `gl.ALIASED_POINT_SIZE_RANGE` covers the size you ask for.
+  `scene/constraintGizmos.ts`'s `ScreenDots` is the shared implementation, used by
+  both the pool scatter and the draw mode's draft vertices.
 - **Never let a geometry reach the scene without a `position` attribute.** An object
   whose points arrive later (the draw mode's draft, the placement move lines) is rendered
-  at least once while empty, because the animation loop is already running; on that frame
-  three's WebGPU path caches the render object's vertex buffers from `geometry.attributes`
-  — an empty list, and an empty `attributesId` map with it — and `needsGeometryUpdate`
-  afterwards re-checks only the attributes named in that map. A `position` attribute added
-  later is therefore never noticed: the object keeps a pipeline with no vertex buffer and
-  **draws nothing for the rest of its life**, with no error and nothing wrong with the
-  data. This is what made the draft polyline invisible through three rewrites. Give the
+  at least once while empty, because the animation loop is already running. Give the
   geometry a placeholder attribute at construction (`PlacementOverlay.emptyLineGeometry` —
   two zero vertices, plus `visible = false` until there is something to draw), or build the
   geometry attributes-first as `probeGizmos`/`sectionGizmos` do.

@@ -10,7 +10,7 @@ Technologies used by the demo app and the role each plays. See
 |---|---|---|
 | **TypeScript** | ^5.5 | All source. `strict`, Bundler module resolution, `isolatedModules`. |
 | **React** | ^19.1 | UI layer — panels, controls, hierarchy tree. Plain React + hooks; no component library, no CSS framework. |
-| **Three.js** | ^0.185 | 3D viewport. Uses the **`three/webgpu`** build (`WebGPURenderer` + node/TSL system), plus the **classic** build for the splat layer's `WebGLRenderer` (below). |
+| **Three.js** | ^0.185 | 3D viewport. Uses the **classic** build (`WebGLRenderer`, WebGL2) throughout — one build, no alias, no `three/webgpu`. |
 | **`@sparkjsdev/spark`** | ^2.1.0 | 3D Gaussian Splat renderer (`gaussian_splats.md` §4). Peer `three >= 0.180`. **WebGL-only** and **dynamically imported** — see below. |
 | **Vite** | ^6 | Dev server + production bundler; ES-module workers (`worker.format: 'es'`). |
 | **Node.js** | ≥ 22.6 | Runs the tests via native TS type-stripping. |
@@ -25,13 +25,10 @@ Technologies used by the demo app and the role each plays. See
 
 | Tech | Role |
 |---|---|
-| **`three/webgpu`** (`WebGPURenderer`) | Main-thread render backend; prefers WebGPU, auto-falls-back to **WebGL2** (`renderer.backend.isWebGPUBackend` distinguishes them). Independent of the SDK's compute backend. |
-| **TSL** (Three Shading Language, `three/tsl`) | Node-based shader authoring for the volumetric coverage overlay; one graph compiles to WGSL (WebGPU) or GLSL (WebGL2). |
-| **Vite alias** `three → three/webgpu` | Forces a single Three.js build across the app and its addons (OrbitControls/TransformControls/GLTFLoader) — see DECISIONS.md. Two importers are the documented exception and get the **classic** build via the alias entry's `customResolver`: `scene/splatLayer.ts` (needs `WebGLRenderer`) and `@sparkjsdev/spark` (needs `WebGLRenderer` *and* writes its GLSL include into `THREE.ShaderChunk`) — neither is exported by `three/webgpu`. Safe because both builds import their core classes from the same `three.core.js`, so `Object3D`/`PerspectiveCamera`/`OrthographicCamera` identity — and therefore `instanceof` across the two — still holds. |
-| **`optimizeDeps.exclude`** `['three', 'three/webgpu', 'three/tsl', '@sparkjsdev/spark']` | Keeps that rule true in dev. Pre-bundling `three` produces a chunk carrying its *own* copy of `three.core.js`, which would break the identity above and silently misrender the orthographic elevations (Spark branches on `camera instanceof THREE.OrthographicCamera`). Each excluded entry is a single ESM file, so serving them unbundled costs a request apiece. |
+| **`three`** (`WebGLRenderer`) | The main-thread render backend: **WebGL2**, one canvas, one scene, one depth buffer. Fixed by Spark's `WebGLRenderer` requirement and confirmed by measurement against `WebGPURenderer` (see DECISIONS.md). Entirely independent of the SDK's compute backend, which is still WebGPU in the worker. |
+| **GLSL `ShaderMaterial`** | Shader authoring for the volumetric coverage overlay (`volumetric_rendering.md` §2–3). WebGL2 is the only target, so there is one shader language; the pure-TS slab/chord reference stays the tested truth the shader mirrors. |
 | **`GLTFLoader`** (`three/addons/loaders/GLTFLoader.js`) | Parses imported `gltf` geometry objects (spec §14.6) from bytes via `parseAsync` — no new npm dependency, same `three/addons` convention as `OrbitControls`/`TransformControls`. |
-| **`three`** (classic, `WebGLRenderer`) | The **second canvas** behind the viewport, drawing 3D Gaussian Splat captures (`scene/splatLayer.ts`, `gaussian_splats.md` §4). Spark requires a `WebGLRenderer` and draws with GLSL `RawShaderMaterial`, which `WebGPURenderer` supports on neither backend. |
-| **`@sparkjsdev/spark`** | `SparkRenderer` + `SplatMesh` + `SplatEdit` on that canvas. Pulled in with `await import('@sparkjsdev/spark')` on the **first splat load** and emitted as its own ~5 MB chunk (inlined sort workers and base64 wasm), so a scene with no capture pays nothing for it. |
+| **`@sparkjsdev/spark`** | `SparkRenderer` + `SplatMesh` + `SplatEdit`, living in a `Group` inside the viewport's own scene. Pulled in with `await import('@sparkjsdev/spark')` on the **first splat load** and emitted as its own ~5 MB chunk (inlined sort workers and base64 wasm), so a scene with no capture pays nothing for it. |
 
 ## Scene file (spec §14)
 
@@ -43,18 +40,15 @@ Technologies used by the demo app and the role each plays. See
   `getFileHandle`/`getDirectoryHandle`/`createWritable` — are already declared).
 
 The coverage overlay is a single `InstancedMesh` of unit cubes (one instance per
-voxel) with per-instance attributes and a TSL slab/chord fragment shader — one
+voxel) with per-instance attributes and a GLSL slab/chord fragment shader — one
 draw call, order-independent.
 
-**Two canvases, one camera.** The splat layer's `WebGLRenderer` canvas sits
-behind the `WebGPURenderer` one and owns the viewport background (`0x1a1d22`);
-the WebGPU canvas is `alpha: true` with `scene.background = null` and composites
-over it. Both renderers are handed the *same* camera object each frame. Bringing
-in the classic `three` build for that second renderer costs the main chunk about
-350 kB raw (~85 kB gzipped) — the price of a real second renderer, paid whether
-or not a scene has a capture, because the layer owns the background
-unconditionally (`gaussian_splats.md` §4.2). Spark itself stays out of the main
-chunk.
+**One renderer, one depth buffer.** Splats draw into the viewport's own
+`WebGLRenderer` and its own scene, so geometry occludes captures and the coverage
+fog max-blends against them in the shared framebuffer (`gaussian_splats.md` §4.1).
+There is a single `three` build in the bundle, so the app carries no alias, no
+`optimizeDeps` carve-out, and no two-copies-of-`three.core.js` hazard. Spark itself
+stays out of the main chunk, dynamically imported on the first capture load.
 
 ## Testing & tooling
 

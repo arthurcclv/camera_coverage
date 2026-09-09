@@ -258,89 +258,55 @@ be handed to the incoming one purely because both name `assets/site.spz`.
 
 ## 4. Render layer
 
-### 4.1 Why a second canvas
+### 4.1 One renderer, one scene, one depth buffer
 
-The app's viewport renders through Three.js's **`WebGPURenderer`** (`spec.md` §2.3),
-and is committed to it: `scene/volumetric.ts` builds the coverage fog as a **TSL**
-node material (`volumetric_rendering.md` §2), `scene/constraintGizmos.ts` uses
-`PointsNodeMaterial` + `instancedBufferAttribute`, and `spec.md` §13.9's clip depends
-on `ClippingGroup`, "the WebGPU renderer's clipping path".
+Captures are drawn by **Spark, into the viewport's own `WebGLRenderer`**
+(`spec.md` §2.3) — no second canvas, no second renderer, no compositing.
 
-**Spark cannot draw into that renderer.** `SparkRendererOptions.renderer` is typed
-`THREE.WebGLRenderer` and required, and the splats themselves are drawn with GLSL
-`RawShaderMaterial` into `WebGLRenderTarget`s — a material class the WebGPU renderer
-does not support on either its WebGPU or its WebGL2 backend. Three.js 0.185 has no
-native splat renderer to substitute.
+Spark requires that renderer specifically. `SparkRendererOptions.renderer` is typed
+`THREE.WebGLRenderer`; the splats are drawn with GLSL `RawShaderMaterial` into
+`WebGLRenderTarget`s; and it reads `renderer.properties`, `renderer.state`,
+`renderer.initTexture`, `renderer.xr` and `renderer.getContext`. That requirement is
+the reason the viewport renders on WebGL2 at all — `WebGPURenderer` cannot host Spark
+on **either** of its backends, its WebGL2 one included, because what that backend
+exposes is a `WebGPURenderer` API surface and not these internals.
 
-So the splats are drawn by a **`WebGLRenderer` on a second canvas, stacked behind the
-WebGPU one**. The alternatives were weighed and rejected: migrating the viewport to
-`WebGLRenderer` would mean rewriting the coverage fog, the constraint gizmos, and the
-clip path — the visual core of the app — and an offscreen render plus per-frame
-`readRenderTargetPixels` readback would put a GPU→CPU→GPU stall in the frame loop.
+**What this buys: shared depth.** Spark's splat material is `depthTest: true,
+depthWrite: false` by default. Drawn into the same framebuffer as the modelled
+geometry, a capture is **occluded by the walls in front of it** and shows through
+where nothing stands in the way, in one frame, at the correct depth. The coverage fog
+(§9) max-blends against the capture in that same framebuffer, exactly as it does
+against geometry (§4.5).
 
-**The cost, stated plainly: the two canvases share no depth buffer.** Splats are
-therefore **always behind** every modelled mesh and every gizmo, and never occlude
-them. §5.3 is what makes that usable rather than a defect.
+The `SparkRenderer` and the per-row anchors live in a **`Group` inside the main
+scene**, so they share its camera, its depth buffer, and its layer masks. There is no
+separate splat scene and no separate splat camera — and therefore no possibility of
+the backdrop lagging the geometry by a frame during an orbit, which a two-renderer
+design had to work to avoid.
 
-### 4.2 The canvas stack
+### 4.2 The splat group
 
-`createViewport` builds **both** renderers up front, and the WebGL layer owns the
-background permanently — one code path whether or not a scene has a splat:
+`createViewport` adds an empty **splat `Group`** to the scene up front — one code path
+whether or not a scene has a capture. The renderer clears to **`0x1a1d22`** via
+`scene.background`, as it did before splats existed; there is no transparent canvas
+and no layer beneath to composite over.
 
-```
-.viewport { position: relative }
-  canvas.viewport-splats  { position:absolute; inset:0; z-index:0;
-                            pointer-events:none }   ← WebGLRenderer
-  canvas.viewport-main    { position:absolute; inset:0 }   ← WebGPURenderer
-```
+- **One canvas, one `setSize`, one clear.** The existing `ResizeObserver` and clear
+  colour need no splat-specific handling, and two canvases cannot drift because there
+  is one.
+- **One animation loop, one `render` call.** `SparkRenderer` is an `Object3D` in the
+  scene graph; it draws when the scene draws. Ordering against the coverage overlay is
+  the ordinary `renderOrder` question (`renderOrder.ts`), not a canvas-stacking one.
+- The splat group is **not pickable**: splats are never viewport-pickable (§6.5), so
+  each `SplatMesh` is built `raycastable: false` and the picker skips the group.
+- `dispose()` tears down the splat group, every `SplatMesh`, the `SparkRenderer`, and
+  the decode cache (§3.3) — but **not** a renderer, which the viewport owns.
 
-The splat canvas takes `z-index: 0` and the main one keeps **`auto`**: DOM order
-(the splat canvas is appended first) already puts geometry above the backdrop,
-and a `z-index: 1` on the main canvas would tie with the viewport toolbars' own
-`z-index: 1` — which must stay above both canvases.
-
-- The **WebGL canvas** clears to **`0x1a1d22`** — the colour `scene.background`
-  carries today (`scene/viewport.ts`).
-- The **WebGPU canvas** is created with **`alpha: true`** and its scene's
-  **`background` set to `null`**, so it clears transparent and composites over the
-  layer beneath. The orientation gizmo's `autoClear = false` overlay (`spec.md` §2.4)
-  is unaffected.
-- The splat canvas is **`pointer-events: none`**: `OrbitControls`,
-  `TransformControls`, and every pick keep receiving events on the main canvas alone.
-  This is also why splats are not viewport-pickable (§6.5).
-- **One `ResizeObserver`, one `setSize` pair.** The existing observer sizes both
-  renderers, so they cannot drift.
-- **One animation loop.** In `renderer.setAnimationLoop`, the splat layer renders
-  **first**, then the WebGPU scene, then the orientation gizmo.
-- `dispose()` tears down both renderers, the splat scene, every `SplatMesh`, and the
-  decode cache (§3.3).
-
-**No Spark until a splat exists.** The WebGL layer needs only `three`'s
-`WebGLRenderer`, already in the bundle, to clear the background. Spark's ESM build is
-~5 MB (inlined sort workers and base64 wasm), so it is pulled in with
-**`await import('@sparkjsdev/spark')` on the first splat load** and Vite emits it as
-its own chunk — a scene with no splat pays nothing. The `SparkRenderer` is
-constructed once, on that first load, and added to the splat scene.
-
-### 4.3 Both renderers share the same camera objects
-
-The splat layer renders **the very same camera object** the WebGPU renderer is using
-for the active view — no mirroring, no matrix copying, and therefore no possibility
-of the backdrop lagging the geometry by a frame during an orbit.
-
-This is safe because `three` (`build/three.module.js`) and `three/webgpu`
-(`build/three.webgpu.js`) both import their core classes from the **same**
-`build/three.core.js`. There is exactly one `PerspectiveCamera` class and one
-`OrthographicCamera` class in the bundle, so Spark's internal
-`camera instanceof THREE.OrthographicCamera` branch resolves correctly on the
-viewport's cameras and the three **orthographic elevations render correctly**, as does
-the perspective **Selected** view (`spec.md` §2.4.1) with its generous near/far pair.
-
-The splat layer holds its **own `THREE.Scene`** containing the `SparkRenderer` and the
-`SplatMesh`es and nothing else — no lights (splats carry their own colour), no grid,
-no gizmos. A shared scene was rejected: the WebGPU renderer would attempt to compile
-Spark's `RawShaderMaterial`, and Three.js layer masks live on the **camera**, which
-the two renderers deliberately share.
+**No Spark until a splat exists.** Spark's ESM build is ~5 MB (inlined sort workers
+and base64 wasm), so it is pulled in with **`await import('@sparkjsdev/spark')` on the
+first splat load** and Vite emits it as its own chunk — a scene with no splat pays
+nothing. The `SparkRenderer` is constructed once, on that first load, and added to the
+splat group.
 
 ### 4.4 Load path
 
@@ -401,27 +367,21 @@ A related trap for anything that inspects the layer: the `SparkRenderer` object
 itself draws **one triangle every frame** regardless of content, so a non-zero
 draw-call or triangle count is **not** evidence that a capture is visible.
 
-### 4.5 What the split means for the coverage overlay
+### 4.5 Coverage fog over a capture
 
-The coverage fog stays where it is, in the WebGPU scene, and **nothing about it
-changes for the existing app**. Measured on the real `volumetric.ts` material: the
-composited result with a transparent WebGPU canvas over a WebGL layer clearing to
-`0x1a1d22` differs from today's opaque-background result by **0.07/255 in `max` mode
-and 0.12/255 in `additive`**. Invisible, in both composite modes. Geometry and fog
-still share one framebuffer, so `volumetric_rendering.md` §4's "the scene color acts
-as a per-channel floor" holds exactly as before for everything the engine measures.
+Geometry, coverage fog and captures share one framebuffer and one depth buffer, so
+`volumetric_rendering.md` §4's "the scene colour acts as a per-channel floor" holds
+over a capture exactly as it holds over a wall. Where fog and capture overlap, the
+`max` composite keeps whichever is brighter per channel: the capture is **tinted** by
+the fog, not covered by it. No measurement and no caveat are needed — this is the same
+path the overlay has always taken over geometry.
 
-**Against a capture it is different, and deliberately left that way.** A splat is on
-the layer *beneath*, so the fog no longer max-blends against it in a shared
-framebuffer — the fog composites over it. Where coverage fog and capture overlap, the
-**fog covers the capture** rather than tinting it, more strongly at higher intensity.
-
-That is documented rather than mechanised, because the controls it calls for already
-exist and are already in the user's hands:
+A bright capture can still make the fog hard to read, and the controls for that
+already exist and are already in the user's hands:
 
 - the eye menu's **Coverage** row (`spec.md` §2.4) turns the overlay off outright —
   the natural pairing is Coverage on to judge coverage, Coverage off to read the site;
-- **Overlay intensity scale** (`spec.md` §9.2, `OverlayControls`) dials the fog down
+- **Overlay intensity scale** (`spec.md` §9.2, `OverlayControls`) dials the fog up
   against a bright backdrop, which is exactly the knob it already is.
 
 Auto-coupling the overlay's appearance to whether a splat is visible is rejected on
@@ -431,8 +391,10 @@ deliberately.
 
 ### 4.6 Capture size
 
-Splat count, not file size, is what costs frames. Measured in this app's stacked
-configuration on an M-series Mac in Chrome (WebGPU backend), orbiting a synthetic
+Splat count, not file size, is what costs frames. Measured on an M-series Mac in
+Chrome, in the two-canvas configuration this app used before §4.1 (so the numbers
+predate the shared-depth single renderer and are indicative of scale, not current),
+orbiting a synthetic
 capture spread through the full 440 × 201 × 1120 m reference site with `lod: true`:
 
 | splats | ms/frame | fps |
@@ -500,11 +462,13 @@ The eye menu also gains a **Geometry** row, defaulting to visible. Off hides the
 **render** group built by `sceneGeometryBuild.ts` — floor, walls, boxes, and glTF
 meshes.
 
-This row is what makes splats useful at all. The default room is floor plus four
-**opaque, double-sided** walls (`spec.md` §14.6), and with splats drawn behind them
-(§4.1) a capture would be entirely hidden; even against an imported site GLB it would
-only show around the edges. Being able to hide the model and see the capture in the
-same frame, with the same cameras and the same coverage overlay, is the feature.
+With shared depth (§4.1) a capture is no longer stuck behind every mesh, so this row
+is no longer what makes splats visible at all — it is what lets you see the capture
+**where the model stands in front of it**. The default room is floor plus four
+**opaque, double-sided** walls (`spec.md` §14.6): viewed from outside, the model still
+hides most of a capture, and a site GLB hides whatever it encloses. Being able to hide
+the model and read the site in the same frame, with the same cameras and the same
+coverage overlay, remains the feature.
 
 **It hides drawing and nothing else.** The merged collision `SceneMesh`, the
 workspace AABB, and every coverage result are untouched — this is a viewport layer
@@ -520,18 +484,19 @@ clip's world band applies to **the splats as well as the geometry**, so a
 cross-section reveals the captured interior instead of leaving the full capture
 standing behind the cut model.
 
-The geometry path (two world clipping planes on a `ClippingGroup`) does not exist on
-the other canvas, so the band is expressed as a **Spark SDF erase**.
+The geometry path (two world clipping planes on each mesh's material) does not apply
+to Gaussians, which have no rasterized surface for a plane to cut, so the band is
+expressed as a **Spark SDF erase** instead.
 
 **One edit for the whole layer, in world space.** Spark applies an edit *after* the
 mesh's object→world transform (`transform.applyGsplat` precedes
 `rgbaDisplaceEdits.modify` in the generator), so edits evaluate on **world-space**
 splat centres; and a `SplatEdit` that is **not** parented under any `SplatMesh` is
 collected as a **global edit** and applied to every editable mesh in the scene.
-Together those mean the clip is a **single** `SplatEdit` added to the splat scene
+Together those mean the clip is a **single** `SplatEdit` added to the splat group
 (not one per capture), carrying the band as a plain world-space box:
 
-- One `SplatEdit` on the splat scene, `{ rgbaBlendMode: MULTIPLY, sdfSmooth: 0,
+- One `SplatEdit` on the splat group, `{ rgbaBlendMode: MULTIPLY, sdfSmooth: 0,
   softEdge: 0, invert: true }`, holding one
   `SplatEditSdf { type: BOX, opacity: 0, radius: 0 }`.
 - `invert: true` applies the edit **outside** the box, where `opacity: 0` multiplies
@@ -629,14 +594,14 @@ stale.**
 
 A splat is selected **from the hierarchy only** — like a zone or a constraint group,
 which also have no pickable body (`spec.md` §5.5). A viewport click can never hit a
-splat: the splat canvas is `pointer-events: none` (§4.2) and the splat is not in the
-picked scene (§4.3).
+splat: each `SplatMesh` is built `raycastable: false` and the picker skips the splat
+group outright (§4.2).
 
-Spark can raycast an `SplatMesh` (`raycastable`), and this was considered and
-rejected: it needs a second raycast against a different scene graph, and a
-hit-priority rule between the two — which cannot be resolved by depth, because the
-two canvases share no depth buffer (§4.1). Selecting from the row is unambiguous. See
-also §1.1 on "Place on surface".
+Spark can raycast a `SplatMesh` (`raycastable`), and this was considered and
+rejected on its own merits, not for want of a depth buffer: a Gaussian has no surface,
+so "what did I click" resolves to a soft blob whose hit point moves with the view, and
+the pick would fight the modelled geometry for a hit that the user cannot predict.
+Selecting from the row is unambiguous. See also §1.1 on "Place on surface".
 
 ### 6.6 Reordering
 
@@ -771,7 +736,7 @@ Additions to the §14.8 table:
 | A `meta.json` referenced by a hand-edited scene file | **import succeeds**; the row badges `⚠ SOG bundle — use its .sog zip` rather than the bare undecodable badge, since the remedy is a different file and not a repair |
 | No `assets/` folder, or it holds no accepted file | the Add dialog says so and offers no commit |
 | No scene folder yet (boot) | the "+" menu's **3D Gaussian Splat…** entry is disabled with *"Load or save a scene first."* |
-| `WebGLRenderer` unavailable (no WebGL2 context) | the splat layer is inert; the viewport renders as today on the WebGPU canvas with its own opaque background restored; splat rows badge `⚠ no WebGL context` |
+| No WebGL2 context at all | the viewport cannot be created; App surfaces the failure in place of the viewport, since there is no second renderer left to fall back to (`spec.md` §2.3) |
 | Spark's dynamic import fails | the affected rows badge `⚠ could not be decoded`; the rest of the app is unaffected |
 | Referenced capture missing on a **cross-folder Save As…** | abort before writing the scene file, keep target, show error naming the asset (unchanged §14.5 rule — a copy cannot invent bytes) |
 
@@ -792,8 +757,8 @@ up self-contained.
 - **Registration** — the position / rotation / uniform scale that takes a capture's
   arbitrary reconstructed frame into the scene's metric Y-up frame. The same notion
   `apps/splat-camera-export` calls an **alignment**.
-- **Splat layer** — the second, WebGL canvas behind the main viewport canvas, and its
-  eye-menu master toggle.
+- **Splat group** — the `Group` inside the viewport scene holding the `SparkRenderer`
+  and the per-row anchors, and its eye-menu master toggle (§4.2).
 
 ---
 
@@ -847,20 +812,20 @@ Not covered by tests, and deliberately kept thin: `splatLayer.ts` — canvas cre
 `SparkRenderer` construction, the stream load, `mesh.visible`, the `SplatEdit`
 lifecycle, and disposal.
 
-**What the spike verified instead**, for the parts no unit test can reach — recorded
+**What the spikes verified instead**, for the parts no unit test can reach — recorded
 here so a later change knows what was actually measured rather than assumed
-(Chrome 152, WebGPU backend, Spark 2.1.0, three 0.185.1):
+(Chrome 152, Spark 2.1.0, three 0.185.1):
 
-- `three` and `three/webgpu` share one `three.core.js`, so their camera classes are
-  identical objects and a `three/webgpu` camera satisfies Spark's
-  `instanceof THREE.OrthographicCamera` — the basis for sharing camera objects (§4.3).
-- Splats render through the transparent WebGPU canvas alongside WebGPU geometry in the
-  same frame (§4.2).
 - Spark's **orthographic** projection is correct: a 10 m slab in a known top-down
   ortho frustum measured 195 × 210 px against 200 × 200 px predicted, the overshoot
-  being the splats' own radius (§4.3).
-- The transparent canvas does not change the coverage fog (§4.5).
+  being the splats' own radius.
 - Frame cost by splat count (§4.6).
+- **The render-backend A/B that chose WebGL2** (`spec.md` §2.3): on the reference
+  site with the coverage overlay on, WebGL2 held a 17.1–17.4 ms median frame at a
+  25 ms p95 across three windows, against WebGPU's 10.2–19.6 ms median with a p95
+  reaching 101 ms and worst frames of 128–142 ms. WebGPU has the higher ceiling and
+  the far worse tail; the overlay's overdraw — the reason `WebGPURenderer` was chosen
+  originally — was not the bottleneck on either backend.
 
 ---
 
@@ -869,17 +834,17 @@ here so a later change knows what was actually measured rather than assumed
 | `spec.md` section | Edit |
 |---|---|
 | §2.2 Layout / file map | Add `scene/splats.ts`, `scene/splatAssets.ts`, `scene/splatLayer.ts`, `ui/SplatPanel.tsx`, `ui/AddSplatDialog.tsx`; note the Splats umbrella and `SplatPanel` in the left-panel detail list. |
-| §2.3 Render backend | Note the **second `WebGLRenderer` canvas** behind the WebGPU one, that it owns the `0x1a1d22` background, and that the WebGPU canvas is `alpha: true` with `scene.background = null` (§4.1, §4.2). |
+| §2.3 Render backend | State the two-backend split — WebGPU for worker compute, **WebGL2 for the viewport** — and that Spark's `WebGLRenderer` requirement is what fixes the render backend, buying one shared depth buffer (§4.1, §4.2). |
 | §2.4 Viewport toolbar | Add the **Splats** and **Geometry** rows to the eye-menu list, both defaulting to visible (§5.2, §5.3); note that Translate/Rotate apply to a selected splat and **Scale stays volume-only** (§7). |
-| §2.4.1 Selected view | Note that splats render in this view too (§4.3). |
+| §2.4.1 Selected view | Note that splats render in this view too (§4.2). |
 | §2.4.2 Place on surface | State that splats are **not** a placement target, with the reason (§1.1). |
 | §2.4.3 Disabled entities | State the splat divergence: a disabled splat stays hidden **even when selected**, though its gizmo still attaches (§5.1). |
 | §4.2 Workspace | State that splats contribute **no bounds** to the workspace AABB (§1.1). |
 | §5.5 Hierarchy | Add the `{ kind: 'splat' }` node and the **Splats** umbrella; root order → Cameras → Probes → Sections → Zones → Constraints → **Splats**; `buildSceneTree`'s new `splats` parameter; the `'splat'` selection case; the row checkbox and load badge; the filename label fallback as the documented exception to the ordinal rule; "+" → **3D Gaussian Splat…** as the one dialog-opening and conditionally-disabled entry; Duplicate/Delete rules; **no splat action marks the result stale**. |
 | §5.5.1 Reordering | Add **splat** to the draggable kinds. |
 | §8.1 Staleness | State that splats are never analysis inputs, so no splat action marks the result stale (mirrors `camera_placement.md` §1.1). |
-| §9.2 Overlay intensity | Note that the intensity scale is also the dial for fog read over a splat capture, which the fog covers rather than tints (§4.5). |
-| §13.9 Clip | Extend the scope sentence: the clip now also cuts **splats**, by **one** world-space SDF erase on the splat layer rather than `ClippingGroup` planes (§5.4). Still no recompute. |
+| §9.2 Overlay intensity | Note that the intensity scale is also the dial for fog read over a splat capture, which the fog **tints** in the shared framebuffer (§4.5). |
+| §13.9 Clip | Extend the scope sentence: the clip now also cuts **splats**, by **one** world-space SDF erase on the splat group rather than the geometry's material clipping planes (§5.4). Still no recompute. |
 | §14.1 `Scene` model | Add `splats: SplatObject[]`; `defaultScene()` seeds it empty. |
 | §14.2 Folder layout | Note that `assets/` also holds **capture files** (`.spz`/`.sog`/`.ply`/`.splat`/`.ksplat`) and that a splat `src` resolves by the same relative-path rule as a `gltf` `src`. |
 | §14.3 File format | Add the top-level `"splats"` array and its per-splat shape; `enabled` optional on read / omitted on write when `true`; `name` omitted when blank; **`formatVersion` stays `3`** with the additive-precedent reasoning; `splats` order is display order. |
@@ -888,15 +853,15 @@ here so a later change knows what was actually measured rather than assumed
 | §14.7 UI controls | Add the **Add 3DGS** dialog (§3.2). |
 | §14.8 Error handling | Add the §9 rows. |
 | §14.9 Out of scope | Clarify that the non-authorable, non-selectable rule covers **`geometry`** objects; splats are a separate array and are authorable (§2.1). |
-| §16 Terminology | Add **3D Gaussian Splat**, **splat**, **registration**, **splat layer** (§10). |
+| §16 Terminology | Add **3D Gaussian Splat**, **splat**, **registration**, **splat group** (§10). |
 
 Also required outside `spec.md` (per the repo's `ai/` docs rule):
 
 | Doc | Edit |
 |---|---|
-| `ai/STACK.md` | Add `@sparkjsdev/spark@2.1.0` (peer `three >=0.180.0`), that it is **dynamically imported** and why (~5 MB), and that it is WebGL-only. |
-| `ai/ARCHITECTURE.md` | The two-canvas viewport, the shared-camera rationale (one `three.core.js`), the splat scene, the decode cache, and the pure/impure split of the new modules. |
-| `ai/DECISIONS.md` | New entries (newest at top): two stacked canvases over a WebGL migration; `splats[]` over a `GeometryObject` kind; pick-from-`assets/` over an in-app copy; hide-not-unload; uniform scale; **one world-space SDF clip for the whole layer**; `formatVersion` unchanged; dynamic import; hierarchy-only picking; filename label fallback; **fog-over-capture left to the existing Coverage and intensity controls**. Each entry records what the spike measured, since several of these rest on measurements rather than on reading docs. |
+| `ai/STACK.md` | Add `@sparkjsdev/spark@2.1.0` (peer `three >=0.180.0`), that it is **dynamically imported** and why (~5 MB), and that its WebGL-only requirement is what fixes the app's render backend. |
+| `ai/ARCHITECTURE.md` | The single-renderer viewport, the splat group inside the main scene, the decode cache, and the pure/impure split of the new modules. |
+| `ai/DECISIONS.md` | New entries (newest at top): `splats[]` over a `GeometryObject` kind; pick-from-`assets/` over an in-app copy; hide-not-unload; uniform scale; **one world-space SDF clip for the whole layer**; `formatVersion` unchanged; dynamic import; hierarchy-only picking; filename label fallback; **fog-over-capture left to the existing Coverage and intensity controls**. Each entry records what the spike measured, since several of these rest on measurements rather than on reading docs. |
 | `ai/CONVENTIONS.md` | The pure-decision / impure-layer split as applied here (`splats.ts`/`splatAssets.ts` vs `splatLayer.ts`). |
 | `ai/VISUAL_DESIGN.md` | The Splats group row, the splat row badge states, the two new eye-menu rows and their glyphs, and the `SplatPanel` layout. |
 

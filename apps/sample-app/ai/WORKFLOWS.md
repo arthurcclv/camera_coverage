@@ -112,12 +112,10 @@ Two traps worth knowing before you debug the layer:
   content**, so a non-zero draw-call or triangle count is not evidence a capture
   is visible.
 
-If a `three` import starts resolving to the wrong build, the rule lives in
-`vite.config.ts`: the alias's `customResolver` sends `scene/splatLayer.ts` and
-`@sparkjsdev/spark` to the classic build and everyone else to `three/webgpu`, and
-`optimizeDeps.exclude` keeps dev from pre-bundling a second copy of
-`three.core.js`. The production build is the fastest check — a mismatch shows up
-as *"X is not exported by three.webgpu.js"* rather than as a runtime failure.
+There is one `three` build (the classic, WebGL2 one) and no alias, so a `three`
+import cannot resolve to the wrong build. If you find yourself reaching for
+`three/webgpu` or `three/tsl`, read the top entry in
+[DECISIONS.md](./DECISIONS.md) first — that path was removed deliberately.
 
 ## Running against a local SDK change
 
@@ -127,9 +125,11 @@ up directly by `npm run dev` (Vite resolves the SDK's raw `.ts`). No rebuild ste
 
 ## Working on the viewport / volumetric overlay
 
-- The renderer is `WebGPURenderer` from `three/webgpu` with a WebGL2 fallback;
-  `createViewport` is async. Verify both backends when touching render code — the
-  stats panel reports which one is active.
+- The renderer is the classic `WebGLRenderer` (WebGL2), one canvas, one scene;
+  `createViewport` is synchronous. WebGPU is compute-only and lives in the worker,
+  so render changes cannot affect coverage numbers and vice versa.
 - Overlay math (slab/chord/composite) has a pure-TS reference in
-  `scene/volumetric.ts` mirrored by the TSL node graph. Change both together and
-  update `test/volumetric.test.ts`.
+  `scene/volumetric.ts` mirrored by the GLSL fragment shader. Change both together
+  and update `test/volumetric.test.ts`, including its shader source-parity
+  assertion — the shader cannot execute under `node --test`, so that assertion is
+  the only automated link between the two.

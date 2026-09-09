@@ -29,7 +29,7 @@ authentication, mobile layout.
 |---|---|
 | Bundler / dev server | **Vite** + TypeScript |
 | UI | **React** — control panels, buttons, stats readouts |
-| 3D rendering | **Three.js `WebGPURenderer`** (`three/webgpu`) with **TSL** node materials and automatic WebGL2 fallback (§2.3). Driven imperatively inside a `useEffect`/ref (no react-three-fiber) |
+| 3D rendering | **Three.js `WebGLRenderer`** (WebGL2) with GLSL `ShaderMaterial`s (§2.3); Spark draws 3DGS captures into the same renderer. Driven imperatively inside a `useEffect`/ref (no react-three-fiber) |
 | SDK dependency | Referenced **by name** (`@linkervision/camera-coverage-sdk`) via npm workspaces |
 
 ### 2.1 Monorepo
@@ -66,7 +66,7 @@ apps/sample-app/
       useEngine.ts         WorkerClient lifecycle + init/loadScene/compute wrappers
     scene/
       buildRoom.ts         room + boxes → { positions, indices } + Three.js meshes
-      viewport.ts          WebGPURenderer (async init) + orbit/transform controls, render loop; four view cameras (perspective + top/front/right ortho) + bottom-left orientation-axis triad (§2.4)
+      viewport.ts          WebGLRenderer + orbit/transform controls, render loop; four view cameras (perspective + top/front/right ortho) + bottom-left orientation-axis triad (§2.4)
       cameraGizmos.ts      per-camera frustum gizmos
       probeGizmos.ts       per-probe markers + selected-probe sightlines (§12.4)
       probeVisibility.ts   retained ChunkResults + world-point → camera-mask lookup (§12.2)
@@ -84,7 +84,7 @@ apps/sample-app/
       polylineDraw.ts      the armed polyline draw mode, over §2.4.2's hit test (camera_placement.md §6.2)
       splats.ts            SplatObject model + label + ids + clip-band → SDF box mapping (gaussian_splats.md §2, §5.4)
       splatAssets.ts       which assets/ files the Add 3DGS dialog lists, and in what order (gaussian_splats.md §3.2)
-      splatLayer.ts        the second WebGL canvas: SparkRenderer, splat scene, stream load, decode cache, SplatEdit lifecycle (gaussian_splats.md §4)
+      splatLayer.ts        the splat group in the main scene: SparkRenderer, stream load, decode cache, SplatEdit lifecycle (gaussian_splats.md §4)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
@@ -185,36 +185,50 @@ stable`) so their content does not reflow when the scrollbar appears or disappea
 
 ### 2.3 Render backend
 
-The viewport renders with Three.js's **`WebGPURenderer`** (`three/webgpu`), chosen for
-throughput on the volumetric overlay's heavy additive overdraw (§9;
-[`volumetric_rendering.md`](./volumetric_rendering.md)).
+The app uses **two GPU backends, for two different jobs**, and they share nothing —
+no device, no adapter, no canvas, no thread:
 
-- It **prefers WebGPU** and **automatically falls back to its WebGL2 backend** when
-  `navigator.gpu` is unavailable, so the demo always renders through one code path.
-- The overlay's custom shader is authored in **TSL** node materials, which compile to
-  **WGSL** on the WebGPU backend and **GLSL** on the WebGL2 backend — one shader, both
-  backends.
-- `WebGPURenderer` initializes **asynchronously** (`await renderer.init()` before the
-  first frame); viewport setup accounts for this.
-- **A second, `WebGLRenderer` canvas sits behind it** for 3D Gaussian Splat captures
-  (`gaussian_splats.md` §4). Spark, the splat renderer, requires a `WebGLRenderer` and
-  draws with GLSL `RawShaderMaterial`, which `WebGPURenderer` supports on neither
-  backend — so the splat layer is its own canvas, its own renderer, and its own scene.
-  The **WebGL canvas owns the viewport background** (it clears to `0x1a1d22`) and the
-  WebGPU canvas is created **`alpha: true`** with its scene's `background` set to
-  **`null`**, so it clears transparent and composites over the layer beneath. Both
-  renderers draw **the same camera objects** each frame — `three` and `three/webgpu`
-  share one `three.core.js`, so there is exactly one `PerspectiveCamera`/
-  `OrthographicCamera` class and no matrices need mirroring. The two canvases share no
-  **depth** buffer, so splats are always drawn behind every mesh and gizmo
-  (`gaussian_splats.md` §4.1). Making the WebGPU canvas transparent is **measured** not
-  to change the coverage overlay: composited over the WebGL layer it matches today's
-  opaque-background result to within 0.12/255 in both composite modes
-  (`gaussian_splats.md` §4.5).
+| Job | Backend | Thread |
+| --- | --- | --- |
+| Coverage analysis — visibility rays, Passes 1–3, mask aggregation | **WebGPU compute** | Web Worker (§3.1) |
+| The viewport — geometry, gizmos, coverage fog, splat captures | **WebGL2** | main |
+
+**Compute is WebGPU.** The SDK acquires its own `GPUAdapter`/`GPUDevice` through
+`navigator.gpu` inside the worker, and falls back to the CPU reference when WebGPU is
+unavailable (§3.2). It never touches the viewport's renderer, and the Stats panel
+reports the two as separate lines because they genuinely are.
+
+**The viewport renders with Three.js's classic `WebGLRenderer`** (the `three` build,
+not `three/webgpu`), on **one** canvas.
+
+- The viewport's custom shaders are authored as **GLSL** `ShaderMaterial`s
+  (`volumetric_rendering.md` §2). WebGL2 is the only render target, so there is one
+  shader language and no cross-backend compilation step.
+- `WebGLRenderer` constructs **synchronously** — there is no `await renderer.init()`,
+  so `createViewport` is synchronous and App does not stage viewport creation behind
+  a promise.
+- **The splat captures draw into this same renderer and this same scene**
+  (`gaussian_splats.md` §4). Spark, the splat renderer, requires a `WebGLRenderer`:
+  `SparkRendererOptions.renderer` is typed to it, it draws with GLSL
+  `RawShaderMaterial`, and it reaches into `renderer.properties`, `renderer.state`,
+  `renderer.initTexture` and `renderer.xr`. Sharing the renderer is what lets geometry
+  and captures **share one depth buffer**, so a capture is occluded by the walls in
+  front of it and occludes what stands behind it, like any other scene content.
+- **Why not `WebGPURenderer`.** It was the previous choice, taken for raster
+  throughput on the coverage overlay's additive overdraw (§9). It cannot host Spark on
+  either of its backends — including its WebGL2 backend, which exposes a
+  `WebGPURenderer` API surface, not the `WebGLRenderer` internals Spark reaches for —
+  so keeping it meant a second canvas, a second renderer, and **no shared depth**,
+  which put every capture behind every mesh. The throughput premise was then measured
+  and did not hold at site scale: on the reference site with the overlay on, WebGL2
+  ran a steady 17.1–17.4 ms median frame with a 25 ms p95, against WebGPU's
+  10.2–19.6 ms median with a p95 blowing out to 101 ms. WebGPU has the higher ceiling;
+  WebGL2 has the frame times a user orbiting to judge coverage actually feels. See
+  `ai/DECISIONS.md`.
 - **A capture appears a few frames after it loads.** Spark's sort runs in a worker, so
   a `SplatMesh` emits no geometry for its first several frames even after its own
-  `initialized` promise resolves (`gaussian_splats.md` §4.4). Nothing may treat "loaded"
-  as "on screen", and `SparkRenderer`'s own mesh draws one triangle per frame
+  `initialized` promise resolves (`gaussian_splats.md` §4.4). Nothing may treat
+  "loaded" as "on screen", and `SparkRenderer`'s own mesh draws one triangle per frame
   regardless of content, so draw-call counts say nothing about whether a capture is
   visible.
 
@@ -247,7 +261,7 @@ freely to judge coverage and a face that renders black cannot be judged at all.
   non-unit metalness.
 
 The rig lives in `scene/sceneLighting.ts` rather than inline in `viewport.ts`, so
-its invariants are testable without a `WebGPURenderer` (which needs a real GPU
+its invariants are testable without a live renderer (which needs a real GPU
 adapter).
 
 ### 2.4 Viewport toolbar
@@ -363,7 +377,7 @@ heatmap legend at its bottom-right (§13.6):
     (`gaussian_splats.md` §5.2): off hides every capture; on shows each per its own
     row checkbox, parallel to how **Cameras** relates to per-camera state. Purely
     visual — splats are not analysis inputs (`gaussian_splats.md` §1.1) — and
-    implemented as the splat scene's visibility, so hiding the layer costs nothing.
+    implemented as the splat group's visibility, so hiding the layer costs nothing.
     Defaults to visible.
   - **Geometry** — shows/hides the **rendered** scene geometry (floor, walls, boxes,
     glTF — §14.6) at once. It hides **drawing only**: the merged collision
@@ -1600,10 +1614,10 @@ viewport's top-right toolbar (§2.4), not here:
   with a rainbow-gradient track. Sits immediately **before** Intensity scale.
 - **Intensity scale** — the renderer's global brightness multiplier
   (`intensityScale`). It is also the dial for reading the overlay **against a splat
-  capture** (`gaussian_splats.md` §4.5): the fog and the geometry share one framebuffer
-  and are unaffected by the splat layer, but a capture sits on the canvas *beneath*, so
-  the fog composites **over** it rather than max-blending against it — where the two
-  overlap the capture is covered, more so at higher intensity. Turning the overlay off
+  capture** (`gaussian_splats.md` §4.5): fog, geometry and captures all share one
+  framebuffer, so the fog max-blends against a capture exactly as it does against a
+  wall — where the two overlap the capture is **tinted**, and a bright capture can
+  wash the fog out until this is raised. Turning the overlay off
   entirely is the **Coverage** row of the layer menu (§2.4). Neither is adjusted
   automatically when a capture is visible: coupling one layer's appearance to another
   layer's state would override a setting the user chose (the same reasoning that keeps
@@ -1646,7 +1660,7 @@ panel is exactly as above (the SDK summary).
 | Case | Handling |
 |---|---|
 | `WEBGPU_UNAVAILABLE` on `auto` init (compute) | fall back to CPU (§3.2) |
-| WebGPU renderer unavailable | automatic WebGL2 fallback in `WebGPURenderer` (§2.3); no error surfaced |
+| No WebGL2 context | the viewport cannot be created; App surfaces the failure in its place (§2.3). Compute is unaffected — it has its own device in the worker |
 | `SCENE_TOO_LARGE` (fine voxel on CPU) | catch, show message, keep previous valid state |
 | `COMPUTE_CANCELED` (§8.1) | **not** surfaced: the app asked for the abort, so no banner, no error state, and Auto-run keeps going |
 | `CAMERA_INSIDE_GEOMETRY` | surface which camera; keep it flagged in the list (the SDK never flags a camera carrying `enabled: false`, §5.4) |
@@ -2121,17 +2135,18 @@ scene-level **`clipSectionId`** (§14.1); it is **independent of selection**. Th
 `[mid − clipRange/2, mid + clipRange/2]`. Because it is centred on the plane, it
 **follows the slab** as the section is dragged (§13.8).
 
-- **Scope — geometry and splats.** The scene geometry group is a **`ClippingGroup`** (the
-  WebGPU renderer's clipping path; `Material.clippingPlanes` is not honoured there), and
-  the clip sets its two world clipping planes (at the band bounds, intersecting), which
-  clip every descendant mesh — floor, walls, boxes, glTF. The coverage overlay (§9),
-  cameras, probes, and the section's own heatmap and outline planes (§13.5) live outside
-  that group and are **never** clipped.
-- **Splats clip by a different mechanism, to the same band.** Captures are drawn by a
-  `WebGLRenderer` on the second canvas (§2.3), where `ClippingGroup` does not exist, so
-  the band is applied as a **Spark SDF erase**: **one** inverted `SplatEdit` on the
-  splat scene — not one per capture — holding a `BOX` SDF at `opacity: 0`, which zeroes
-  the alpha of every Gaussian outside the band. Spark evaluates an edit on **world-space**
+- **Scope — geometry and splats.** The clip sets two intersecting world clipping planes
+  (at the band bounds) on the **materials of every mesh in the scene geometry group** —
+  floor, walls, boxes, glTF — with `renderer.localClippingEnabled` on. The coverage
+  overlay (§9), cameras, probes, and the section's own heatmap and outline planes
+  (§13.5) carry no clipping planes and are **never** clipped. Rebuilding or swapping the
+  geometry group (§14.4) **re-applies** the active band to the incoming materials —
+  clipping is per-material state now, so nothing propagates to a new mesh on its own.
+- **Splats clip by a different mechanism, to the same band.** A capture is Gaussians,
+  not triangles: a clipping plane discards fragments of a rasterized surface, which is
+  not what a splat is. So the band is applied as a **Spark SDF erase**: **one** inverted
+  `SplatEdit` on the splat group (§2.3) — not one per capture — holding a `BOX` SDF at
+  `opacity: 0`, which zeroes the alpha of every Gaussian outside the band. Spark evaluates an edit on **world-space**
   splat centres, and an edit parented outside any capture applies to **every** capture,
   so a single world-space box clips the whole layer. The edit is added when a clip
   becomes active and removed when it clears, so an unclipped scene does no per-frame
@@ -2718,7 +2733,7 @@ scene file within it:
 | Referenced splat `src` is a PCSOGS `meta.json` — only reachable by hand-editing, since the Add dialog never offers one | **import succeeds**; the row badges `⚠ SOG bundle — use its .sog zip`, naming the remedy rather than the bare failure |
 | No `assets/` folder, or it holds no accepted capture | the **Add 3DGS** dialog says so and offers no commit (§14.7) |
 | No save target yet (boot) | the "+" menu's **3D Gaussian Splat…** entry is disabled: *"Load or save a scene first."* (§5.5) |
-| No WebGL2 context for the splat layer | the layer is inert, the viewport renders as today with its own opaque background restored, and splat rows badge `⚠ no WebGL context` (§2.3) |
+| No WebGL2 context | the viewport cannot be created and App surfaces the failure in its place; compute is unaffected, having its own device in the worker (§2.3) |
 | Spark's dynamic import fails | the affected rows badge `⚠ could not be decoded`; nothing else is affected (§2.3) |
 
 ### 14.9 Out of scope for this feature

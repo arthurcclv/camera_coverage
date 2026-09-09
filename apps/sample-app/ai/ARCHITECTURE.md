@@ -16,23 +16,24 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
       run off-thread in a Web Worker
 ```
 
-The viewport is **two stacked canvases**, not one (`gaussian_splats.md` §4):
+The viewport is **one canvas, one `WebGLRenderer`, one scene** (`spec.md` §2.3,
+`gaussian_splats.md` §4):
 
 ```
 .viewport
-  canvas.viewport-splats   WebGLRenderer  ← splat scene: SparkRenderer,
-      z-index 0                             one SplatMesh per row, the clip
-      pointer-events: none                  SplatEdit. Owns the background.
-  canvas.viewport-main     WebGPURenderer ← everything else, alpha: true,
-      (z-index auto)                        scene.background = null
+  canvas.viewport-main   WebGLRenderer (WebGL2)
+      ├─ geometry group (ClippingGroup → per-material clippingPlanes)
+      ├─ gizmo sets, grid, light rig, coverage fog
+      └─ splat group  ← SparkRenderer, one SplatMesh per row, the clip SplatEdit
 ```
 
-Both renderers are handed **the same camera object** each frame, and the splat
-layer draws first. The two share no **depth** buffer, so captures are always
-behind every mesh and gizmo — which is what the eye menu's **Geometry** row
-exists to make usable. `SplatLayer` (`scene/splatLayer.ts`) is a part of the
-viewport, like the gizmo sets: App reaches it only through the `SceneViewState`
-snapshot.
+Everything shares one depth buffer, so a capture is occluded by the walls in front
+of it like any other scene content. WebGL2 is not a fallback here — it is the
+render backend, fixed by Spark's `WebGLRenderer` requirement and confirmed by
+measurement against WebGPU (see DECISIONS.md). **WebGPU is still used, for
+compute**: the SDK holds its own device in the worker and shares nothing with the
+renderer. `SplatLayer` (`scene/splatLayer.ts`) is a part of the viewport, like the
+gizmo sets: App reaches it only through the `SceneViewState` snapshot.
 
 1. **React UI** — `App.tsx` owns *all* state and layout; `ui/*` components are
    presentational, driven by props and callbacks.
@@ -217,8 +218,8 @@ default" — see DECISIONS.md).
   `meta.json` *with its reason* rather than dropping it, case-insensitive stable
   order), `firstSelectableAsset`, `formatByteSize`. The same pure/impure split
   `sceneFileList.ts` has from `sceneIO.ts`. Tested in `test/splatAssets.test.ts`.
-- `splatLayer.ts` — the impure half (§4): the second `WebGLRenderer` canvas, the
-  splat scene, the `SparkRenderer` (constructed once, on the first load), the
+- `splatLayer.ts` — the impure half (§4): the splat `Group` inside the viewport
+  scene, the `SparkRenderer` (constructed once, on the first load), the
   streamed load path, the **per-`src` decode cache** refcounted by referencing
   rows, and the clip's single global `SplatEdit` — which it re-applies when a
   decode lands, since Spark's `SplatEdit` class only arrives with the first load
@@ -330,8 +331,8 @@ default" — see DECISIONS.md).
   strings App.tsx stores at each load and save (§14.4). Generic over the handle type — only `.name` is
   read — so `test/saveTarget.test.ts` needs no File System Access API. App.tsx
   holds the handles and does the awaits; every decision lives here.
-- `viewport.ts` — async `WebGPURenderer` init, orbit + transform controls, the
-  light rig (from `sceneLighting.ts`), grid, render loop, and the five view
+- `viewport.ts` — `WebGLRenderer` construction (synchronous), orbit + transform
+  controls, the light rig (from `sceneLighting.ts`), grid, render loop, and the five view
   cameras of the View selector. The
   **Selected** view (spec §2.4.1) is driven through `setCameraViewSource` and
   publishes its frame-guide rect back out via the `onCameraGuide` option, so the
@@ -342,8 +343,7 @@ default" — see DECISIONS.md).
   returning a `SceneLights` record keyed by role — not an array, so neither the
   caller nor the tests depend on add order — and holding no scene reference, so
   the rig's intensities and directions are assertable in `node --test` without a
-  `WebGPURenderer` (which needs a real GPU adapter). Imports plain `three`, not
-  `three/webgpu`, per the convention the gizmo modules follow. Unit-tested in
+  live renderer (which needs a real GPU context). Unit-tested in
   `test/sceneLighting.test.ts`, which pins the §2.3.1 table exactly and then the
   property it exists for (no direction unlit).
 - `viewCameras.ts` — the pure geometry behind the View selector: `ViewId` (five
@@ -387,8 +387,8 @@ default" — see DECISIONS.md).
   probes are an SDK aggregation primitive now (`spec.probes`, SDK spec §19.2), so
   the answer arrives already resolved and `CoverageRun.probeQueries` reads it.
   Pure, no deps.
-- `volumetric.ts` — instanced-cube TSL volumetric renderer + pure-TS
-  slab/chord/composite reference. Exposes `setRenderOrder` (draw order forwarded to
+- `volumetric.ts` — instanced-cube GLSL volumetric renderer + pure-TS
+  slab/chord/composite reference, which stays the tested truth the shader mirrors. Exposes `setRenderOrder` (draw order forwarded to
   the mesh, re-applied across buffer reallocation); the primitive stays agnostic to
   *which* order — that comes from `renderOrder.ts`.
 - `renderOrder.ts` — single source of truth for the draw order of the scene's

@@ -6,6 +6,81 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The viewport renders on WebGL2; WebGPU is compute-only
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.3, §13.9;
+[`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.1, §4.2;
+[`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md) §2, §3.
+
+**This reverses "Splats: two stacked canvases, not a renderer migration" (below).**
+That entry rejected migrating the viewport to `WebGLRenderer` because it meant
+rewriting the coverage fog, the constraint gizmos and the clip — and it accepted, as
+the price, that the two canvases share no depth buffer, so a capture is always drawn
+behind every mesh. The rewrite turned out to be smaller than assumed, and the reason
+for keeping `WebGPURenderer` turned out not to be true.
+
+**The premise that failed.** `spec.md` §2.3 chose `WebGPURenderer` *for raster
+throughput on the coverage overlay's additive overdraw*. Measured on the reference
+site with the overlay on, over three 180-frame windows each:
+
+| | WebGPU | WebGL2 |
+|---|---|---|
+| median | 10.2 / 16.6 / 19.6 ms | 17.1 / 17.2 / 17.4 ms |
+| p95 | 29.2 / 101.0 / 100.9 ms | 25.6 / 25.1 / 27.5 ms |
+| worst | 35.4 / 141.9 / 128.7 ms | 74.0 / 28.8 / 47.8 ms |
+
+WebGPU has the higher ceiling — one window ran at 98 fps, which WebGL2 never matched
+— and a far worse tail: a p95 four times worse, with 128–142 ms worst frames against
+WebGL2's flat 25 ms p95. On a tool the user *orbits* to judge coverage, a stutter is
+felt and a peak frame rate is not. The overlay's overdraw was not the bottleneck on
+either backend, so the throughput argument had nothing to protect.
+
+The A/B was run by pinning `WebGPURenderer` to its own WebGL2 backend
+(`forceWebGL: true`), which measures the same TSL shader on both paths — the backend
+question, isolated from the port.
+
+**Decision.** One classic `WebGLRenderer`, one canvas, one scene. WebGPU stays
+exactly where it was for compute: its own `GPUAdapter`/`GPUDevice`, acquired through
+`navigator.gpu` inside the worker, sharing nothing with the renderer. That
+separation is why this change costs the analysis engine nothing — the two were never
+coupled.
+
+**What it buys: one depth buffer.** Spark's splat material is `depthTest: true,
+depthWrite: false`, so drawn into the viewport's own renderer a capture is occluded
+by the walls in front of it and occludes what stands behind it. The coverage fog
+max-blends against a capture in that shared framebuffer exactly as it does against
+geometry, which retires the "the fog covers the capture" caveat in
+`gaussian_splats.md` §4.5 outright.
+
+**What it costs, and what it deletes.** The port itself:
+
+- `volumetric.ts` — the TSL `NodeMaterial` becomes a GLSL `ShaderMaterial`. The pure-TS
+  slab/chord reference and its unit tests are unchanged and remain the tested truth;
+  the shader is held to them by review plus a source-parity assertion, since a shader
+  cannot run under `node --test`.
+- `constraintGizmos.ts` — a **net deletion**. The `Sprite` + `PointsNodeMaterial` +
+  `instancedBufferAttribute` + recompile-on-grow machinery existed only because WebGPU
+  pins point primitives to one pixel. WebGL2 honours `gl_PointSize`, so it collapses to
+  `Points` + `PointsMaterial { sizeAttenuation: false, vertexColors: true }`.
+- `sceneGeometryBuild.ts` — `ClippingGroup` becomes per-material `clippingPlanes` with
+  `renderer.localClippingEnabled`. **This is the regression risk in the whole change:**
+  the group propagated planes to descendants for free, per-material state does not, so
+  a geometry rebuild or swap (`spec.md` §14.4) must re-apply the active band. It gets
+  its own test.
+- `viewport.ts` — one canvas, one clear, one `setSize`, and `createViewport` becomes
+  **synchronous** (no `await renderer.init()`), which unwinds App's async staging.
+- `vite.config.ts` — the importer-conditional `three` resolver and the
+  `optimizeDeps.exclude` list are **deleted entirely**, along with the entry below that
+  explains them. There is one `three` build now, so the whole class of
+  two-cores/`instanceof` hazards stops existing.
+
+The real loss is WebGPU's raster ceiling on machines that have it, taken deliberately
+in exchange for the tail and the depth buffer. A secondary one: TSL's "one graph, two
+backends" property goes away, which costs nothing while WebGL2 is the only target but
+would have to be paid back if `WebGPURenderer` were ever reconsidered.
+
+---
+
 ## Splats: the clip is re-applied when a decode lands, and disposal is split in two
 
 Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §3.3, §4.2, §5.4.
@@ -82,9 +157,12 @@ no longer the single place a badge's text is decided.
 
 ---
 
-## Splats: two stacked canvases, not a renderer migration
+## ~~Splats: two stacked canvases, not a renderer migration~~ (SUPERSEDED)
 
-Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.1, §4.2.
+**Superseded by "The viewport renders on WebGL2; WebGPU is compute-only" above.**
+Kept because it records what was measured at the time and why the trade looked right;
+the depth-buffer cost it accepted is the thing that was later bought back. Nothing
+below describes current behavior.
 
 Spark's `SparkRendererOptions.renderer` is typed `THREE.WebGLRenderer` and
 required, and the splats themselves draw with GLSL `RawShaderMaterial` into
@@ -129,9 +207,14 @@ chunked separately.
 
 ---
 
-## `three` resolves per-importer, and nothing three-shaped is pre-bundled
+## ~~`three` resolves per-importer, and nothing three-shaped is pre-bundled~~ (SUPERSEDED)
 
-Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.1, §4.3.
+**Superseded by "The viewport renders on WebGL2; WebGPU is compute-only" above.** The
+app now uses one `three` build, so both the importer-conditional alias and the
+`optimizeDeps.exclude` list are gone from `vite.config.ts`. Kept for the Vite plugin-
+ordering finding, which cost real time to establish and would cost it again: an
+`enforce: 'pre'` plugin cannot beat `vite:alias`. Nothing below describes current
+behavior.
 
 The app aliases bare `three` to `three/webgpu` so its objects and the
 OrbitControls/TransformControls/GLTFLoader addons share one build. Two importers
@@ -3199,6 +3282,10 @@ ROI's coverage instead of going all-black. With no zones `marked` is null — un
 
 ## Section clip hides geometry via a ClippingGroup, chosen by a scene-level id
 
+**SUPERSEDED** by "The viewport renders on WebGL2; WebGPU is compute-only" at the
+top of this file. Kept as the record of what was true before that change.
+
+
 Behavior in [`../specs/spec.md`](../specs/spec.md) §13.9. A section's clip hides scene
 geometry outside a band along its normal. The renderable geometry group is a
 **`three/webgpu` `ClippingGroup`** (`sceneGeometryBuild.ts`) whose two inward-facing world
@@ -3491,6 +3578,10 @@ rather than accumulating a drag delta — avoids drift across many small ticks.
 
 ## THREE.LineLoop is unsupported by this renderer
 
+**SUPERSEDED** by "The viewport renders on WebGL2; WebGPU is compute-only" at the
+top of this file. Kept as the record of what was true before that change.
+
+
 **Known limitation, not a decision:** this project's `WebGPURenderer` (via
 `three/webgpu`, both its WebGPU and WebGL2-fallback paths) does not support the
 `THREE.LineLoop` primitive — it logs `"Objects of type THREE.LineLoop are not
@@ -3521,6 +3612,10 @@ synchronization — originally `useRef` mirrors + per-value push effects in
 
 ## Two independent WebGPU surfaces, each with its own fallback
 
+**SUPERSEDED** by "The viewport renders on WebGL2; WebGPU is compute-only" at the
+top of this file. Kept as the record of what was true before that change.
+
+
 **Decision:** the Three.js **render** backend (`WebGPURenderer`, main thread) and
 the SDK **compute** backend (worker) are chosen and fall back independently —
 render → WebGL2, compute → CPU reference — and both are surfaced in the stats
@@ -3528,6 +3623,10 @@ panel. **Why:** they are genuinely different subsystems; forcing them to agree
 would hide useful information and couple two unrelated fallbacks.
 
 ## Single Three.js instance via a Vite alias
+
+**SUPERSEDED** by "The viewport renders on WebGL2; WebGPU is compute-only" at the
+top of this file. Kept as the record of what was true before that change.
+
 
 **Decision:** `vite.config.ts` aliases bare `three` → `three/webgpu`
 (regex matches the exact specifier only). **Why:** the renderer needs the
@@ -3537,6 +3636,10 @@ in a *second* core `three` copy — breaking cross-build interop and doubling th
 bundle. `three/webgpu`, `three/tsl`, and `three/addons/*` resolve normally.
 
 ## Volumetric overlay: instanced cubes + TSL, order-independent
+
+**SUPERSEDED** by "The viewport renders on WebGL2; WebGPU is compute-only" at the
+top of this file. Kept as the record of what was true before that change.
+
 
 **Decision:** one `InstancedMesh` of a unit cube, one instance per voxel, with
 per-instance `center`/`half`/`intensity`/`color` as `InstancedBufferAttribute`s

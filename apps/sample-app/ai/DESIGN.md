@@ -95,14 +95,13 @@ controls/stats. No mobile, no persistence.
    canonical arrays (cameras, probes, selection, options) and pushes them, as one
    snapshot, through the `SceneView` bridge into the imperative Three.js scene
    objects (`update()`/`setOptions()`). No react-three-fiber.
-3. **Two independent WebGPU surfaces.** The **render** backend (Three.js
-   `WebGPURenderer`, main thread) is separate from the SDK's **compute** backend
-   (in the worker). Each falls back independently — render to WebGL2, compute to
-   the CPU reference — and the stats panel shows both. A **third** surface sits
-   behind the viewport: a plain `WebGLRenderer` canvas for the splat captures,
-   because Spark cannot draw into `WebGPURenderer`. It shares the viewport's
-   camera objects but no depth buffer, so captures are always behind the model —
-   which is what the **Geometry** layer toggle is for.
+3. **Two GPU surfaces, two jobs, no coupling.** The **render** backend is
+   **WebGL2** (Three.js `WebGLRenderer`, main thread, one canvas); the SDK's
+   **compute** backend is **WebGPU**, with its own device inside the worker,
+   falling back to the CPU reference. The stats panel shows both. They share no
+   device, canvas or thread, which is what let the viewport move to WebGL2 without
+   touching the analysis engine. Splat captures draw into that same renderer and
+   scene, so they share its depth buffer and sit correctly among the geometry.
 4. **Pure decision logic is factored out of React/Three to be testable.**
    Selection, transform-space mapping, panel split, tree derivation, overlay
    encoding, probe voxel lookup, and volumetric slab/chord math are pure

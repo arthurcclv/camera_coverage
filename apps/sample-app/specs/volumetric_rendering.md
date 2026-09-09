@@ -53,9 +53,9 @@ voxels come from.
 ## 2. Proxy geometry
 
 A single unit cube mesh, **GPU-instanced** (`THREE.InstancedMesh`), one instance per
-voxel, drawn with a **TSL node material** under Three.js's `WebGPURenderer`
+voxel, drawn with a **GLSL `ShaderMaterial`** under Three.js's `WebGLRenderer`
 (`spec.md` §2.3). The cube is **not** shaded as a surface — it is only the bounding
-volume of the fog cell; the material's **fragment node** computes the fog
+volume of the fog cell; the material's **fragment shader** computes the fog
 contribution for the portion of the view ray inside it.
 
 Each instance's **transform** (the `InstancedMesh` instance matrix: `center` +
@@ -64,7 +64,8 @@ fragments over its screen footprint. The fog math itself reads the cube's geomet
 from dedicated per-instance attributes rather than decoding the matrix, so the
 shader forms the world-space AABB (`center ± size/2`) directly and portably.
 
-Per-instance data (exposed to TSL as instanced buffer attributes):
+Per-instance data (`THREE.InstancedBufferAttribute`s, passed to the fragment shader
+as varyings):
 
 - **center** (vec3 attribute) and **size** (float attribute) — the cube's world-space
   AABB is `center ± size/2`.
@@ -73,7 +74,7 @@ Per-instance data (exposed to TSL as instanced buffer attributes):
 
 ---
 
-## 3. Ray–voxel intersection & contribution (TSL fragment node)
+## 3. Ray–voxel intersection & contribution (fragment shader)
 
 For each fragment of each instance, in world (or view) space:
 
@@ -102,9 +103,11 @@ result is simply the largest intensity present, which is likewise grid-independe
 does not depend on how many voxels a ray crosses).
 
 The slab/chord math is authored as a **pure TypeScript reference** and unit-tested;
-the TSL node graph mirrors it (see §6), echoing the SDK's "CPU reference is the
-tested truth" discipline. Because it is TSL, the same shader compiles to WGSL on the
-WebGPU backend and GLSL on the WebGL2 fallback (`spec.md` §2.3).
+the GLSL fragment shader mirrors it (see §6), echoing the SDK's "CPU reference is the
+tested truth" discipline. That mirroring carries the whole verification burden here —
+WebGL2 is the only render backend (`spec.md` §2.3), and a shader cannot run under
+`node --test`, so the reference is what is actually tested and the shader is held to
+it by review and by a source-parity test.
 
 ---
 
@@ -193,4 +196,10 @@ pattern (pure functions under `node:test`):
   per-channel maximum; both are order-independent (permuting the inputs is invariant);
   the max of a set equals its brightest element per channel.
 
-The TSL shader mirrors the tested TS reference for the slab/chord and composite math.
+- **Shader source parity** — the GLSL fragment shader's source is asserted to carry
+  the reference's terms (the slab `min`/`max` pair, the `tEnter` clamp to 0, the
+  `chord` clamp to 0, and the `color * intensity * pathTerm * intensityScale`
+  product). A source assertion is a weak test and is meant as one: it catches a term
+  silently dropped in an edit, not a wrong shader. It exists because the shader cannot
+  execute under `node --test`, so without it the port from the pure reference has no
+  automated check at all.
