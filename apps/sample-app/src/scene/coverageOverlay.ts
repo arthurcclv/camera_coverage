@@ -25,7 +25,6 @@
  */
 import type { AggregateResult, LeafCounts, Vec3 } from '@linkervision/camera-coverage-sdk';
 import { VoxelVolumetricRenderer, DEFAULT_INTENSITY_SCALE } from './volumetric.ts';
-import { RenderOrder } from './renderOrder.ts';
 
 export type OverlayMode = 'coverage' | 'blindspots';
 
@@ -88,13 +87,13 @@ export function coverageFraction(camCount: number, involvedCameraCount: number):
 
 export class CoverageOverlay {
   private readonly renderer = new VoxelVolumetricRenderer();
+  /**
+   * The fog's own scene, for the viewport's fog pass (`fogCompositor.ts`). The
+   * overlay is **not** added to the viewport scene — it max-blends into a separate
+   * target and is composited over the scene (`volumetric_rendering.md` §4).
+   */
+  readonly scene = this.renderer.scene;
   readonly object = this.renderer.object;
-
-  constructor() {
-    // Draw the fog after the section plane but before the volume fill so depth
-    // testing against the plane's depth resolves occlusion (spec §9, §13.5).
-    this.renderer.setRenderOrder(RenderOrder.coverageFog);
-  }
 
   /**
    * Retained per-chunk counts **keyed by chunkId** (spec §9), not one flat list:

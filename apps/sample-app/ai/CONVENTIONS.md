@@ -153,14 +153,18 @@ the kind and id, since the `DeletableKind`s *are* the selectable kinds.
   Spark cannot run under `node --test` at all — it needs a WebGL2 context, workers
   and wasm — so the splat feature draws the boundary where `sceneFileList.ts` vs
   `sceneIO.ts` already draws it. `scene/splats.ts` (label, accepted extensions,
-  row badge, the `Flip 180° Z` preset, `clipBandToSdfBox`) and
+  row badge, the `Flip 180° Z` preset, `clipBandToSdfBox`, `needsSplatDepthPass`) and
   `scene/splatAssets.ts` (the Add-dialog list) hold **every judgement** and are
   tested; `scene/splatLayer.ts` holds only canvas creation, the `SparkRenderer`,
-  the stream load, `mesh.visible`, the `SplatEdit` lifecycle and disposal, and is
-  verified by running the app. When a decision looks like it belongs in the layer,
-  that is the signal it belongs in one of the other two — `clipBandToSdfBox` is the
-  example: the layer could have built its SDF box inline, and then the band → box
-  mapping would have had no test.
+  the stream load, `mesh.visible`, the depth-only redraw (`writeDepth`), the
+  `SplatEdit` lifecycle and disposal, and is verified by running the app. When a
+  decision looks like it belongs in the layer, that is the signal it belongs in one
+  of the other two — `clipBandToSdfBox` is the example: the layer could have built
+  its SDF box inline, and then the band → box mapping would have had no test.
+  `writeDepth` is the same split done deliberately: the layer owns the *draw* (bind
+  the target, `autoClear` off, splat group only) and owns no decision, because
+  **whether** there is anything to draw is `needsSplatDepthPass` over
+  `{ sparkReady, meshCount, visible }` in `splats.ts`, where it is tested.
 - **A few suites drive the real engine on the CPU backend** — `coverageRun`,
   `optimizeAcceptance`, `optimizeObjective`, `placementParity` — because some contracts
   are only meaningful against the engine's own answer. `placementParity` is the model:
@@ -232,6 +236,25 @@ the kind and id, since the `DeletableKind`s *are* the selectable kinds.
   --experimental-strip-types`), and a parameter property is a *syntax* it refuses:
   `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`. `tsc --noEmit` and Vite both accept it, so this
   surfaces only as a whole test file failing to load. Declare the field and assign it.
+- **A pass that renders to a target owns two things Three.js will otherwise undo:
+  `autoClear` and the colour space.** `render` clears whatever target is bound, so a
+  pass that accumulates into one (the coverage fog max-blending into its own target,
+  `splatLayer.writeDepth` adding depth to the scene target) must save `autoClear`,
+  set it `false`, and restore it. And Three.js applies its output colour-space
+  transform **only** when rendering to the canvas: a render target receives raw
+  linear values, so the final full-screen pass that reaches the canvas has to do the
+  conversion itself (`#include <colorspace_fragment>` in `fogCompositor.ts`). Both
+  of these have already shipped as bugs, and neither raises an error — the first
+  shows as a flickering or vanished layer, the second as a washed-out frame.
+  `../specs/volumetric_rendering.md` §4 is the mechanism.
+- **Depth for the fog comes from sharing a `DepthTexture`, not from re-traversing the
+  scene.** The fog's colour target is constructed with the *scene* target's
+  `depthTexture`, so geometry occludes voxels with no occluder list and no second
+  scene pass. The cost is that anything which draws colour without writing depth is
+  invisible to it: the 3DGS captures deliberately skip depth writes (a Gaussian has
+  no surface), which is why they get a second, depth-only redraw between the scene
+  pass and the fog pass. If a new layer starts being painted over by the fog, that is
+  the reason to check first.
 - **Never `setFromPoints` a geometry that already has a `position` attribute.**
   It writes into the existing buffer and refuses to grow it, dropping the overflow
   with a console warning — so a line whose vertex count *grows* (the draw mode's

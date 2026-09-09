@@ -16,19 +16,27 @@ SDK engine layer  (engine/useEngine.ts → WorkerClient → worker.ts → Covera
       run off-thread in a Web Worker
 ```
 
-The viewport is **one canvas, one `WebGLRenderer`, one scene** (`spec.md` §2.3,
-`gaussian_splats.md` §4):
+The viewport is **one canvas, one `WebGLRenderer`, one scene** for everything that
+lives in the world (`spec.md` §2.3, `gaussian_splats.md` §4):
 
 ```
 .viewport
   canvas.viewport-main   WebGLRenderer (WebGL2)
       ├─ geometry group (ClippingGroup → per-material clippingPlanes)
-      ├─ gizmo sets, grid, light rig, coverage fog
+      ├─ gizmo sets, grid, light rig
       └─ splat group  ← SparkRenderer, one SplatMesh per row, the clip SplatEdit
 ```
 
-Everything shares one depth buffer, so a capture is occluded by the walls in front
-of it like any other scene content. WebGL2 is not a fallback here — it is the
+The coverage fog is the one thing **not** in that scene. It owns its own
+`THREE.Scene` and draws in its own pass, so a frame is three steps — scene → fog →
+composite — rather than one `render` call: `fogCompositor.ts` (below) draws the
+scene above to an offscreen target, accumulates the fog into a second target sharing
+that target's `DepthTexture`, and composites the two. That is why the fog takes no
+draw order and has no entry in `renderOrder.ts` (`volumetric_rendering.md` §4).
+
+Everything in the scene shares one depth buffer, so a capture is occluded by the
+walls in front of it like any other scene content — and the fog, testing against
+that same depth through the shared `DepthTexture`, is occluded by both. WebGL2 is not a fallback here — it is the
 render backend, fixed by Spark's `WebGLRenderer` requirement and confirmed by
 measurement against WebGPU (see DECISIONS.md). **WebGPU is still used, for
 compute**: the SDK holds its own device in the worker and shares nothing with the
@@ -226,7 +234,10 @@ default" — see DECISIONS.md).
   and a scene *opened* with a section already clipping would otherwise draw its
   captures uncut. Its `releaseAll()` is public because "the scene was replaced"
   is not visible from here: two scene files in one folder share an asset loader,
-  so App's import path calls it (`SceneView.releaseSplats`). Each row gets an **anchor**
+  so App's import path calls it (`SceneView.releaseSplats`). Also `writeDepth()`, the
+  depth-only redraw of the splat group that gives the fog pass an occluder where a
+  capture stands — captures are drawn `depthWrite: false` to keep Spark's blending, so
+  they leave no depth of their own (`gaussian_splats.md` §4.5). Each row gets an **anchor**
   `Object3D` carrying its registration with the `SplatMesh` at identity beneath
   it, which is what makes a still-loading or hidden capture a stable
   `TransformControls` target and lets one decode serve several rows at different
@@ -388,13 +399,21 @@ default" — see DECISIONS.md).
   the answer arrives already resolved and `CoverageRun.probeQueries` reads it.
   Pure, no deps.
 - `volumetric.ts` — instanced-cube GLSL volumetric renderer + pure-TS
-  slab/chord/composite reference, which stays the tested truth the shader mirrors. Exposes `setRenderOrder` (draw order forwarded to
-  the mesh, re-applied across buffer reallocation); the primitive stays agnostic to
-  *which* order — that comes from `renderOrder.ts`.
+  slab/chord/alpha/composite reference, which stays the tested truth the shader
+  mirrors. Owns its own `THREE.Scene`: the fog is **not** in the viewport scene, it
+  renders in its own pass.
+- `fogCompositor.ts` — that pass. The scene draws to an offscreen target, the fog
+  max-blends into a second target sharing its `DepthTexture`, and a full-screen
+  triangle composites the two. Max among the fog *and* alpha over the scene are both
+  required and cannot come from one blend equation — the distinction that decides
+  whether the overlay is visible at all on a large scene (DECISIONS.md). Because the
+  fog is alone in its pass it takes **no** draw order and has no entry in
+  `renderOrder.ts`; geometry occludes it through the shared `DepthTexture` instead.
 - `renderOrder.ts` — single source of truth for the draw order of the scene's
-  transparent layers (section heatmap plane → coverage fog → volume fill). The plane
-  is the only depth writer, so it draws first and the depth test resolves the rest
-  per viewpoint (spec §9, §13.5). See DECISIONS.md's transparent-layer draw-order entry.
+  **in-scene** transparent layers (section heatmap plane → volume fill). The plane is
+  the only depth writer, so it draws first and the depth test resolves the rest per
+  viewpoint (spec §13.5). The coverage fog is deliberately absent — it is not in this
+  scene. See DECISIONS.md's transparent-layer draw-order entry.
 - `coverageOverlay.ts` — maps an `AggregateResult`'s `leafCounts` → volumetric
   voxels per mode. The per-voxel camera *count* is reduced in the SDK now (§19.2),
   so this module counts nothing itself — it retains the merged leaf list **keyed

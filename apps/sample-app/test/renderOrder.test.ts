@@ -1,32 +1,29 @@
 /**
- * Tests for the transparent-layer draw-order convention (spec §9, §13.5;
- * volumetric_rendering.md §4; sampling_volumes.md §5). The three overlapping
- * transparent layers — section heatmap plane, coverage fog, sampling-volume fill —
- * are ordered so the depth-writing plane draws first and the fog/fill depth-test
- * against it. This pins the values in one place (`scene/renderOrder.ts`) and checks
- * each consumer actually applies them.
+ * Tests for the transparent-layer draw-order convention (spec §13.5;
+ * sampling_volumes.md §5). The two overlapping in-scene transparent layers —
+ * section heatmap plane and sampling-volume fill — are ordered so the depth-writing
+ * plane draws first and the fill depth-tests against it. This pins the values in one
+ * place (`scene/renderOrder.ts`) and checks each consumer actually applies them.
+ *
+ * The **coverage fog is not one of them**: it renders in its own pass and composites
+ * over the finished scene (`volumetric_rendering.md` §4), so it has no entry here and
+ * no draw order to assert. `test/volumetric.test.ts` covers its compositing instead.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { RenderOrder } from '../src/scene/renderOrder.ts';
-import { VoxelVolumetricRenderer } from '../src/scene/volumetric.ts';
-import { CoverageOverlay } from '../src/scene/coverageOverlay.ts';
 import { SectionGizmoSet } from '../src/scene/sectionGizmos.ts';
 import { SamplingVolumeGizmoSet } from '../src/scene/samplingVolumeGizmos.ts';
 import type { Section } from '../src/scene/sectionHeatmap.ts';
 import type { SamplingVolume } from '../src/scene/samplingVolumes.ts';
 
-test('draw order is plane < fog < fill so the depth writer goes first', () => {
+test('draw order is plane < fill so the depth writer goes first', () => {
   assert.ok(
-    RenderOrder.sectionPlane < RenderOrder.coverageFog,
-    'section plane must draw before the fog',
+    RenderOrder.sectionPlane < RenderOrder.volumeFill,
+    'section plane must draw before the volume fill',
   );
-  assert.ok(
-    RenderOrder.coverageFog < RenderOrder.volumeFill,
-    'fog must draw before the volume fill',
-  );
-  // The draft is what the user is doing right now, so it draws above all three
+  // The draft is what the user is doing right now, so it draws above both
   // (`camera_placement.md` §6.2; its materials switch off `depthTest` to match).
   assert.ok(
     RenderOrder.volumeFill < RenderOrder.draftOverlay,
@@ -34,33 +31,14 @@ test('draw order is plane < fog < fill so the depth writer goes first', () => {
   );
 });
 
-test('volumetric renderer applies setRenderOrder and keeps it across reallocation', () => {
-  const renderer = new VoxelVolumetricRenderer();
-  renderer.setRenderOrder(RenderOrder.coverageFog);
-  assert.equal(renderer.object.children[0].renderOrder, RenderOrder.coverageFog);
-
-  // Grow past INITIAL_CAPACITY (1024) to force a mesh rebuild; the order must
-  // survive it (otherwise the fog would silently revert to 0 the first time the
-  // buffers grow).
-  const voxels = Array.from({ length: 1100 }, (_, i) => ({
-    center: [i, 0, 0] as [number, number, number],
-    size: 1,
-    intensity: 1,
-    color: [1, 0, 0] as [number, number, number],
-  }));
-  renderer.addVoxels(voxels);
-  assert.equal(
-    renderer.object.children[0].renderOrder,
-    RenderOrder.coverageFog,
-    'render order lost when the instance buffers were rebuilt',
+test('the coverage fog has no draw order — it is not an in-scene layer', () => {
+  // Guards the two-target pass against a well-meaning re-add: the fog is alone in
+  // its own scene, so an entry here would order it against nothing while implying
+  // it participates (`volumetric_rendering.md` §4).
+  assert.ok(
+    !('coverageFog' in RenderOrder),
+    'the fog composites over the scene; it takes no place in the layer table',
   );
-  renderer.dispose();
-});
-
-test('coverage overlay draws its fog at the fog render order', () => {
-  const overlay = new CoverageOverlay();
-  assert.equal(overlay.object.children[0].renderOrder, RenderOrder.coverageFog);
-  overlay.dispose();
 });
 
 test('section heatmap plane draws at the section-plane render order', () => {

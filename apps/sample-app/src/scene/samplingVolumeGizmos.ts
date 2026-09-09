@@ -93,8 +93,10 @@ export class SamplingVolumeGizmoSet extends PickableGizmoSet<VolumeEntry> {
       new THREE.MeshBasicMaterial({ color: FILL_COLOR, transparent: true, opacity: 0.1, depthWrite: false }),
     );
     fill.name = id;
-    // Draw last of the transparent layers so the fill tints over the coverage fog,
-    // while still occluded by any section plane in front of it (`renderOrder.ts`).
+    // Draw last of the in-scene transparent layers, still occluded by any section
+    // plane in front of it (`renderOrder.ts`). The coverage fog is not one of them —
+    // it composites over this fill in its own pass (`volumetric_rendering.md` §4),
+    // so the fog tints the fill rather than the other way round.
     fill.renderOrder = RenderOrder.volumeFill;
 
     const edges = new THREE.LineSegments(

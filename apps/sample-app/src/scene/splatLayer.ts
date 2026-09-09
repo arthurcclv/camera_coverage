@@ -21,7 +21,7 @@
  */
 // Named imports, not a namespace one, so rollup can tree-shake `three` down to
 // the handful of classes this module actually needs.
-import { Group, Object3D, type WebGLRenderer } from 'three';
+import { Group, Object3D, type Camera, type WebGLRenderer } from 'three';
 import type {
   PackedSplats,
   SparkRenderer,
@@ -35,6 +35,7 @@ import type { Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 import {
   basename,
   decodedSplatCount,
+  needsSplatDepthPass,
   splatDecodeFailure,
   type SdfBox,
   type SplatLoadFailure,
@@ -42,6 +43,7 @@ import {
   type SplatObject,
 } from './splats.ts';
 import type { GizmoAttachable } from './gizmoSet.ts';
+import type { SplatDepthWriter } from './fogCompositor.ts';
 
 /** The viewport background (§4.2) — owned by `scene.background`, as it always was. */
 export const VIEWPORT_CLEAR_COLOR = 0x1a1d22;
@@ -92,7 +94,7 @@ function progressFraction(event: ProgressEvent): number | null {
  * The splat layer. Created eagerly by `createViewport` (one code path whether or
  * not a scene has a capture, §4.2) and added to the viewport's scene.
  */
-export class SplatLayer implements GizmoAttachable {
+export class SplatLayer implements GizmoAttachable, SplatDepthWriter {
   /**
    * The layer's group inside the viewport scene — the `SparkRenderer`, the row
    * anchors, and the clip edit, nothing else. Hiding the layer is this group's
@@ -158,6 +160,50 @@ export class SplatLayer implements GizmoAttachable {
   onLoadStates(handler: (states: ReadonlyMap<string, SplatLoadState>) => void): void {
     this.loadStateHandler = handler;
     this.emitLoadStates();
+  }
+
+  /**
+   * Draw the captures **again, invisibly**, so the coverage fog has something to
+   * depth-test against (`volumetric_rendering.md` §4, `fogCompositor.ts`).
+   *
+   * The visible pass keeps `depthWrite: false`, which is what preserves Spark's own
+   * back-to-front blending — turning it on there makes the capture break into
+   * hard-edged plates, and Spark's own docs warn about it. This pass writes depth
+   * with colour off instead, so the fog is occluded by a capture in front of it and
+   * the capture itself renders exactly as before.
+   *
+   * Three details, each of which silently produced a wrong frame while this was
+   * being built:
+   *
+   *  - **It must run after the scene pass.** Spark generates its splats on the
+   *    frame's first render, so a genuine *pre*-pass draws nothing and lays no
+   *    depth — a no-op that looks like the feature simply not working.
+   *  - **Only the splat group is drawn**, not the whole scene. Re-rendering the
+   *    scene would blend every transparent gizmo, section plane and volume fill a
+   *    second time on top of itself.
+   *  - **`autoClear` is off.** `render` clears the bound target otherwise, throwing
+   *    away the scene colour and depth this pass exists to add to.
+   */
+  writeDepth(renderer: WebGLRenderer, camera: Camera): void {
+    // Nothing loaded, or the layer is hidden: no depth to contribute, and the fog
+    // should behave exactly as it did before captures existed (`splats.ts`).
+    const spark = this.sparkRenderer;
+    const wanted = needsSplatDepthPass({
+      sparkReady: spark !== null,
+      meshCount: this.meshes.size,
+      visible: this.group.visible,
+    });
+    if (!wanted || !spark) return; // `|| !spark` narrows the type; `wanted` already covers it
+
+    const material = spark.material;
+    const prevAutoClear = renderer.autoClear;
+    material.colorWrite = false;
+    material.depthWrite = true;
+    renderer.autoClear = false;
+    renderer.render(this.group, camera);
+    renderer.autoClear = prevAutoClear;
+    material.colorWrite = true;
+    material.depthWrite = false;
   }
 
   /** The row's `TransformControls` attach target — its anchor (§5.1, §7). */

@@ -267,7 +267,10 @@ export class SceneView {
     viewport.scene.add(this.volumeGizmos.group);
     viewport.scene.add(this.constraintGizmos.group);
     viewport.scene.add(this.placementOverlay.group);
-    viewport.scene.add(this.overlay.object);
+    // The coverage fog is deliberately **not** added to the viewport scene: it
+    // max-blends into its own target and is composited over the scene
+    // (`volumetric_rendering.md` §4, `fogCompositor.ts`).
+    viewport.setFogScene(this.overlay.scene);
 
     // A viewport click raycasts each pickable set and the nearest hit wins
     // (`pick.ts`); attach maps a selection kind straight to the set that owns its

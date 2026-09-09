@@ -41,11 +41,14 @@ Technologies used by the demo app and the role each plays. See
 
 The coverage overlay is a single `InstancedMesh` of unit cubes (one instance per
 voxel) with per-instance attributes and a GLSL slab/chord fragment shader — one
-draw call, order-independent.
+draw call, order-independent. It renders in a **pass of its own** and is composited
+over the scene (`scene/fogCompositor.ts`, `volumetric_rendering.md` §4), so it is
+not part of the scene's transparent-layer stack.
 
 **One renderer, one depth buffer.** Splats draw into the viewport's own
-`WebGLRenderer` and its own scene, so geometry occludes captures and the coverage
-fog max-blends against them in the shared framebuffer (`gaussian_splats.md` §4.1).
+`WebGLRenderer` and its own scene, so geometry occludes captures
+(`gaussian_splats.md` §4.1) — and that one depth buffer, shared with the fog pass as
+a `DepthTexture`, is also what makes geometry occlude the fog.
 There is a single `three` build in the bundle, so the app carries no alias, no
 `optimizeDeps` carve-out, and no two-copies-of-`three.core.js` hazard. Spark itself
 stays out of the main chunk, dynamically imported on the first capture load.

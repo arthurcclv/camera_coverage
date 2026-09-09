@@ -249,6 +249,28 @@ export function decodedSplatCount(packed: DecodedSplats): number {
   return packed.numSplats > 0 ? packed.numSplats : packed.lodSplats?.numSplats ?? 0;
 }
 
+/**
+ * Whether the coverage fog's depth pass has any capture depth to draw
+ * (`gaussian_splats.md` §4.5).
+ *
+ * The pass exists only to give the fog an occluder where a capture stands. With
+ * nothing decoded yet, or the whole layer hidden (§5.2), there is no such capture —
+ * and then the pass must be **skipped outright**, not run empty: a scene without
+ * captures has to cost nothing and the fog has to behave exactly as it did before
+ * captures existed. Kept here, pure, because it is a judgement; the render calls it
+ * gates cannot run under `node --test`.
+ */
+export function needsSplatDepthPass(layer: {
+  /** Has Spark's renderer been constructed? It arrives with the first load (§4.2). */
+  sparkReady: boolean;
+  /** Decoded captures currently in the group. */
+  meshCount: number;
+  /** The splat group's own visibility — the Splats eye-menu row (§5.2). */
+  visible: boolean;
+}): boolean {
+  return layer.sparkReady && layer.meshCount > 0 && layer.visible;
+}
+
 /** A world-space, axis-aligned box for a Spark SDF erase (`gaussian_splats.md` §5.4). */
 export interface SdfBox {
   /** Box centre in world meters. */

@@ -89,10 +89,12 @@ other camera shows just its body dot. So the default (blue `0x7fb8e6`) frustum
 color above is effectively only a fallback — a visible frustum is always the
 selected camera's (yellow, or red if that camera is also flagged).
 
-The overlay is intensity-modulated volumetric fog (a single instanced-cube GLSL
-pass), not opaque voxels — see [DECISIONS.md](./DECISIONS.md). Hue is
-user-controlled via a rainbow spectrum slider; intensity encodes coverage
-fraction (Coverage mode) or is flat (Blind-spots mode).
+The overlay is translucent volumetric fog, not opaque voxels: instanced-cube GLSL,
+max-blended among its own voxels and then composited **over** the scene (see
+[DECISIONS.md](./DECISIONS.md)). Hue is user-controlled via a rainbow spectrum
+slider; intensity becomes the voxel's alpha, and a pixel shows the strongest voxel
+along the ray, encoding coverage fraction (Coverage mode) or is flat (Blind-spots
+mode).
 
 ### 3D viewport lighting (spec §2.3.1)
 

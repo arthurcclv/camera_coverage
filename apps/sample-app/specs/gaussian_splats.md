@@ -275,8 +275,10 @@ exposes is a `WebGPURenderer` API surface and not these internals.
 depthWrite: false` by default. Drawn into the same framebuffer as the modelled
 geometry, a capture is **occluded by the walls in front of it** and shows through
 where nothing stands in the way, in one frame, at the correct depth. The coverage fog
-(§9) max-blends against the capture in that same framebuffer, exactly as it does
-against geometry (§4.5).
+(§9) composites over the capture in its own pass, exactly as it does over geometry;
+because `depthWrite: false` also means a capture contributes no depth, making a
+capture occlude the fog behind it takes one depth-only redraw of the splat group
+(§4.5).
 
 The `SparkRenderer` and the per-row anchors live in a **`Group` inside the main
 scene**, so they share its camera, its depth buffer, and its layer masks. There is no
@@ -294,9 +296,12 @@ and no layer beneath to composite over.
 - **One canvas, one `setSize`, one clear.** The existing `ResizeObserver` and clear
   colour need no splat-specific handling, and two canvases cannot drift because there
   is one.
-- **One animation loop, one `render` call.** `SparkRenderer` is an `Object3D` in the
-  scene graph; it draws when the scene draws. Ordering against the coverage overlay is
-  the ordinary `renderOrder` question (`renderOrder.ts`), not a canvas-stacking one.
+- **One animation loop, one scene traversal.** `SparkRenderer` is an `Object3D` in the
+  scene graph; it draws when the scene draws. The frame does make more than one
+  `render` call — the scene pass, the depth-only splat redraw (§4.5), the fog pass and
+  the composite (`volumetric_rendering.md` §4) — but they all traverse this one scene
+  with this one camera, so nothing can drift between them and none of it is
+  canvas stacking.
 - The splat group is **not pickable**: splats are never viewport-pickable (§6.5), so
   each `SplatMesh` is built `raycastable: false` and the picker skips the group.
 - `dispose()` tears down the splat group, every `SplatMesh`, the `SparkRenderer`, and
@@ -369,20 +374,49 @@ draw-call or triangle count is **not** evidence that a capture is visible.
 
 ### 4.5 Coverage fog over a capture
 
-Geometry, coverage fog and captures share one framebuffer and one depth buffer, so
-`volumetric_rendering.md` §4's "the scene colour acts as a per-channel floor" holds
-over a capture exactly as it holds over a wall. Where fog and capture overlap, the
-`max` composite keeps whichever is brighter per channel: the capture is **tinted** by
-the fog, not covered by it. No measurement and no caveat are needed — this is the same
-path the overlay has always taken over geometry.
+Geometry and captures share one framebuffer and one depth buffer, and the coverage
+fog is composited **over** that result in its own pass, depth-tested against the
+same depth (`volumetric_rendering.md` §4). A capture is therefore tinted by the fog
+in proportion to each voxel's intensity, exactly as a wall is — a bright capture
+cannot wash the overlay out, and a deep column of fog cannot hide the capture.
 
-A bright capture can still make the fog hard to read, and the controls for that
-already exist and are already in the user's hands:
+A capture also **occludes** fog standing behind it, exactly as a wall does — and
+that takes one extra pass, because a capture writes no depth of its own. Spark's
+splat material is `depthTest: true, depthWrite: false` (§4.1): a Gaussian is a soft
+blob with no surface, and letting Gaussians depth-reject one another breaks their
+own back-to-front blending into hard-edged plates. So the visible pass leaves the
+`DepthTexture` untouched where a capture stands, and the fog pass — which tests
+against exactly that depth (`volumetric_rendering.md` §4) — would paint over the
+capture.
+
+The layer therefore draws its captures a **second time, depth only**: the shared
+Spark material with `colorWrite` off and `depthWrite` on, into the same target, both
+flags restored immediately after. The visible capture renders bit-identically; the
+fog gains an occluder. Three constraints on that pass, each of which silently
+produces a wrong frame if broken:
+
+- **it runs *after* the scene pass, not before** — Spark generates its splats on the
+  frame's first render, so a genuine pre-pass draws nothing and lays no depth, a
+  no-op indistinguishable from the feature being absent;
+- **only the splat group is drawn**, never the whole scene — a second full traversal
+  would blend every transparent gizmo, section plane and volume fill on top of
+  itself;
+- **`autoClear` is off** — `render` otherwise clears the target, discarding the
+  scene colour and depth this pass exists to add to.
+
+It is skipped outright when there is no capture loaded or the layer is hidden (§5) —
+the gate is `needsSplatDepthPass` in `scene/splats.ts`, kept pure and tested there
+rather than inline in the layer — so a scene without captures pays nothing and the
+fog behaves exactly as it did before captures existed.
+
+Reading a coverage overlay against a photographic backdrop is still busy, and the
+controls for that already exist and are already in the user's hands:
 
 - the eye menu's **Coverage** row (`spec.md` §2.4) turns the overlay off outright —
   the natural pairing is Coverage on to judge coverage, Coverage off to read the site;
-- **Overlay intensity scale** (`spec.md` §9.2, `OverlayControls`) dials the fog up
-  against a bright backdrop, which is exactly the knob it already is.
+- **Overlay intensity scale** (`spec.md` §9.2, `OverlayControls`) dials the fog's
+  density up or down against a busy backdrop, which is exactly the knob it already
+  is.
 
 Auto-coupling the overlay's appearance to whether a splat is visible is rejected on
 the same ground as auto-ghosting the geometry (§5.3): it makes one layer's look depend
@@ -807,10 +841,19 @@ Tested under `node --test`:
 - **`nodeEnabled`** (`scene/sceneTree.ts`) — every node kind routes to its own
   `enabled` lookup and a group header is never dimmed, which is what replaced the
   hierarchy row's nested ternary chain ending in a bare `true`.
+- **`needsSplatDepthPass`** — the skip gate on the depth-only redraw (§4.5), over
+  `{ sparkReady, meshCount, visible }`: true only with Spark up, at least one mesh
+  and the layer visible; false with no decoded capture, false with the layer hidden
+  (an invisible occluder would punch capture-shaped holes in the fog), and false
+  before Spark loads. It is a pure function precisely so the pass's *whether* is
+  tested while its *draw* stays in the untestable layer below.
 
 Not covered by tests, and deliberately kept thin: `splatLayer.ts` — canvas creation,
-`SparkRenderer` construction, the stream load, `mesh.visible`, the `SplatEdit`
-lifecycle, and disposal.
+`SparkRenderer` construction, the stream load, `mesh.visible`, the depth-only redraw
+(`writeDepth`, §4.5), the `SplatEdit` lifecycle, and disposal. `writeDepth` is thin
+in the sense that matters here: it binds the target, flips `colorWrite`/`depthWrite`
+and `autoClear`, draws the splat group and restores them — it decides nothing, because
+the decision is `needsSplatDepthPass` above.
 
 **What the spikes verified instead**, for the parts no unit test can reach — recorded
 here so a later change knows what was actually measured rather than assumed
@@ -843,7 +886,7 @@ here so a later change knows what was actually measured rather than assumed
 | §5.5 Hierarchy | Add the `{ kind: 'splat' }` node and the **Splats** umbrella; root order → Cameras → Probes → Sections → Zones → Constraints → **Splats**; `buildSceneTree`'s new `splats` parameter; the `'splat'` selection case; the row checkbox and load badge; the filename label fallback as the documented exception to the ordinal rule; "+" → **3D Gaussian Splat…** as the one dialog-opening and conditionally-disabled entry; Duplicate/Delete rules; **no splat action marks the result stale**. |
 | §5.5.1 Reordering | Add **splat** to the draggable kinds. |
 | §8.1 Staleness | State that splats are never analysis inputs, so no splat action marks the result stale (mirrors `camera_placement.md` §1.1). |
-| §9.2 Overlay intensity | Note that the intensity scale is also the dial for fog read over a splat capture, which the fog **tints** in the shared framebuffer (§4.5). |
+| §9.2 Overlay intensity | Note that the intensity scale is also the dial for fog read over a splat capture, which the fog **tints** when it composites over the scene (§4.5). |
 | §13.9 Clip | Extend the scope sentence: the clip now also cuts **splats**, by **one** world-space SDF erase on the splat group rather than the geometry's material clipping planes (§5.4). Still no recompute. |
 | §14.1 `Scene` model | Add `splats: SplatObject[]`; `defaultScene()` seeds it empty. |
 | §14.2 Folder layout | Note that `assets/` also holds **capture files** (`.spz`/`.sog`/`.ply`/`.splat`/`.ksplat`) and that a splat `src` resolves by the same relative-path rule as a `gltf` `src`. |

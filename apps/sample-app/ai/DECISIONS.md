@@ -6,6 +6,110 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The coverage fog is a two-target pass: max among itself, alpha over the scene
+
+Behavior in [`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md)
+§1, §3, §4; [`../specs/spec.md`](../specs/spec.md) §9.2;
+[`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.5.
+
+**The bug.** On a large scene the coverage overlay was computed correctly, drawn
+correctly, and **completely invisible**. Reproduced on an 80 × 80 × 20 m room:
+1,076,895 valid voxels, 45.6% coverage, nothing on screen.
+
+**The cause.** The fog blended with `MaxEquation` directly into the main
+framebuffer. Max blends against *whatever is already there*, so the scene colour is
+a per-channel floor: fog only appears where it is brighter than the scene, channel by
+channel. Per-voxel coverage falls as the workspace grows — 9.2% per camera on that
+room against ~45% in the demo room — so the fog drops below a lit floor on every
+channel and vanishes. The diagnostic that pinned it: at `intensityScale` 2.0 the fog
+appeared **only over the dark grid lines** and nowhere on the floor.
+
+**Why it surfaced with the WebGL2 migration.** It had been masked.
+`WebGPURenderer`'s WebGL2 backend rejected the equation outright — `INVALID_ENUM:
+blendEquationSeparate: invalid mode` every frame — and fell back to additive, which
+is visible. The classic `WebGLRenderer` implements `MaxEquation` correctly, so the
+migration was the first time max blending actually took effect on a WebGL path. The
+blend was always wrong; only the fallback was hiding it.
+
+**The false start, recorded because it is the instructive part.** The first fix
+replaced max with plain source-over alpha into the main framebuffer. That does fix
+visibility — no per-channel floor — but it silently swaps one failure for another:
+alpha accumulates as `1 - (1 - a)^n` through the depth of the workspace, so the
+overlay became an **opaque wall** and the coverage field stopped being readable as a
+field. Dropping `DEFAULT_INTENSITY_SCALE` to a measured 0.15 made it *tolerable* and
+still wrong — the overlay is supposed to show the strongest voxel along a ray, and
+depth of field is supposed to cost nothing.
+
+**The actual constraint.** The fog needs two blend rules at once — max among its own
+voxels, alpha over the scene — and one draw call has one. Any single-pass answer
+gives up one of them.
+
+**Decision.** A two-target pass (`scene/fogCompositor.ts`): the scene renders to an
+offscreen target, the fog max-blends into a second colour target cleared to
+`(0,0,0,0)`, and a full-screen triangle composites `scene * (1 - a) + fogRgb`. Max is
+safe in that target because it holds *only fog*, so there is no scene colour to lose
+a max against; and the composite has no per-channel floor.
+
+Two details make it cheap and correct:
+
+- **The fog target shares the scene target's `DepthTexture`.** The fog depth-tests
+  against exactly the depth the main pass wrote, so geometry occludes voxels with
+  **no second traversal of the scene** and no "which objects are occluders" list.
+  The fog pass clears colour only — clearing depth would let every voxel through.
+- **The fragment is premultiplied** (`color * alpha`). The overlay is a single hue
+  (`spec.md` §9), so `max(C·aᵢ) = C·max(aᵢ)`; emitting straight colour would max the
+  hue independently of the alpha and desaturate the winner.
+
+`DEFAULT_INTENSITY_SCALE` goes back to **1** — max does not accumulate, so a
+fully-covered voxel is opaque and a 9% one is a 9% wash however deep the workspace.
+
+**What it costs.** One full-screen colour target, one full-screen triangle, and the
+blit of the scene through it. The main scene now renders offscreen rather than
+straight to the canvas.
+
+**Two traps this pass walked into, both caught only by looking at the app.** Neither
+raises an error, and the unit tests cannot see either — they live in renderer state,
+not in the reference math:
+
+- `renderer.render` clears the bound target unless `autoClear` is off, so pass 2
+  wiped the very depth it exists to read. Presented as "geometry does not block fog".
+- Rendering the scene to a target yields **linear** colour, because Three.js applies
+  its output transform only for the canvas. The composite has to convert
+  (`#include <colorspace_fragment>`); without it the whole scene, not just the fog,
+  renders darker. Presented as "the scene looks darker than before".
+
+**Consequence: the fog leaves the transparent-layer table.** It is alone in its own
+scene and its own pass, so a draw order on its mesh would sequence it against
+nothing. Occlusion comes from the shared depth buffer instead, per viewpoint, and it
+resolves the two former neighbours *differently*: the section plane writes depth and
+so hides fog behind it, while the volume fill does not (`depthWrite: false`) and is
+therefore tinted **by** the fog — the reverse of the old "the fill tints over the
+fog". `RenderOrder.coverageFog` and the primitive's `setRenderOrder` are both
+**removed** rather than kept as inert: an entry in that table asserts participation,
+and a knob that changes nothing is worse than an absent one. `test/renderOrder.test.ts`
+now asserts the *absence*, so a well-meaning re-add fails.
+
+**Consequence: captures need a depth-only redraw.** A 3DGS capture is drawn
+`depthWrite: false` — a Gaussian is a soft blob with no surface, and letting Gaussians
+depth-reject one another breaks Spark's back-to-front blending into hard-edged plates
+— so pass 1 leaves the `DepthTexture` empty where a capture stands and the fog would
+paint straight over it. `SplatLayer.writeDepth()` redraws the splat group with
+`colorWrite` off and `depthWrite` on, **after** the scene pass (Spark generates its
+splats on the frame's first render, so a genuine pre-pass is a silent no-op), group
+only (a second full traversal would re-blend every transparent gizmo onto itself), and
+with `autoClear` off. Specified in `gaussian_splats.md` §4.5. The alternative — accept
+that captures do not occlude fog — was rejected: a wall behind a capture already hides
+the fog, so a capture that does not is a visible inconsistency, not a simplification.
+
+**Naming.** `CompositeMode` was `'additive' | 'max'` when it selected a blend
+equation. It selects only the path term now, so it is `'soft' | 'flat'`, and the
+pure-TS reference is `pathTerm`/`voxelAlpha`/`compositeMax`/`compositeOverScene` in
+place of `voxelContribution`/`maxContribution`/`compositeContributions`. Note the
+mode is now a **shader uniform only** — no blend state, no material rebuild — which
+is why `applyBlend` is inlined into `buildMaterial` rather than kept as a hook.
+
+---
+
 ## The viewport renders on WebGL2; WebGPU is compute-only
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.3, §13.9;
@@ -20,7 +124,7 @@ behind every mesh. The rewrite turned out to be smaller than assumed, and the re
 for keeping `WebGPURenderer` turned out not to be true.
 
 **The premise that failed.** `spec.md` §2.3 chose `WebGPURenderer` *for raster
-throughput on the coverage overlay's additive overdraw*. Measured on the reference
+throughput on the coverage overlay's overdraw*. Measured on the reference
 site with the overlay on, over three 180-frame windows each:
 
 | | WebGPU | WebGL2 |
@@ -47,10 +151,14 @@ coupled.
 
 **What it buys: one depth buffer.** Spark's splat material is `depthTest: true,
 depthWrite: false`, so drawn into the viewport's own renderer a capture is occluded
-by the walls in front of it and occludes what stands behind it. The coverage fog
-max-blends against a capture in that shared framebuffer exactly as it does against
-geometry, which retires the "the fog covers the capture" caveat in
-`gaussian_splats.md` §4.5 outright.
+by the walls in front of it and occludes what stands behind it.
+
+*Superseded in part by the two-target fog pass at the top of this file:* the fog does
+**not** max-blend against a capture in a shared framebuffer — it composites over the
+scene in its own pass, and because `depthWrite: false` also means a capture writes no
+depth, making a capture occlude the fog behind it needs the depth-only redraw
+specified in `gaussian_splats.md` §4.5. What survives here is the shared depth buffer
+itself, which is what that redraw writes into.
 
 **What it costs, and what it deletes.** The port itself:
 
@@ -197,7 +305,7 @@ predicted, the overshoot being the splats' own radius.
 `scene.background` used to carry — and the WebGPU canvas is `alpha: true` with
 `scene.background = null`. Measured on the real `volumetric.ts` material, the
 composited result differs from the old opaque-background one by **0.07/255 in
-`max` mode and 0.12/255 in `additive`**: invisible in both. The layer is
+`flat` mode and 0.12/255 in `soft`**: invisible in both. The layer is
 constructed unconditionally so there is one code path whether or not a scene has
 a capture, which also means the classic `three` build lands in the main chunk
 (~350 kB raw / ~85 kB gzipped) — a cost the spec accepted on the belief that
@@ -417,12 +525,14 @@ is still omitted on write when blank, so an unnamed splat has no `name` key at a
 Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.5;
 [`../specs/spec.md`](../specs/spec.md) §9.2.
 
-Geometry and the coverage fog still share one framebuffer, so
-`volumetric_rendering.md` §4's "the scene color acts as a per-channel floor" holds
-exactly as before for everything the engine measures. A **capture** is on the layer
-*beneath*, so the fog no longer max-blends against it — it composites **over** it.
-Where the two overlap, the fog covers the capture rather than tinting it, more
-strongly at higher intensity.
+*The mechanics below are superseded by the two-target fog pass at the top of this
+file; the decision — document it, do not mechanise it — stands unchanged.* As
+written, this entry described a two-canvas era: the fog max-blended against geometry
+in a shared framebuffer, where "the scene color acts as a per-channel floor", and a
+capture sat on the layer *beneath*, so the fog covered it rather than tinting it.
+Neither half is true now. The fog composites **over** the whole scene with alpha, so
+a capture is **tinted** in proportion to each voxel's intensity exactly as a wall is,
+and a capture in front of a voxel hides it (`gaussian_splats.md` §4.5).
 
 **Decision.** Document it; do not mechanise it. The controls it calls for already
 exist and are already in the user's hands: the eye menu's **Coverage** row turns
@@ -3125,14 +3235,19 @@ Only the section plane writes depth (`depthWrite:true`); the fog and fill are
 `depthWrite:false`/`depthTest:true`. So the plane must draw **first** to lay its depth
 down, after which the fog and fill depth-test against it — correct per-viewpoint occlusion,
 no `depthWrite`/`depthTest` changes needed. The only thing pinned is *order*, via explicit
-`renderOrder` (plane 1 → fog 2 → fill 3), fog-before-fill so a fill tints over the fog.
+`renderOrder` (plane 1 → fog 2 → fill 3), fog-before-fill so a fill tints over the
+fog. (*Since changed:* the fog moved to its own pass, its entry was removed from the
+table, and the fill no longer tints over it — the fog tints over the fill. The table
+is now plane 1 → fill 2. See the two-target entry at the top of this file.)
 
 **Why a dedicated `scene/renderOrder.ts`.** The three layers live in three unrelated
 modules (`sectionGizmos.ts`, `volumetric.ts`/`coverageOverlay.ts`, `samplingVolumeGizmos.ts`);
 their relative order is only correct when read together, so the constants live in one file
 all three import. The generic `volumetric.ts` primitive stays visualization-agnostic — it
 gains a `setRenderOrder(n)` that just forwards to its mesh (persisted so it survives the
-mesh being rebuilt on buffer growth); the *value* comes from the caller. Objects not listed
+mesh being rebuilt on buffer growth); the *value* comes from the caller. (*Since removed
+with the fog's entry* — the primitive renders alone in its own pass and has no order to
+carry.) Objects not listed
 (bound outlines, wireframe edges, camera/probe gizmos) keep the default order 0 — harmless
 as they are thin or sit elsewhere.
 

@@ -56,6 +56,7 @@ import {
 } from './viewCameras.ts';
 import { createSceneLights } from './sceneLighting.ts';
 import { VIEWPORT_CLEAR_COLOR, SplatLayer } from './splatLayer.ts';
+import { FogCompositor } from './fogCompositor.ts';
 
 /**
  * The selected camera's pose + lens, as the **Selected** view needs it (spec
@@ -105,6 +106,13 @@ export interface Viewport {
    * empty group and pays nothing for it.
    */
   splats: SplatLayer;
+  /**
+   * Hand the viewport the coverage fog's scene, so it can run the fog pass
+   * (`fogCompositor.ts`). Until it is called the frame still runs the same three
+   * steps — the fog target simply stays cleared, and composites to exactly the
+   * scene.
+   */
+  setFogScene(fogScene: THREE.Scene): void;
   orbitControls: OrbitControls;
   transformControls: TransformControls;
   dispose(): void;
@@ -142,15 +150,6 @@ export function createViewport(
   options: ViewportOptions = {},
 ): Viewport {
   const scene = new THREE.Scene();
-  // The **WebGL splat layer owns the viewport background** (`gaussian_splats.md`
-  // §4.2): this canvas is created `alpha: true` with a null scene background, so
-  // it clears transparent and composites over the layer beneath. Measured on the
-  // real `volumetric.ts` material, that composite differs from the old
-  // opaque-background result by 0.07/255 in `max` mode and 0.12/255 in
-  // `additive` — invisible in both (§4.5). When the splat layer has no WebGL2
-  // context the background is restored here instead, so the viewport renders
-  // exactly as it did before (§9).
-  scene.background = null;
 
   // A steep-ish elevation keeps the optical path through the full-volume
   // coverage overlay short, so it reads as a translucent haze rather than a
@@ -206,6 +205,10 @@ export function createViewport(
   renderer.localClippingEnabled = true;
   renderer.domElement.classList.add('viewport-main');
   container.appendChild(renderer.domElement);
+  // One canvas, one clear: splats draw into this scene rather than a layer beneath
+  // it, so the background is `scene.background` as it was before splats existed
+  // (`gaussian_splats.md` §4.2). It is painted into the compositor's offscreen
+  // target along with everything else, and reaches the canvas through the composite.
   scene.background = new THREE.Color(VIEWPORT_CLEAR_COLOR);
 
   // The splat layer is built **unconditionally** — one code path whether or not a
@@ -213,6 +216,12 @@ export function createViewport(
   // this one only so Spark can construct its `SparkRenderer` against it.
   const splats = new SplatLayer(renderer);
   scene.add(splats.group);
+
+  // The coverage fog renders to its own target and is composited over the scene
+  // (`volumetric_rendering.md` §4). Built unconditionally so there is one frame
+  // path whether or not a run has produced fog.
+  const fog = new FogCompositor();
+  let fogScene: THREE.Scene | null = null;
 
   // Fixed light rig (spec §2.3.1) — see `sceneLighting.ts` for the rationale.
   scene.add(...Object.values(createSceneLights()));
@@ -430,6 +439,9 @@ export function createViewport(
     // (spec §2.4.1), which also re-derives the frame guide for the new aspect.
     applyCameraView();
     renderer.setSize(w, h);
+    // One observer sizes the compositor's targets too, off the renderer's own
+    // drawing buffer, so they cannot drift from the canvas.
+    fog.setSize(renderer);
   }
   const resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(container);
@@ -437,10 +449,13 @@ export function createViewport(
 
   renderer.setAnimationLoop(() => {
     orbitControls.update();
-    // One render call. `SparkRenderer` is an `Object3D` in this scene, so the
-    // captures draw as part of it, into the same depth buffer
-    // (`gaussian_splats.md` §4.1, §4.2).
-    renderer.render(scene, cameras[activeView]);
+    // The scene — geometry, gizmos, and the splat captures, which are an
+    // `Object3D` in it and so share its depth buffer (`gaussian_splats.md` §4.1)
+    // — draws into the compositor's offscreen target, then the coverage fog
+    // accumulates against that target's depth and the two are composited to the
+    // canvas (`volumetric_rendering.md` §4).
+    fog.renderScene(renderer, scene, cameras[activeView], splats);
+    fog.composite(renderer, fogScene, cameras[activeView]);
     // Mirror the live view, then draw the gizmo over the corner (it manages its
     // own viewport + depth clear, spec §2.4).
     // autoClear is disabled so the gizmo's internal render composites over the
@@ -453,6 +468,7 @@ export function createViewport(
 
   function dispose(): void {
     renderer.setAnimationLoop(null);
+    fog.dispose();
     resizeObserver.disconnect();
     orientationGizmo.dispose();
     transformControls.dispose();
@@ -480,6 +496,9 @@ export function createViewport(
     cameraGuideSizePx,
     renderer,
     splats,
+    setFogScene(next: THREE.Scene): void {
+      fogScene = next;
+    },
     orbitControls,
     transformControls,
     dispose,

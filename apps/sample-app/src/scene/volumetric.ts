@@ -1,15 +1,19 @@
 /**
  * Voxel volumetric renderer (see specs/volumetric_rendering.md) — a
- * visualization-agnostic primitive that draws a set of voxels as additive
+ * visualization-agnostic primitive that draws a set of voxels as translucent
  * volumetric fog. Callers supply, per voxel, a {center, size, intensity, color};
- * one global `intensityScale` knob controls overall brightness.
+ * one global `intensityScale` knob controls overall density.
  *
  * A single GPU-instanced unit cube (proxy geometry) is drawn with a GLSL
  * `ShaderMaterial` whose fragment shader slab-tests the view ray against each
- * instance's world-space AABB and accumulates
- * `color * intensity * chord * intensityScale` with additive, order-independent
- * blending. The chord-length term gives soft volumetric falloff at cube edges
- * instead of hard cube silhouettes.
+ * instance's world-space AABB and emits the voxel's `color` at an **alpha** of
+ * `intensity * pathTerm * intensityScale`, composited **over** the scene with
+ * ordinary source-over blending.
+ *
+ * The compositing is **not** in-scene blending: this material max-blends into a
+ * target of the fog's own, which is then composited over the scene with alpha.
+ * `scene/fogCompositor.ts` owns that pass and specs/volumetric_rendering.md §4 owns
+ * the reason a single blend rule cannot do both jobs.
  *
  * The slab/chord math is authored as the pure-TS reference below (unit-tested in
  * test/volumetric.test.ts); the fragment shader mirrors it, echoing the SDK's
@@ -26,14 +30,18 @@ import * as THREE from 'three';
 export type Vec3 = [number, number, number];
 
 /**
- * How per-voxel contributions combine along a view ray
- * (specs/volumetric_rendering.md §1, §4):
- *  - 'max'      — the pixel keeps the largest single voxel contribution
- *                 (per-channel max); chord is dropped, so cubes read hard-edged
- *                 (default).
- *  - 'additive' — contributions sum; chord-modulated soft fog.
+ * How a voxel's alpha varies across its own silhouette
+ * (specs/volumetric_rendering.md §1, §3). It selects the **path term** only —
+ * both modes composite identically, as alpha over the scene (§4):
+ *  - 'flat' — the chord is dropped, so every fragment of a voxel is equally
+ *             opaque and cubes read hard-edged (default).
+ *  - 'soft' — alpha scales with the fraction of the cube the ray crossed, fading
+ *             each voxel out at its silhouette edges.
+ *
+ * These were `'max'` and `'additive'` back when the mode picked a **blend
+ * equation**. It no longer does, so the names now say what they actually control.
  */
-export type CompositeMode = 'additive' | 'max';
+export type CompositeMode = 'flat' | 'soft';
 
 export interface Voxel {
   /** Cube center, world space. */
@@ -46,11 +54,11 @@ export interface Voxel {
   color: Vec3;
 }
 
-/** Default overall brightness multiplier (specs/volumetric_rendering.md §1). */
+/** Default overall density multiplier (specs/volumetric_rendering.md §1). */
 export const DEFAULT_INTENSITY_SCALE = 1;
 
-/** Default composite mode (specs/volumetric_rendering.md §1, §4). */
-export const DEFAULT_COMPOSITE_MODE: CompositeMode = 'max';
+/** Default composite mode (specs/volumetric_rendering.md §1, §3). */
+export const DEFAULT_COMPOSITE_MODE: CompositeMode = 'flat';
 
 const EPS = 1e-6;
 const INITIAL_CAPACITY = 1024;
@@ -102,45 +110,74 @@ export function slabChord(origin: Vec3, dir: Vec3, boxMin: Vec3, boxMax: Vec3): 
 }
 
 /**
- * Per-voxel **additive** contribution: `rgb = color * intensity * chord *
- * intensityScale` (specs/volumetric_rendering.md §3). The chord term gives the
- * soft volumetric falloff at cube edges.
+ * The **path term** for a voxel (specs/volumetric_rendering.md §3): the 0..1
+ * fraction of the cube the view ray crossed.
+ *
+ * `flat` drops the chord entirely and returns 1, so every fragment of a voxel is
+ * equally opaque (hard-edged cubes). `soft` returns `chord / size`, fading a voxel
+ * out towards its silhouette where the ray only clips a corner.
+ *
+ * It is a **fraction, never a length** — that is what keeps a voxel's alpha
+ * independent of `size`, so `intensityScale` need not be re-tuned when the grid is
+ * refined (§3).
  */
-export function voxelContribution(
-  color: Vec3,
-  intensity: number,
-  chord: number,
-  intensityScale: number,
-): Vec3 {
-  const k = intensity * chord * intensityScale;
-  return [color[0] * k, color[1] * k, color[2] * k];
+export function pathTerm(mode: CompositeMode, chord: number, size: number): number {
+  if (mode === 'flat') return 1;
+  if (size <= EPS) return 0;
+  return Math.min(1, Math.max(0, chord / size));
 }
 
 /**
- * Per-voxel **max-mode** contribution: `rgb = color * intensity * intensityScale`
- * (specs/volumetric_rendering.md §3). The chord term is dropped, so a grazing ray
- * and a full-chord ray of the same voxel emit the same flat value — the hard-edged
- * cube look — and compositing (§4) keeps the largest.
+ * A voxel's **alpha** — its opacity, which is what `intensity` now drives
+ * (specs/volumetric_rendering.md §3). The voxel's `color` reaches the framebuffer
+ * undimmed; only this varies.
+ *
+ * Clamped to 0..1 so an over-driven `intensityScale` cannot produce an alpha the
+ * blender would treat as garbage.
  */
-export function maxContribution(color: Vec3, intensity: number, intensityScale: number): Vec3 {
-  const k = intensity * intensityScale;
-  return [color[0] * k, color[1] * k, color[2] * k];
+export function voxelAlpha(intensity: number, path: number, intensityScale: number): number {
+  return Math.min(1, Math.max(0, intensity * path * intensityScale));
 }
 
 /**
- * Combine per-voxel contributions along a ray for the given `mode`
- * (specs/volumetric_rendering.md §4): `additive` sums them, `max` takes the
- * per-channel maximum. Both are order-independent, so the result is invariant
- * under permutation of `contribs`. An empty set composites to black.
+ * Composite a ray's voxels the way the fog pass does (specs/volumetric_rendering.md
+ * §4): the **strongest** voxel wins, and stacking never accumulates.
+ *
+ * Returns the premultiplied `{color, alpha}` the fog target ends up holding. The
+ * overlay is a single hue, so a per-channel max over premultiplied colour is the
+ * same thing as "the colour of the voxel with the highest alpha" — which is why
+ * the shader may emit `color * alpha` and let the blender sort it out.
+ *
+ * Order-independent by construction: max is commutative, so the result is
+ * invariant under any permutation of `layers`. That is the property the whole
+ * two-target arrangement exists to keep — compositing this into the main
+ * framebuffer directly would have to give it up.
  */
-export function compositeContributions(mode: CompositeMode, contribs: Vec3[]): Vec3 {
-  const out: Vec3 = [0, 0, 0];
-  for (const c of contribs) {
-    for (let i = 0; i < 3; i++) {
-      out[i] = mode === 'max' ? Math.max(out[i], c[i]) : out[i] + c[i];
-    }
+export function compositeMax(layers: { color: Vec3; alpha: number }[]): { color: Vec3; alpha: number } {
+  const color: Vec3 = [0, 0, 0];
+  let alpha = 0;
+  for (const layer of layers) {
+    for (let i = 0; i < 3; i++) color[i] = Math.max(color[i], layer.color[i] * layer.alpha);
+    alpha = Math.max(alpha, layer.alpha);
   }
-  return out;
+  return { color, alpha };
+}
+
+/**
+ * The final pixel: the fog target composited **over** the scene colour
+ * (specs/volumetric_rendering.md §4). `fog` is premultiplied, so source-over needs
+ * no divide — and a fog pixel of alpha 0 leaves the scene exactly as it was,
+ * whatever its colour.
+ *
+ * This is the step that has no per-channel floor: the fog contributes in
+ * proportion to its alpha rather than having to out-brighten what is behind it.
+ */
+export function compositeOverScene(scene: Vec3, fog: { color: Vec3; alpha: number }): Vec3 {
+  return [
+    scene[0] * (1 - fog.alpha) + fog.color[0],
+    scene[1] * (1 - fog.alpha) + fog.color[1],
+    scene[2] * (1 - fog.alpha) + fog.color[2],
+  ];
 }
 
 // --- Shaders -----------------------------------------------------------------
@@ -179,7 +216,7 @@ export const VERTEX_SHADER = /* glsl */ `
 `;
 
 /**
- * Fragment stage mirroring `slabChord` + `voxelContribution`: slab-test the view
+ * Fragment stage mirroring `slabChord` + `pathTerm` + `voxelAlpha`: slab-test the view
  * ray against the instance's world AABB, then accumulate the chord-scaled colour.
  *
  * `cameraPosition` is a uniform Three.js injects into every `ShaderMaterial`.
@@ -190,7 +227,7 @@ export const VERTEX_SHADER = /* glsl */ `
  */
 export const FRAGMENT_SHADER = /* glsl */ `
   uniform float uIntensityScale;
-  uniform float uMaxMode;
+  uniform float uFlatMode;
 
   varying vec3 vCenter;
   varying float vHalf;
@@ -220,13 +257,20 @@ export const FRAGMENT_SHADER = /* glsl */ `
     float tExit = min(min(tmax.x, tmax.y), tmax.z);
     float chord = max(tExit - tEnter, 0.0);
 
-    // Additive uses the chord (soft edges); max mode drops it to a flat 1.0 so the
-    // fragment value is the per-instance \`color*intensity*scale\` (§3). uMaxMode is 0
-    // in additive, 1 in max → mix picks chord vs 1.0.
-    float pathTerm = mix(chord, 1.0, uMaxMode);
-    vec3 rgb = vColor * vIntensity * pathTerm * uIntensityScale;
+    // 'soft' uses the chord as a **fraction of the cube edge** (0..1, so alpha
+    // never depends on voxel size); 'flat' drops it to 1.0 so every fragment of a
+    // voxel is equally opaque (§3). uFlatMode is 0 in soft, 1 in flat.
+    float edge = max(2.0 * vHalf, 1e-6);
+    float pathTerm = mix(clamp(chord / edge, 0.0, 1.0), 1.0, uFlatMode);
 
-    gl_FragColor = vec4(rgb, 1.0);
+    // Intensity is **alpha** — how opaque this voxel is, not how bright.
+    float alpha = clamp(vIntensity * pathTerm * uIntensityScale, 0.0, 1.0);
+
+    // **Premultiplied**, because this target is max-blended (§4): the overlay is a
+    // single hue, so max(C * a_i) == C * max(a_i) and the winning fragment's colour
+    // and alpha stay consistent. Emitting straight colour here would max the hue
+    // independently of the alpha and desaturate the result.
+    gl_FragColor = vec4(vColor * alpha, alpha);
   }
 `;
 
@@ -234,21 +278,23 @@ export const FRAGMENT_SHADER = /* glsl */ `
 
 export class VoxelVolumetricRenderer {
   readonly object = new THREE.Group();
+  /**
+   * The fog's **own scene**, holding `object` and nothing else. It is not part of
+   * the viewport scene: the fog draws in its own pass, into its own target
+   * (`fogCompositor.ts`). Exposed so the viewport can render it; callers never add
+   * `object` to the main scene.
+   */
+  readonly scene = new THREE.Scene();
 
   private readonly geometry = new THREE.BoxGeometry(1, 1, 1);
   private readonly intensityScaleUniform = { value: DEFAULT_INTENSITY_SCALE };
-  // Selects the chord term in the fragment node: 0 → use chord (additive soft
-  // falloff), 1 → use 1.0 (max mode, flat per-instance value). Mirrors §3.
-  private readonly maxModeUniform = { value: DEFAULT_COMPOSITE_MODE === 'max' ? 1 : 0 };
-  private compositeMode: CompositeMode = DEFAULT_COMPOSITE_MODE;
+  // Selects the path term in the fragment shader: 0 → the chord fraction ('soft'
+  // falloff), 1 → a flat 1.0 ('flat' mode). Mirrors §3.
+  private readonly flatModeUniform = { value: DEFAULT_COMPOSITE_MODE === 'flat' ? 1 : 0 };
   private readonly matrix = new THREE.Matrix4();
 
   private capacity = 0;
   private count = 0;
-  // Draw order for the instanced mesh; re-applied on every reallocation so it
-  // survives the mesh being rebuilt (specs/volumetric_rendering.md §4). The order
-  // among transparent layers is the caller's concern, not the primitive's.
-  private renderOrder = 0;
 
   private mesh: THREE.InstancedMesh | null = null;
   /**
@@ -269,6 +315,7 @@ export class VoxelVolumetricRenderer {
 
   constructor() {
     this.material = this.buildMaterial();
+    this.scene.add(this.object);
     this.allocate(INITIAL_CAPACITY);
   }
 
@@ -379,31 +426,20 @@ export class VoxelVolumetricRenderer {
   }
 
   /**
-   * Select how contributions combine along a ray (specs/volumetric_rendering.md
-   * §4): 'additive' sums (soft chord-modulated fog), 'max' keeps the brightest
-   * single voxel (per-channel max blend, chord dropped). Switches the blend state
-   * and the chord toggle on the live material; no rebuild needed.
+   * Select how a voxel's alpha varies across its silhouette
+   * (specs/volumetric_rendering.md §3): 'flat' drops the chord so every fragment
+   * is equally opaque, 'soft' fades a voxel out towards its edges. Flips one
+   * uniform on the live material — compositing is the same either way (§4), so
+   * there is no blend-state change and no rebuild.
    */
   setCompositeMode(mode: CompositeMode): void {
-    this.compositeMode = mode;
-    this.maxModeUniform.value = mode === 'max' ? 1 : 0;
-    this.applyBlend(this.material);
-    this.material.needsUpdate = true; // force the render pipeline to pick up the blend change
+    this.flatModeUniform.value = mode === 'flat' ? 1 : 0;
+    // Only a uniform changes now that the blend state is mode-independent, so no
+    // `needsUpdate` and no pipeline rebuild.
   }
 
   setVisible(visible: boolean): void {
     this.object.visible = visible;
-  }
-
-  /**
-   * Set the instanced mesh's draw order (Three.js `renderOrder`). Persisted so it
-   * is re-applied whenever the mesh is rebuilt to grow the instance buffers. The
-   * primitive stays visualization-agnostic; the *value* comes from the caller's
-   * layer convention (`scene/renderOrder.ts`).
-   */
-  setRenderOrder(order: number): void {
-    this.renderOrder = order;
-    if (this.mesh) this.mesh.renderOrder = order;
   }
 
   dispose(): void {
@@ -480,7 +516,6 @@ export class VoxelVolumetricRenderer {
 
     const mesh = new THREE.InstancedMesh(this.geometry, this.material, capacity);
     mesh.frustumCulled = false; // one draw call spanning the whole workspace
-    mesh.renderOrder = this.renderOrder; // re-apply across rebuilds (setRenderOrder)
 
     // Re-establish proxy transforms for voxels carried over from the old mesh.
     for (let i = 0; i < this.count; i++) {
@@ -512,28 +547,14 @@ export class VoxelVolumetricRenderer {
   }
 
   /**
-   * Apply the blend state for the current composite mode (§4). Additive uses the
-   * `AdditiveBlending` preset; max uses `CustomBlending` with a per-channel
-   * `MaxEquation` (One/One factors, which the max equation ignores), so the
-   * framebuffer keeps `max(src, dst)`.
-   */
-  private applyBlend(material: THREE.ShaderMaterial): void {
-    if (this.compositeMode === 'max') {
-      material.blending = THREE.CustomBlending;
-      material.blendEquation = THREE.MaxEquation;
-      material.blendSrc = THREE.OneFactor;
-      material.blendDst = THREE.OneFactor;
-      material.blendEquationAlpha = THREE.MaxEquation;
-      material.blendSrcAlpha = THREE.OneFactor;
-      material.blendDstAlpha = THREE.OneFactor;
-    } else {
-      material.blending = THREE.AdditiveBlending;
-    }
-  }
-
-  /**
-   * Build the one shared `ShaderMaterial`. Additive, `depthWrite:false`,
-   * `depthTest:true` (specs/volumetric_rendering.md §4).
+   * Build the one shared `ShaderMaterial`: per-channel **max** blending,
+   * `depthWrite:false`, `depthTest:true` (specs/volumetric_rendering.md §4).
+   *
+   * Max blending is safe here — and was catastrophic against the main framebuffer —
+   * because the fog draws into a target holding *only fog*, cleared to `(0,0,0,0)`.
+   * There is no scene colour to lose a max against, so a pixel ends up at the single
+   * strongest voxel along the ray and stacking never accumulates. The composite mode
+   * does not touch the blend state; it picks only the path term, in the shader.
    */
   private buildMaterial(): THREE.ShaderMaterial {
     const material = new THREE.ShaderMaterial({
@@ -541,11 +562,17 @@ export class VoxelVolumetricRenderer {
       fragmentShader: FRAGMENT_SHADER,
       uniforms: {
         uIntensityScale: this.intensityScaleUniform,
-        uMaxMode: this.maxModeUniform,
+        uFlatMode: this.flatModeUniform,
       },
     });
     material.transparent = true;
-    this.applyBlend(material);
+    material.blending = THREE.CustomBlending;
+    material.blendEquation = THREE.MaxEquation;
+    material.blendSrc = THREE.OneFactor;
+    material.blendDst = THREE.OneFactor;
+    material.blendEquationAlpha = THREE.MaxEquation;
+    material.blendSrcAlpha = THREE.OneFactor;
+    material.blendDstAlpha = THREE.OneFactor;
     material.depthWrite = false;
     material.depthTest = true;
     // Rasterize the proxy cube's *back* faces. The slab/chord is analytic (ray

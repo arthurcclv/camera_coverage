@@ -70,7 +70,8 @@ apps/sample-app/
       cameraGizmos.ts      per-camera frustum gizmos
       probeGizmos.ts       per-probe markers + selected-probe sightlines (§12.4)
       probeVisibility.ts   retained ChunkResults + world-point → camera-mask lookup (§12.2)
-      volumetric.ts        voxel volumetric renderer (§2.3, volumetric_rendering.md)
+      volumetric.ts        voxel volumetric renderer, and its own fog scene (§2.3, volumetric_rendering.md)
+      fogCompositor.ts     the fog's two-target pass: scene->target, fog max-blended into a second target sharing its depth, composited to the canvas (volumetric_rendering.md §4)
       sceneLighting.ts     the viewport's fixed four-light rig (§2.3.1)
       coverageOverlay.ts   maps ChunkResult coverage → volumetric voxels (§9)
       sectionHeatmap.ts    retained ChunkResults → per-section column aggregate + heatmap texture + stats (§13)
@@ -216,7 +217,7 @@ not `three/webgpu`), on **one** canvas.
   and captures **share one depth buffer**, so a capture is occluded by the walls in
   front of it and occludes what stands behind it, like any other scene content.
 - **Why not `WebGPURenderer`.** It was the previous choice, taken for raster
-  throughput on the coverage overlay's additive overdraw (§9). It cannot host Spark on
+  throughput on the coverage overlay's overdraw (§9). It cannot host Spark on
   either of its backends — including its WebGL2 backend, which exposes a
   `WebGPURenderer` API surface, not the `WebGLRenderer` internals Spark reaches for —
   so keeping it meant a second canvas, a second renderer, and **no shared depth**,
@@ -1506,7 +1507,8 @@ the merged `SceneMesh` is untouched, so the standing result stays valid and disp
 
 The coverage field is drawn with the **voxel volumetric renderer** — a
 visualization-agnostic primitive that takes, per voxel, a `{center, size, intensity,
-color}` and draws it as additive volumetric fog. Its technical design (shader,
+color}` and draws it as translucent volumetric fog: max-blended among its own
+voxels into a separate target, then alpha-composited over the scene. Its technical design (shader,
 chord-length math, compositing, tests) lives in
 [`volumetric_rendering.md`](./volumetric_rendering.md). **This section owns the
 visualization**: which voxels are fed to the renderer and how coverage data maps to
@@ -1573,11 +1575,13 @@ union of the enabled zones' volumes; voxels outside it read as unmarked and draw
 nothing. Enabling/disabling a zone re-filters the retained leaves client-side, with
 no recompute.
 
-The overlay is assigned an explicit **render order** (`scene/renderOrder.ts`) that
-places it **after** the section heatmap planes (§13.5) and **before** the
-sampling-volume fills (`sampling_volumes.md` §5). Because the overlay uses
-`depthWrite:false`/`depthTest:true`, depth-testing against the section plane's depth
-gives correct per-viewpoint occlusion (§13.5).
+The overlay takes **no render order** and no part in the transparent-layer table
+(`scene/renderOrder.ts`): it renders in its own pass, into its own target, and is
+composited over the finished scene (`volumetric_rendering.md` §4). Occlusion is
+decided by the depth that pass shares with the main one — a section heatmap plane
+writes depth and so hides fog behind it, per viewpoint (§13.5), while a
+sampling-volume fill does not and is therefore tinted *by* the fog
+(`sampling_volumes.md` §5).
 
 ### 9.1 Visualization modes
 
@@ -1613,12 +1617,14 @@ viewport's top-right toolbar (§2.4), not here:
   color used by **both** modes. The color is `hsl(hue, 100%, 50%)` — full-saturation,
   so the slider sweeps a clean rainbow; it defaults to **red** (`hue = 0`). Rendered
   with a rainbow-gradient track. Sits immediately **before** Intensity scale.
-- **Intensity scale** — the renderer's global brightness multiplier
-  (`intensityScale`). It is also the dial for reading the overlay **against a splat
-  capture** (`gaussian_splats.md` §4.5): fog, geometry and captures all share one
-  framebuffer, so the fog max-blends against a capture exactly as it does against a
-  wall — where the two overlap the capture is **tinted**, and a bright capture can
-  wash the fog out until this is raised. Turning the overlay off
+- **Intensity scale** — the renderer's global **opacity** multiplier
+  (`intensityScale`): it scales every voxel's alpha, not its brightness
+  (`volumetric_rendering.md` §3). A pixel shows the **strongest** voxel along the
+  ray rather than a sum, so depth of field costs nothing and the knob holds its
+  meaning on the demo room and a 1120 m site alike. The fog composites **over**
+  whatever is behind it, geometry and 3DGS captures alike, so it is never washed out
+  by a bright backdrop and this knob is about legibility, not visibility. Turning
+  the overlay off
   entirely is the **Coverage** row of the layer menu (§2.4). Neither is adjusted
   automatically when a capture is visible: coupling one layer's appearance to another
   layer's state would override a setting the user chose (the same reasoning that keeps
@@ -1979,11 +1985,13 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
   coverage overlay (§9) or another section behind them — while stale-dimmed colored cells
   (whose alpha is the reduced overall opacity, §13.4) survive the test. The heatmap plane
   also carries an explicit **render order** (`scene/renderOrder.ts`) so it draws **before**
-  the coverage overlay (§9) and the sampling-volume fills (`sampling_volumes.md` §5). Since
-  it writes depth while those layers use `depthWrite:false`/`depthTest:true`, occlusion
-  between the plane and the fog/fills is resolved by the **depth buffer per viewpoint** —
-  fog/fill in front of the slab glows over it, behind it is hidden — rather than by
-  Three.js's viewpoint-dependent transparency sorting. The `blind`
+  the sampling-volume fills (`sampling_volumes.md` §5). Since it writes depth while the
+  fill uses `depthWrite:false`/`depthTest:true`, occlusion between the plane and the fill
+  is resolved by the **depth buffer per viewpoint** — a fill in front of the slab tints
+  over it, behind it is hidden — rather than by Three.js's viewpoint-dependent
+  transparency sorting. The plane's depth is also what the **coverage overlay** (§9)
+  tests against in its own pass, so the same per-viewpoint rule governs the fog without
+  the fog appearing in that table (`volumetric_rendering.md` §4). The `blind`
   aggregation is drawn through the same colormap (0 → no blind voxels, 1 → all blind); its
   meaning is labeled in the controls and Section stats so the shared legend stays
   unambiguous.

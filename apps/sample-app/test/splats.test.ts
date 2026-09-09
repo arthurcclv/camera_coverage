@@ -19,6 +19,7 @@ import {
   identityRegistration,
   isFlippedZ,
   isSplatFileName,
+  needsSplatDepthPass,
   splatBadge,
   splatDecodeFailure,
   splatLabel,
@@ -292,4 +293,31 @@ test('every other unreadable or undecodable file is plainly undecodable', () => 
   assert.equal(splatDecodeFailure('assets/truncated.ply'), 'undecodable');
   // Not a *sibling* of the manifest, either — only the manifest itself.
   assert.equal(splatDecodeFailure('assets/meta.json.spz'), 'undecodable');
+});
+
+// --- the coverage fog's depth pass (§4.5) ----------------------------------
+// The pass exists only to give the fog an occluder where a capture stands. Its
+// gate is a judgement, so it lives here; the render calls it gates cannot run
+// under `node --test`.
+
+test('a loaded, visible capture wants the depth pass', () => {
+  assert.equal(needsSplatDepthPass({ sparkReady: true, meshCount: 1, visible: true }), true);
+});
+
+test('no decoded capture means no depth pass', () => {
+  // A scene without captures must pay nothing, and the fog must behave exactly
+  // as it did before captures existed.
+  assert.equal(needsSplatDepthPass({ sparkReady: true, meshCount: 0, visible: true }), false);
+});
+
+test('a hidden splat layer writes no depth', () => {
+  // Turning Splats off in the eye menu (§5.2) must not leave an invisible
+  // occluder behind, punching capture-shaped holes in the fog.
+  assert.equal(needsSplatDepthPass({ sparkReady: true, meshCount: 3, visible: false }), false);
+});
+
+test('before Spark loads there is nothing to draw', () => {
+  // `SparkRenderer` arrives with the first capture load (§4.2); until then the
+  // pass has no material to flip and no splats to rasterize.
+  assert.equal(needsSplatDepthPass({ sparkReady: false, meshCount: 0, visible: true }), false);
 });
