@@ -81,6 +81,14 @@ import {
   type SaveTarget,
 } from './scene/saveTarget.ts';
 import { SceneView, type SceneViewState, type TransformChange } from './scene/sceneView/sceneView.ts';
+import {
+  buildCameraInfo,
+  cameraInfoErrorText,
+  cameraInfoFileName,
+  cameraInfoJson,
+} from './cameras/cameraInfo.ts';
+import type { CenterRayRequest, CenterRayResponse } from './cameraInfoWorker.ts';
+import { downloadTextFile } from './scene/downloadFile.ts';
 import { initSceneState, sceneReducer, type EntityKind } from './scene/sceneReducer.ts';
 import { displayCoverageSummary, hierarchyPerCamera } from './scene/statsDisplay.ts';
 import { engineLoadAction, useEngine } from './engine/useEngine.ts';
@@ -701,6 +709,8 @@ export function App() {
   const [cameraGuide, setCameraGuide] = useState<CameraViewFit['guide'] | null>(null);
   // Scene-file import/export state (spec §14.7, §14.8).
   const [sceneError, setSceneError] = useState<string | null>(null);
+  /** A camera info export is casting its rays (spec §15.1, §15.3). */
+  const [exportingCameraInfo, setExportingCameraInfo] = useState(false);
   const [sceneIOBusy, setSceneIOBusy] = useState(false);
   // The save target (spec §14.5): the **file and folder** the current scene was
   // opened from (or last saved to via Save As…), so a plain Save round-trips
@@ -1786,6 +1796,71 @@ export function App() {
     dispatch({ type: 'reorderEntity', kind, id, beforeId });
   }, []);
 
+  /**
+   * Write the camera info sidecar (spec §15). Right-clicking the **Cameras**
+   * group header is the only way in (§15.1).
+   *
+   * Reads the live camera list, so unsaved edits are included; casts every
+   * center ray in a worker against the merged collision mesh (§15.3); and hands
+   * the bytes to the browser as a download rather than to the scene folder
+   * (§15.2), so it works with no save target.
+   *
+   * The worker is created per export and terminated on the reply: it holds no
+   * state worth keeping, and the alternative — a resident worker plus a cache
+   * keyed on the geometry — buys nothing for an action taken by hand. The mesh
+   * is **copied**, not transferred: App and the engine both keep using it.
+   */
+  const handleExportCameraInfo = useCallback(() => {
+    if (exportingCameraInfo) return;
+    const snapshot = cameras;
+    const fileName = cameraInfoFileName(saveTarget?.name ?? null);
+    const finish = (hits: (Vec3 | null)[]) => {
+      downloadTextFile(fileName, cameraInfoJson(buildCameraInfo(snapshot, hits)));
+      setExportingCameraInfo(false);
+    };
+    // A worker failure must not hand over a file full of `null` hits that reads
+    // like a scene with no geometry (§15.3): say so, and write nothing. It also
+    // must not leave the menu item disabled forever — clearing the in-flight
+    // flag is what lets the export be retried.
+    const fail = (reason: unknown) => {
+      setExportingCameraInfo(false);
+      setSceneError(cameraInfoErrorText(reason));
+    };
+    setExportingCameraInfo(true);
+    setSceneError(null);
+    // Both of these throw *synchronously* on their own failures, which never
+    // reach `onerror`: construction when a worker cannot be created at all
+    // (blocked by policy, bundle missing), and `postMessage` when the mesh will
+    // not structured-clone. Uncaught, the throw escapes this click handler with
+    // the flag still set, and the export is dead for the rest of the session.
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL('./cameraInfoWorker.ts', import.meta.url), { type: 'module' });
+    } catch (err) {
+      fail(err);
+      return;
+    }
+    worker.onmessage = (ev: MessageEvent<CenterRayResponse>) => {
+      worker.terminate();
+      finish(ev.data.hits);
+    };
+    worker.onerror = (ev) => {
+      worker.terminate();
+      fail(ev.message);
+    };
+    const request: CenterRayRequest = {
+      positions: room.sceneMesh.positions,
+      indices: room.sceneMesh.indices,
+      poses: snapshot.map((c) => ({ position: c.position, rotation: c.rotation })),
+    };
+    try {
+      worker.postMessage(request);
+    } catch (err) {
+      worker.terminate();
+      fail(err);
+    }
+  }, [cameras, exportingCameraInfo, room, saveTarget]);
+
   // --- scene file: import / export / reset (spec §14) ------------------------
   // Replaces the whole Scene at once: geometry, cameras, probes, sections, plus
   // every derived/retained-run bit of state, so nothing from the outgoing scene
@@ -2548,6 +2623,8 @@ export function App() {
               onDeleteSplat={handleDeleteSplat}
               onDuplicateSplat={handleDuplicateSplat}
               onReorder={handleReorder}
+              onExportCameraInfo={handleExportCameraInfo}
+              exportCameraInfoBlocker={exportingCameraInfo ? 'Still casting the camera rays…' : null}
             />
           </div>
           <div

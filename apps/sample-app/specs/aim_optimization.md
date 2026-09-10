@@ -680,7 +680,7 @@ A `COMPUTE_CANCELED` from the user's own Cancel is not an error and is surfaced 
 
 ---
 
-## 11. Terminology (`spec.md` §16)
+## 11. Terminology (`spec.md` §17)
 
 | Term | Meaning |
 |---|---|
@@ -712,8 +712,8 @@ A `COMPUTE_CANCELED` from the user's own Cancel is not an error and is surfaced 
 - §5 — `Camera` gains `aimLocked`.
 - §8.1 — auto-run is suspended while an optimize session is open.
 - §14.3 — `aimLocked` in the scene-file camera record.
-- §15 — the optimizer leaves "out of scope" and points here.
-- §16 — the §11 terms.
+- §16 — the optimizer leaves "out of scope" and points here.
+- §17 — the §11 terms.
 
 ---
 

@@ -6,6 +6,64 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The camera info export owns its own Euler convention, and its own raycaster
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §15.
+
+Three decisions, all of them the kind that look like bugs to a later reader.
+
+**1. `rot` is XYZ degrees, and it disagrees with the camera panel.** A camera stores a
+quaternion (§5.1). `cameras/math.ts` reads it as **yaw/pitch/roll in `YXZ`**, the
+"aim, then tilt, then tilt-your-head" model the panel edits with.
+`cameras/cameraInfo.ts` reads the *same quaternion* as **`[x, y, z]` in `XYZ`**,
+because that is the consuming tool's contract. The two therefore print different
+numbers for one camera — a camera facing +X tilted 30° down is `yaw -90 / pitch -30 /
+roll 0` in the panel and `[-90, -60, -90]` in the file. Neither may be changed to
+match the other, and `test/cameraInfo.test.ts` asserts they differ so that
+"reconciling" them fails the suite.
+
+Worse for a reader: an XYZ decomposition is **not unique**. A level camera turned right
+around exports `[-180, 0, -180]` where a human would write `[0, 180, 0]` — the same
+rotation, a different valid triple. There is no canonical branch to normalize to, so the
+export reports what the conversion yields, and a test pins that too.
+
+**2. `info` is a JSON document inside a JSON string.** Externally owned shape, kept
+verbatim. Tidying it into a nested object breaks the consumer.
+
+**3. The cast uses its own `THREE.Raycaster`, never SceneView's shared one.**
+`setRayFromEvent` points the shared instance with `setFromCamera()`, which copies the
+**viewport** camera's `near`/`far` onto the raycaster. Reusing it would silently
+truncate every export ray to the view frustum's depth — a camera aimed at a wall past
+the viewport's far plane would report `hit: null` and look like a legitimate miss. The
+export's ray is unbounded on purpose (§15.3): `far` is a coverage-detection range the
+user tuned for the analysis, not a statement about what the camera faces.
+
+**4. The cast is a worker over the collision soup, not the viewport's raycaster.** The
+first implementation used `SceneView`'s raycaster against the live scene graph, on the
+argument that armed placement and polyline draw already make that exact call per pointer
+move. Measuring it on the real sites killed that:
+
+| Scene | Cameras | Triangles | Three.js raycaster | Pure worker pass |
+| --- | --- | --- | --- | --- |
+| `zxfx` | 16 | 1.06 M | 50 ms/camera | 22 ms/camera |
+| `danjiang_bridge` | 26 | 3.83 M | 115 ms/camera | 63 ms/camera |
+| `danjiang_bridge_100_coverage` | 22 | 3.83 M | 187 ms/camera | 69 ms/camera |
+
+The scene-graph path is **slower**, because each imported GLB is a single submesh — so
+Three's bounding-volume culling never fires and every ray scans every triangle regardless.
+On the main thread that extrapolates to a **10–18 s freeze** at the ~96-camera scale these
+sites are worked at. Brute-force Möller–Trumbore over the merged collision `SceneMesh`
+(`cameras/centerRay.ts`, run in `cameraInfoWorker.ts`) is faster, off the main thread, and
+**pure** — so §15.3 became unit-testable instead of untestable. The two agree to
+1.4 × 10⁻¹⁴ m with identical hit/miss decisions on all three scenes, so correctness was not
+traded for any of it.
+
+Not used, though it is sitting right there: the app **already** builds an SDK BVH over this
+same mesh for zone generation (`scene/samplingVolumes.ts` `buildSceneBvh`, cached in App's
+`bvhRef`). Traversing it would make the cast effectively free. Brute force was kept because
+it needs no cache-invalidation rule against a changing scene and 6 s in a worker is nobody's
+bottleneck — the BVH is the upgrade path if this ever has to be interactive.
+
 ## The coverage fog is a two-target pass: max among itself, alpha over the scene
 
 Behavior in [`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md)

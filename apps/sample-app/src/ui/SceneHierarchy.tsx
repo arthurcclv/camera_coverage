@@ -12,6 +12,12 @@
  * (`gaussian_splats.md` §3.2); right-clicking a camera, probe, section, zone,
  * volume, constraint, or splat row opens a Duplicate/Delete context menu.
  *
+ * **Group headers have menus too** (spec §5.5, §15.1), routed per group through
+ * `ui/groupMenu.ts`: **Cameras** offers **Export camera info**, and every other
+ * header offers nothing, so right-clicking one opens no menu at all — which is
+ * what it did before headers had menus. The two menus share one popover and one
+ * piece of state, discriminated by `ContextMenuTarget`.
+ *
  * Rows also **drag to reorder within their own group** (spec §5.5.1) via
  * `useDragReorder` below. That hook owns only the pointer plumbing — threshold,
  * window listeners, Escape, auto-scroll; every geometric decision lives in the pure
@@ -38,6 +44,7 @@ import {
   nodeIdForSelection,
   nodeSelection,
   type EnabledLookup,
+  type GroupKind,
   type RenderRow,
   type SceneNode,
 } from '../scene/sceneTree.ts';
@@ -53,9 +60,10 @@ import {
   type DeletableKind,
   type EntityMenuHandlers,
 } from './entityMenu.ts';
+import { groupMenuItems, type GroupMenuHandlers } from './groupMenu.ts';
 import { popoverSide, MENU_WIDTH_PX } from './menuPopover.ts';
 
-export interface SceneHierarchyProps extends EntityMenuHandlers {
+export interface SceneHierarchyProps extends EntityMenuHandlers, GroupMenuHandlers {
   cameras: SceneCamera[];
   probes: Probe[];
   sections: Section[];
@@ -116,11 +124,19 @@ export interface SceneHierarchyProps extends EntityMenuHandlers {
 /** Kinds whose row carries an enabled checkbox (spec §5.5, `camera_placement.md` §7). */
 type ToggleableKind = 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat';
 
+/**
+ * What a right-click opened the context menu on (spec §5.5): an **entity row**,
+ * which offers Duplicate/Delete, or a **group header**, which offers that group's
+ * own items — possibly none, in which case no menu opens at all (§15.1).
+ */
+type ContextMenuTarget =
+  | { scope: 'entity'; kind: DeletableKind; id: string }
+  | { scope: 'group'; kind: GroupKind };
+
 interface ContextMenuState {
   x: number;
   y: number;
-  kind: DeletableKind;
-  id: string;
+  target: ContextMenuTarget;
 }
 
 const ORIENTATION_SHORT: Record<Section['orientation'], string> = {
@@ -519,11 +535,14 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
     setAddMenu(placeOutward(addButtonRef.current, (r) => ({ outward: r.left, top: r.bottom + 4, inward: r.right })));
   };
 
-  const openContextMenu = (ev: React.MouseEvent, kind: DeletableKind, id: string) => {
+  const openContextMenu = (ev: React.MouseEvent, target: ContextMenuTarget) => {
+    // A group whose record declares no items opens nothing — right-clicking it
+    // stays the no-op it was before group headers had menus (spec §15.1).
+    if (target.scope === 'group' && groupMenuItems(props)[target.kind].length === 0) return;
     ev.preventDefault();
     ev.stopPropagation();
     setAddMenu(null);
-    setContextMenu({ x: ev.clientX, y: ev.clientY, kind, id });
+    setContextMenu({ x: ev.clientX, y: ev.clientY, target });
   };
 
   return (
@@ -686,26 +705,49 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
-          <li
-            role="menuitem"
-            onClick={() => {
-              const { kind, id } = contextMenu;
-              setContextMenu(null);
-              duplicateHandlers(props)[kind](id);
-            }}
-          >
-            Duplicate
-          </li>
-          <li
-            role="menuitem"
-            onClick={() => {
-              const { kind, id } = contextMenu;
-              setContextMenu(null);
-              deleteHandlers(props)[kind](id);
-            }}
-          >
-            Delete
-          </li>
+          {contextMenu.target.scope === 'entity' ? (
+            <>
+              <li
+                role="menuitem"
+                onClick={() => {
+                  const target = contextMenu.target;
+                  if (target.scope !== 'entity') return;
+                  setContextMenu(null);
+                  duplicateHandlers(props)[target.kind](target.id);
+                }}
+              >
+                Duplicate
+              </li>
+              <li
+                role="menuitem"
+                onClick={() => {
+                  const target = contextMenu.target;
+                  if (target.scope !== 'entity') return;
+                  setContextMenu(null);
+                  deleteHandlers(props)[target.kind](target.id);
+                }}
+              >
+                Delete
+              </li>
+            </>
+          ) : (
+            groupMenuItems(props)[contextMenu.target.kind].map((item) => (
+              <li
+                key={item.label}
+                role="menuitem"
+                className={item.disabled ? 'disabled' : undefined}
+                aria-disabled={item.disabled ? true : undefined}
+                title={item.disabled ?? undefined}
+                onClick={() => {
+                  if (item.disabled) return;
+                  setContextMenu(null);
+                  item.run();
+                }}
+              >
+                {item.label}
+              </li>
+            ))
+          )}
         </ul>
       )}
     </div>
@@ -732,7 +774,7 @@ interface TreeRowProps {
   onSelect(selection: Selection): void;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
   onToggleCollapse(nodeId: string): void;
-  onContextMenu(ev: React.MouseEvent, kind: DeletableKind, id: string): void;
+  onContextMenu(ev: React.MouseEvent, target: ContextMenuTarget): void;
 }
 
 /** Generic shell: indentation, caret, selection highlight, click routing. */
@@ -761,14 +803,19 @@ function TreeRow(props: TreeRowProps) {
   };
 
   const handleContextMenu = (ev: React.MouseEvent) => {
-    // The kind→id mapping is `nodeSelection`'s, not a second cascade of its own:
-    // the `DeletableKind`s are exactly the selectable kinds, and an if/else
-    // chain here is the very shape that once routed `constraint` into
-    // `onDeleteVolume` (`ui/entityMenu.ts`, `ai/CONVENTIONS.md`). Group headers
-    // select nothing and have no context menu (spec §5.5).
+    // A group header routes on its own `groupKind` (spec §15.1) — the discriminator
+    // the node carries precisely because its id is a plain string.
+    if (node.kind === 'group') {
+      props.onContextMenu(ev, { scope: 'group', kind: node.groupKind });
+      return;
+    }
+    // For an entity row the kind→id mapping is `nodeSelection`'s, not a second
+    // cascade of its own: the `DeletableKind`s are exactly the selectable kinds,
+    // and an if/else chain here is the very shape that once routed `constraint`
+    // into `onDeleteVolume` (`ui/entityMenu.ts`, `ai/CONVENTIONS.md`).
     const target = nodeSelection(node);
     if (target === null) return;
-    props.onContextMenu(ev, target.kind, target.id);
+    props.onContextMenu(ev, { scope: 'entity', kind: target.kind, id: target.id });
   };
 
   const className = [

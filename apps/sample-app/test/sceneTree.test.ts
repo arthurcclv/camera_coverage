@@ -574,7 +574,7 @@ test('a group header is never dimmed, and never consults the lookup', () => {
   const lookup = enabledLookup(() => {
     throw new Error('a group header must not be looked up');
   });
-  const group: SceneNode = { kind: 'group', id: 'group:cameras', label: 'Cameras', childIds: [] };
+  const group: SceneNode = { kind: 'group', groupKind: 'cameras', id: 'group:cameras', label: 'Cameras', childIds: [] };
   assert.equal(nodeEnabled(group, lookup), true);
 });
 
@@ -584,4 +584,32 @@ test('an unticked entity dims only its own row', () => {
   const two: SceneNode = { kind: 'splat', id: 'n', label: '', splatId: 'splat-2' };
   assert.equal(nodeEnabled(one, lookup), true);
   assert.equal(nodeEnabled(two, lookup), false);
+});
+
+test('every group header carries its own `groupKind` discriminator (spec §15.1)', () => {
+  // The group-header context menu keys its items on this, not on the node id —
+  // an id is a plain string no exhaustive `Record` can be built over
+  // (`ui/groupMenu.ts`). Every group must therefore state its kind.
+  const nodes = buildSceneTree(
+    [cam('cam-1')],
+    [probe('probe-1')],
+    [section('section-1')],
+    [zone('zone-1')],
+    [volume('volume-1', 'zone-1')],
+    [cgroup('cg-1')],
+    [con('con-1', 'cg-1')],
+    [splat('splat-1')],
+  );
+  const groups = nodes.filter((n) => n.kind === 'group');
+  assert.deepEqual(
+    groups.map((g) => (g.kind === 'group' ? [g.label, g.groupKind] : null)),
+    [
+      ['Cameras', 'cameras'],
+      ['Probes', 'probes'],
+      ['Sections', 'sections'],
+      ['Zones', 'zones'],
+      ['Constraints', 'constraints'],
+      ['Splats', 'splats'],
+    ],
+  );
 });

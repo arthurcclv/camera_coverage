@@ -116,7 +116,13 @@ selects), `sceneTree.nodeEnabled` (row → whether it dims, via an `EnabledLooku
 hierarchy builds from what it has indexed), and `SceneView.emitTransform` (selection →
 how a gizmo drag reads back, with `zone`/`constraintGroup` as **explicit** no-ops).
 The hierarchy's context menu no longer dispatches at all: it asks `nodeSelection` for
-the kind and id, since the `DeletableKind`s *are* the selectable kinds.
+the kind and id, since the `DeletableKind`s *are* the selectable kinds. The
+**group-header** menu is the newest instance (`ui/groupMenu.ts`): a
+`Record<GroupKind, GroupMenuItem[]>` in which a group with nothing to offer declares
+an **empty array** rather than being left out, so "no items here" is a stated
+decision and the next group added is a compile error. That record is also why the
+tree's `group` node carries a `groupKind` — its id is a plain string, and a `Record`
+cannot be keyed on one.
 
 ## Testing
 

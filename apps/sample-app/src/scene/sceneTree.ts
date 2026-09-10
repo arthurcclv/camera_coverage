@@ -35,8 +35,18 @@ import {
 import { splatLabel, type SplatObject } from './splats.ts';
 import type { Selection } from './viewportSelection.ts';
 
+/**
+ * The auto-derived root type groups (spec §5.5), as a closed union.
+ *
+ * A group node's `id` is a string (`'group:cameras'`), which no exhaustive
+ * `Record` can key on — so the kind rides on the node beside it. That is what
+ * lets the group-header context menu declare its items per group and fail to
+ * compile when a group is added without one (spec §15.1, `ui/groupMenu.ts`).
+ */
+export type GroupKind = 'cameras' | 'probes' | 'sections' | 'zones' | 'constraints' | 'splats';
+
 export type SceneNode =
-  | { kind: 'group'; id: string; label: string; childIds: string[] }
+  | { kind: 'group'; groupKind: GroupKind; id: string; label: string; childIds: string[] }
   | { kind: 'camera'; id: string; label: string; cameraId: string }
   | { kind: 'probe'; id: string; label: string; probeId: string }
   | { kind: 'section'; id: string; label: string; sectionId: string }
@@ -225,6 +235,7 @@ export function buildSceneTree(
   }));
   const cameraGroup: SceneNode = {
     kind: 'group',
+    groupKind: 'cameras',
     id: CAMERA_GROUP_ID,
     label: 'Cameras',
     childIds: cameraNodes.map((n) => n.id),
@@ -241,6 +252,7 @@ export function buildSceneTree(
     }));
     const probeGroup: SceneNode = {
       kind: 'group',
+      groupKind: 'probes',
       id: PROBE_GROUP_ID,
       label: 'Probes',
       childIds: probeNodes.map((n) => n.id),
@@ -257,6 +269,7 @@ export function buildSceneTree(
     }));
     const sectionGroup: SceneNode = {
       kind: 'group',
+      groupKind: 'sections',
       id: SECTION_GROUP_ID,
       label: 'Sections',
       childIds: sectionNodes.map((n) => n.id),
@@ -286,6 +299,7 @@ export function buildSceneTree(
     }
     const zonesGroup: SceneNode = {
       kind: 'group',
+      groupKind: 'zones',
       id: ZONES_GROUP_ID,
       label: 'Zones',
       childIds: zoneNodes.map((n) => n.id),
@@ -322,6 +336,7 @@ export function buildSceneTree(
     }
     const umbrella: SceneNode = {
       kind: 'group',
+      groupKind: 'constraints',
       id: CONSTRAINTS_GROUP_ID,
       label: 'Constraints',
       childIds: groupNodes.map((n) => n.id),
@@ -343,6 +358,7 @@ export function buildSceneTree(
     }));
     const splatsGroup: SceneNode = {
       kind: 'group',
+      groupKind: 'splats',
       id: SPLATS_GROUP_ID,
       label: 'Splats',
       childIds: splatNodes.map((n) => n.id),

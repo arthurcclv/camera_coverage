@@ -612,7 +612,7 @@ app-local view prefs in `spec.md` §14.)
 
 ---
 
-## 10. Terminology (`spec.md` §16)
+## 10. Terminology (`spec.md` §17)
 
 - **Sampling volume** — a user-placed, editable **oriented box**. Coverage input
   (unlike a probe/section observer): it changes which voxels are counted. Belongs
@@ -654,8 +654,8 @@ app-local view prefs in `spec.md` §14.)
 | §9 / §10 / §13 | State that the **enabled-zones union marked set** replaces "all valid voxels" for the overlay/sections and the main stats; per-zone results in zone rows + ZonePanel. |
 | §13.6 / §14.3 Sections | Rename the per-section `visible` field/label to **`enabled`** ("Enable/Disable section"); scene-file key `enabled` (legacy `visible` still read). |
 | §14.1/§14.3/§14.8 | Add `zones` + `volumes` + `useZones`; zone/section `enabled`; bump `formatVersion` to 2; back-compat read of v1 + legacy `visible`; validation incl. `zoneId` referential integrity. |
-| §15 Out of scope | Move "box sampling regions as a live control" to shipped; add the §13-here items as the new future list. |
-| §16 Terminology | Add **sampling volume**, **zone**, **marked set**, **enabled zone**. |
+| §16 Out of scope | Move "box sampling regions as a live control" to shipped; add the §13-here items as the new future list. |
+| §17 Terminology | Add **sampling volume**, **zone**, **marked set**, **enabled zone**. |
 
 ---
 

@@ -346,9 +346,12 @@ this rig, check the asset's metalness before touching the lights.
   target-zone list is empty, carrying `Add a target zone to use these.` as their
   `title` — the flags are genuinely inert then (`camera_placement.md` §3.1.2), and
   a live checkbox that changed nothing would be the worse lie.
-- **Menu** (`.menu`): popover for the add-entity menu and the right-click
-  Duplicate/Delete context menu — dark surface, shadow `0 6px 20px rgba(0,0,0,.45)`,
-  blue hover. The three hierarchy popovers (add menu, its submenu, the context menu)
+- **Menu** (`.menu`): popover for the add-entity menu and the right-click context
+  menu — Duplicate/Delete on an entity row, or the group header's own items (today
+  just **Export camera info** on Cameras, spec §15.1) — dark surface, shadow
+  `0 6px 20px rgba(0,0,0,.45)`, blue hover. Both context menus share one popover and
+  one piece of state, so a group header's menu looks identical to a row's; a group
+  with no items opens nothing at all rather than an empty popover. The three hierarchy popovers (add menu, its submenu, the context menu)
   are **`position: fixed` at a fixed `width: 160px`**, placed from their anchor's
   measured rect (`ui/menuPopover.ts`). Fixed width, not content-driven: the add menu
   and its submenu then line up as one assembly instead of each sizing to its own

@@ -780,7 +780,7 @@ up self-contained.
 
 ---
 
-## 10. Terminology (`spec.md` §16)
+## 10. Terminology (`spec.md` §17)
 
 - **3D Gaussian Splat (3DGS, "splat capture")** — a photogrammetric reconstruction
   stored as oriented, coloured 3D Gaussians rather than triangles. Rendered by
@@ -896,7 +896,7 @@ here so a later change knows what was actually measured rather than assumed
 | §14.7 UI controls | Add the **Add 3DGS** dialog (§3.2). |
 | §14.8 Error handling | Add the §9 rows. |
 | §14.9 Out of scope | Clarify that the non-authorable, non-selectable rule covers **`geometry`** objects; splats are a separate array and are authorable (§2.1). |
-| §16 Terminology | Add **3D Gaussian Splat**, **splat**, **registration**, **splat group** (§10). |
+| §17 Terminology | Add **3D Gaussian Splat**, **splat**, **registration**, **splat group** (§10). |
 
 Also required outside `spec.md` (per the repo's `ai/` docs rule):
 

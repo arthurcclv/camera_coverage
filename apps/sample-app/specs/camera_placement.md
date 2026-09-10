@@ -1790,7 +1790,7 @@ strings when present, with unknown ids dropped and duplicates collapsed;
 
 ---
 
-## 11. Terminology (`spec.md` §16)
+## 11. Terminology (`spec.md` §17)
 
 | Term | Meaning |
 |---|---|
@@ -2124,8 +2124,8 @@ class it would have tested is never produced.
 - §11 — the §10 rows.
 - §14.1 / §14.3 / §14.8 — the `Scene` fields, `formatVersion` 3, the validation rules, and
   the group's three **optional** target-zone keys (additive, no version bump — §9).
-- §15 — camera placement leaves "out of scope" and points here.
-- §16 — the §11 terms.
+- §16 — camera placement leaves "out of scope" and points here.
+- §17 — the §11 terms.
 
 **`apps/sample-app/specs/aim_optimization.md`**
 

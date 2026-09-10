@@ -1145,7 +1145,7 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   each via their **on-entity `name`** — falling back to the default `Camera N` /
   `Probe N` / `Section N` / `Zone N` when blank. **Volume** rows are the one
   exception: they keep showing the raw id (`volume-N`); volume names are out of scope
-  (§15). Constraint groups and constraints resolve from their own **`name`**
+  (§16). Constraint groups and constraints resolve from their own **`name`**
   (`camera_placement.md` §3.1), falling back to `Group N` / `Constraint N`.
   **Splats** resolve from their own `name` too, but fall back to the **basename of
   their `src`** — `site.spz`, `yard-scan.ply` — not to `Splat N`
@@ -1221,7 +1221,14 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   symmetry" with zones would force a needless recompute.
 - **Row context menu.** **Right-clicking** a camera, probe, section, zone, volume,
   constraint-group, constraint, or splat row opens a context menu with two actions,
-  **Duplicate** (top) and **Delete** (bottom). Group headers have no context menu.
+  **Duplicate** (top) and **Delete** (bottom).
+- **Group-header context menu.** Right-clicking a **group header** opens that group's own
+  menu, which is **per-group and may be empty**: **Cameras** offers one item, **Export
+  camera info** (§15.1), and every other header — Probes, Sections, Zones, Constraints,
+  Splats — offers none, so right-clicking one opens **nothing at all**, exactly as it did
+  before group headers had menus. A group's items are declared in a single **exhaustive
+  per-group record**, so the next group added must state its list, empty or not (§15.1) —
+  the same compile-time guard the per-kind row records carry (`ui/entityMenu.ts`).
 - **Deleting entities.** The context-menu **Delete** action removes the row's entity.
   Deleting a **zone** removes it **and all its volumes**. Deleting the selected
   entity clears the selection; deleting a camera, a volume, or a non-empty zone marks the
@@ -1266,7 +1273,7 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   duplicating a probe, a section, an **empty** zone, a constraint, a constraint group,
   or a splat does not (mirrors the add/delete stale rules above).
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
-  (§15).
+  (§16).
 - **Accessibility.** Rendered with `role=tree`/`treeitem`/`group` and
   `aria-expanded`/`aria-selected`; interaction is mouse-driven (no keyboard tree
   navigation yet, and no keyboard equivalent for drag-reordering, §5.5.1).
@@ -1512,7 +1519,7 @@ voxels into a separate target, then alpha-composited over the scene. Its technic
 chord-length math, compositing, tests) lives in
 [`volumetric_rendering.md`](./volumetric_rendering.md). **This section owns the
 visualization**: which voxels are fed to the renderer and how coverage data maps to
-each voxel's `intensity` and `color`. Domain terms are defined in §16. A separate,
+each voxel's `intensity` and `color`. Domain terms are defined in §17. A separate,
 flat per-slab coverage visualization — the **section heatmap** — is described in §13.
 The overlay's own **legend** — a hue-intensity ramp (coverage mode) or a solid swatch
 (blind-spots mode), reflecting §9.1/§9.2 rather than the Turbo colormap — is the
@@ -1590,7 +1597,7 @@ renderer's per-voxel inputs:
 
 - **Coverage** — the default. **Every valid voxel** is fed. `color` = the
   user-selected **overlay color** (§9.2); `intensity` = the voxel's **coverage
-  fraction** (`popcount(maskWords) / involvedCameraCount`, 0..1, §16). Well-covered
+  fraction** (`popcount(maskWords) / involvedCameraCount`, 0..1, §17). Well-covered
   regions glow bright/solid; weakly covered regions are faint; blind spots
   (fraction 0) contribute nothing and are invisible. This shows **where coverage
   is**.
@@ -1647,7 +1654,7 @@ From `CoverageSummary`:
   have an entry, always `0`; the panel **filters them out** rather than listing a row of
   zeroes for a camera the user switched off.
 - `validVoxels`, `elapsedMs`.
-- **Blind-spot count** — number of valid voxels no enabled camera sees (§16),
+- **Blind-spot count** — number of valid voxels no enabled camera sees (§17),
   derived as `round(validVoxels × (1 − overallRate))`. Surfaced here numerically so
   the count is available regardless of the active visualization mode (§9.1).
 - Active **compute** backend (WebGPU / CPU, §3.2) and **render** backend
@@ -1698,7 +1705,7 @@ participate in `compute()`, and never change the coverage field.
   array in `App.tsx`, parallel to `cameras` (§5). A probe node in the hierarchy
   (§5.5) references its probe by id; the tree carries identity only, like camera
   nodes.
-- Probes are **not auto-persisted** across reloads (§15), but they **are** included in
+- Probes are **not auto-persisted** across reloads (§16), but they **are** included in
   scene-file export/import (§14).
 
 ### 12.2 Visibility query (reuse of computed masks)
@@ -1829,7 +1836,7 @@ fog — a section is a flat, per-cell heatmap of a chosen slice, and several can
   - `horizontal` — collapse **Y**, heatmap spans **X×Z** (a floor plan).
   - `vertical-x` — collapse **X**, heatmap spans **Z×Y**.
   - `vertical-z` — collapse **Z**, heatmap spans **X×Y**.
-- Sections are **not auto-persisted** across reloads (§15), but they **are** included in
+- Sections are **not auto-persisted** across reloads (§16), but they **are** included in
   scene-file export/import (§14). The global colormap and its legend (§13.5) are
   shared by all sections; everything else in the record above is per-section.
 
@@ -1912,7 +1919,7 @@ heatmap texture holds one texel per selected cell, so its resolution tracks `vox
   re-filters client-side, no recompute.
 - **Cell value.** For a colored cell, each **aggregated** voxel (valid, and in-zone when
   zones are active) contributes its **coverage fraction**
-  (`popcount(mask) / involvedCameraCount`, 0..1, §16); the cell value is the
+  (`popcount(mask) / involvedCameraCount`, 0..1, §17); the cell value is the
   per-section **aggregation** over those voxels:
   - `mean` — average coverage fraction (the section analog of the §9.1 Coverage mode).
   - `max` — best-covered voxel in the column.
@@ -2765,7 +2772,175 @@ scene file within it:
 
 ---
 
-## 15. Out of scope / future
+## 15. Camera info export
+
+A **one-way sidecar file**: every camera's position, orientation, and what its center ray
+hits, written for an external tool to consume. It is **written, never read** — the app has
+no importer for it, nothing in the app derives from it, and `scene.json` (§14) remains the
+only round-tripping format. It is also the app's **first** feature to query the scene
+geometry outside the coverage engine.
+
+### 15.1 Trigger
+
+- **Right-clicking the "Cameras" group header** in the scene hierarchy opens a menu whose
+  single item is **Export camera info** (§5.5). Choosing it casts every camera's center ray
+  (§15.3), builds the file (§15.2), and downloads it.
+- **No ellipsis on the label.** Nothing opens: the file downloads. In this app "…" marks an
+  item that opens a dialog (**Save As…**, **3D Gaussian Splat…**, §14.7), and this is not one.
+- **Enabled except during its own run.** With **no cameras** the export still runs and writes
+  `[]` — the Cameras header renders even when the group is empty (§5.5), and an empty array is
+  the truthful answer to "what is the layout", not an error. The one thing that disables it is
+  a **previous export still casting** (§15.3): the item greys out carrying
+  `Still casting the camera rays…` as its `title`, so a second click cannot start a second
+  cast over the same mesh. The blocker is a **string, not a flag**, matching the "+" menu's
+  **3D Gaussian Splat…** gate (§14.7) — a disabled row explains itself rather than just
+  failing to respond.
+- **Which group headers have menus is a per-group record.** The routing is one exhaustive
+  `Record<groupKind, item[]>` (§5.5) — Cameras declares this one item, every other group
+  declares none, and an empty list opens no menu. This requires the hierarchy's `group`
+  node to carry a **`groupKind`** discriminator: today it carries only its id
+  (`'group:cameras'`), a plain string no exhaustive record can key on.
+
+### 15.2 File format
+
+**The shape is externally owned.** It is fixed by the consuming tool, and is not the app's to
+tidy — in particular `info` is a **JSON document inside a JSON string**, deliberately, and
+must not be "fixed" into a nested object.
+
+```json
+[
+  { "name": "Camera 1", "info": "{\"pos\":[-3.4,1.8,12.25],\"rot\":[-30,0,0],\"hit\":[-3.4,0,4.116667]}" },
+  { "name": "Front Gate", "info": "{\"pos\":[0,4,0],\"rot\":[-180,0,-180],\"hit\":null}" }
+]
+```
+
+- The **outer document** is a JSON array, one object per camera with exactly the two keys
+  `name` and `info`, pretty-printed with **2-space indent** (as §14.5 writes `scene.json`).
+- **`name`** — the camera's hierarchy label: the trimmed `name`, or the default `Camera N`
+  when it is blank (§5.6). Never empty. Deliberately **not made unique**: two cameras may
+  carry the same label, and the file reproduces that rather than inventing suffixes, so a
+  row reads exactly as the tree row it came from.
+- **`info`** — a **string** holding a **compact** (no whitespace) JSON object with exactly
+  three keys, in the order `pos`, `rot`, `hit`.
+  - **`pos`** — the camera position `[x, y, z]` in **world space, meters, Y-up** (§14.3's frame).
+  - **`rot`** — the orientation as **Euler angles `[x, y, z]` in degrees, rotation order `XYZ`**.
+  - **`hit`** — the **hit point** of the camera's **center ray** (§15.3), `[x, y, z]` in the
+    same frame, or **`null`** when the ray hits nothing. The key is **always present**.
+- **`rot` is not the camera panel's convention, and the two must not be reconciled.** A camera
+  stores a **quaternion** (§5.1); the camera panel edits it as **yaw/pitch/roll in degrees,
+  order `YXZ`** (`cameras/math.ts`, the "aim, then tilt, then tilt-your-head" model). This
+  export converts the same quaternion **independently**, to `[x, y, z]` degrees in order
+  `XYZ`, so its three numbers **differ from the three the panel shows** for the same camera —
+  a camera facing +X tilted 30° down reads `yaw -90 / pitch -30 / roll 0` in the panel and
+  exports `[-90, -60, -90]`. Both are correct for their consumer — the panel's serves the UI,
+  the export's is the external contract — and neither may be changed to match the other.
+- **`rot` is one valid triple, not the prettiest one.** An `XYZ` decomposition is **not
+  unique**: a level camera turned right around exports `[-180, 0, -180]`, where a human would
+  write `[0, 180, 0]`. Both name the same rotation, and the export reports whatever the
+  conversion yields rather than searching for the nicer branch — there is no canonical answer
+  to search for. A consumer must **apply** the three angles in `XYZ` order, never compare them
+  to a hand-written expectation.
+- **Numbers are rounded to 6 decimals**, trailing zeros dropped (`2`, not `2.000000`).
+  Micrometer precision is effectively lossless for anything downstream, and it suppresses the
+  float noise a dragged gizmo or a quaternion→Euler conversion leaves behind
+  (`-3.4000000000000004`, `29.999999999999996`) in a string a human has to read.
+- **Filename** — `<scene>-cameras.json`, where `<scene>` is the save target's filename minus
+  its `.json` (§14.5); the filename **is** the scene's name (§14.2), so the export is
+  traceable to the layout it describes. With **no save target** — the boot scene (§14.1) —
+  it is **`cameras.json`**. No timestamp: while iterating, a re-export should shadow the
+  previous one, not accumulate copies.
+- **Delivery is a browser download** (a blob URL and a synthetic `<a download>` click), not a
+  File System Access write. It therefore needs **no folder permission** and works on the boot
+  scene, where §14.5's save target does not yet exist, and it inherits none of §14.8's
+  permission-lost / overwrite-confirm states. This is the app's **only** download path;
+  every other write goes through §14.5.
+
+### 15.3 The center ray
+
+- **Every camera is exported, in hierarchy order** — the `cameras` array order (§5.5, §14.3).
+  **Disabled cameras are included** (§5.4): disabled means "contributes no coverage", not
+  "not mounted", and this file describes the layout. A camera flagged
+  `CAMERA_INSIDE_GEOMETRY` (§11) is likewise exported, with whatever its ray hits.
+- The ray starts at the camera **position** and runs along the camera's **forward direction** —
+  the stored quaternion applied to `(0, 0, −1)` (§5.1's −Z convention). It is the frustum's
+  center axis, so `hit` answers "what is this camera aimed at", independent of `fov` and
+  `aspect`.
+- It intersects the **merged scene geometry** — the room shell, box obstacles, and any GLB
+  meshes of the `geometry` array (§14.6): the same surfaces the coverage engine occludes
+  against, which is what makes `hit` the surface a camera's coverage stops at.
+  **Splat captures are never hit** — a capture has no surface to intersect and no raycast
+  index is built for one (`gaussian_splats.md` §6.5) — so a scene whose only visible content
+  is a capture exports `hit: null` throughout. Gizmos, overlays, and section planes are never
+  hit either.
+- **Nearest hit wins**, and the ray is **unbounded**: it honors neither `near` nor `far`
+  (§5.1). `far` is a detection range tuned for the *analysis*; letting it truncate the ray
+  would report `null` for a camera plainly aimed at a wall 80 m away — which at the real
+  sites, a workspace over a kilometer across with default `far`, is the common case, not the
+  edge one.
+- **A miss is `hit: null`.** Misses are real: a camera aimed up through the room's open top,
+  or any camera in a scene with no geometry. `null` states "nothing there", which no sentinel
+  point (`pos + forward × far`) can state without being mistaken for a surface.
+- **Render state never affects the result.** Geometry hidden by the **Geometry** layer toggle
+  (§2.4) and geometry cross-sectioned by a **section clip** (§13.9) are both **still hit**:
+  hiding and clipping are viewing aids, while the layout is a fact about the site.
+  Consequently two exports of one scene are **byte-identical** however the view is set up.
+  This falls out of the implementation for free — Three.js clipping planes are a shader
+  effect the raycaster ignores, and its raycaster does not skip invisible objects — but it is
+  the **specified** behavior, not an accident to be tidied into WYSIWYG later.
+- **The cast runs in a worker, over the merged collision `SceneMesh`** — not against the
+  Three.js scene graph. A brute-force Möller–Trumbore pass per camera, no backface culling
+  (geometry is double-sided, §14.6), nearest positive `t` wins. Measured on the real sites:
+  **22 ms per camera** at 1.06 M triangles (`zxfx`) and **63–69 ms** at 3.83 M
+  (`danjiang_bridge`) — so a 96-camera bridge layout is ~6 s of worker time, and the
+  viewport stays live throughout.
+- **Why not the viewport's raycaster.** Casting against the live scene graph was measured
+  at **115–187 ms per camera** on the same geometry — *slower*, because each imported GLB is
+  one submesh, so bounding-volume culling never fires and every ray scans every triangle
+  anyway. On the main thread that is a **10–18 s freeze** at 96 cameras. It also cost the
+  whole of this section its testability. The two agree to **1.4 × 10⁻¹⁴ m** on the real
+  scenes, with identical hit/miss decisions, so nothing was traded for the move.
+  (Two traps that path left behind, worth keeping written down: a shared raycaster pointed
+  with `setFromCamera()` inherits the **viewport** camera's `near`/`far` and silently
+  truncates export rays; and Three's raycaster ignores clipping planes and invisible
+  objects, which is the behavior this section wants but only by accident.)
+- **So the whole of this section is pure and unit-tested** (`cameras/centerRay.ts`): the
+  forward vector, the intersection, nearest-wins, backfaces, the unbounded ray, and `null`.
+  The forward vector is computed from the quaternion directly rather than through Three's
+  `applyQuaternion`, so the worker bundle carries no Three.js; a test asserts the two agree.
+  The file-shaping half (§15.2) is equally pure and separately tested.
+- **The export does not block, and does not report progress.** One worker per export,
+  created on the click and terminated on its reply; the mesh is **copied, not transferred**,
+  since App and the engine keep using it. There is **no progress bar and no cancel** — the
+  only feedback is the menu item disabling itself (§15.1) and the file arriving. A **worker
+  failure writes nothing** and surfaces in the Scene panel's error banner (§14.7): a file of
+  all-`null` hits would read as a scene with no geometry, which is a different fact. This
+  covers the failures that **never reach the worker's error handler** — a worker that cannot
+  be created at all, and a mesh that will not structured-clone — since those throw where the
+  export was started; every one of them **re-enables the menu item**, so a failed export can
+  be retried rather than disabling the feature for the session. One message serves all of
+  them, with a fallback for the case the platform quotes no reason
+  (`cameras/cameraInfo.ts`).
+- The app already builds an SDK BVH over this same mesh for zone generation
+  (`sampling_volumes.md` §3.1), and traversing it would make the cast effectively free.
+  Deliberately **not** used here: brute force needs no cache-invalidation rule against a
+  changing scene, and 6 s off the main thread is nobody's bottleneck. It is the upgrade path
+  if this ever has to be interactive.
+
+### 15.4 Out of scope for this feature
+
+- **Reading the file back.** There is no importer and none is planned: `hit` is derived, never
+  authored, and the layout already round-trips through §14.
+- **Any other payload.** No CSV, no per-camera image, and no extra keys in the info string
+  (`far`, `fov`, `enabled`, the hit distance, which surface was hit) — the three keys are the
+  external contract (§15.2). Rendering *what a camera sees* is `apps/splat-camera-export`'s
+  job, and it reads `scene.json`, not this file.
+- **Exporting a subset** — selection-only or enabled-only.
+- **Splats as ray targets** (`gaussian_splats.md` §13's "splats as occluders").
+- **Context-menu items on the other group headers** — their records stay empty (§15.1).
+
+---
+
+## 16. Out of scope / future
 
 - **Camera aim optimization shipped** — redundancy-weighted re-aiming of the existing
   cameras, [`aim_optimization.md`](./aim_optimization.md); its §13 lists that feature's
@@ -2786,6 +2961,9 @@ scene file within it:
   feature's own out-of-scope items (splats as occluders, depth interaction with
   geometry, viewport picking, in-app import/transcoding, PCSOGS bundles, streaming LOD,
   assisted registration).
+- **Camera info export shipped** — the per-camera position / rotation / center-ray-hit
+  sidecar on the Cameras group header, §15; its §15.4 lists that feature's own out-of-scope
+  items (reading the file back, other payloads, subset exports, splats as ray targets).
 - In-app scene *editing* — adding/removing/transforming **geometry** through the UI. The
   scene file (§14) can carry imported geometry (including GLB meshes), but authoring it
   in-app is out of scope. (Splat captures are a separate array and *are* authorable,
@@ -2806,7 +2984,7 @@ scene file within it:
 
 ---
 
-## 16. Terminology
+## 17. Terminology
 
 Canonical domain language for the app. The rendering primitive that draws the
 visualization is described in
@@ -2903,3 +3081,9 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
   (`gaussian_splats.md` §7).
 - **Splat layer** — the second, `WebGLRenderer` canvas behind the main viewport
   canvas that draws the captures, and its eye-menu master toggle (§2.3, §2.4).
+- **Center ray** — the axis of a camera's frustum: the ray from the camera's position along
+  its forward direction, the stored quaternion applied to `(0, 0, −1)` (§5.1). It says what a
+  camera is aimed at, independent of `fov`, `aspect`, `near`, and `far`.
+- **Hit point** — where a center ray first meets the merged scene geometry (§14.6), or
+  **null** when it meets nothing. Reported per camera by the camera info export (§15); it is
+  **not** a coverage quantity — no analysis reads it and no number depends on it.

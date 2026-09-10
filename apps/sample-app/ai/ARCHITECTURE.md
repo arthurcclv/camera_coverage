@@ -187,6 +187,10 @@ default" — see DECISIONS.md).
   state directly, and does no direct Three.js wiring (that lives in
   `scene/sceneView/`).
 - `worker.ts` — SDK worker host + warning side-channel.
+- `cameraInfoWorker.ts` — the second worker, and the plain one: transport only for the
+  camera info export's center-ray cast (spec §15.3). One message in, one out, no state;
+  App creates it per export and terminates it on the reply. Every decision is in the
+  pure `cameras/centerRay.ts`.
 - `engine/useEngine.ts` — `WorkerClient` lifecycle + init/load/setCameras/compute
   wrappers with CPU fallback.
 
@@ -451,7 +455,9 @@ default" — see DECISIONS.md).
   write the absence of it: a null cell grid resets the texture to the 1×1
   transparent no-data plane (§13.4) rather than leaving what was there.
 - `sceneTree.ts` — `SceneNode` union (camera/probe/section + zone/volume +
-  constraintGroup/constraint + splat) + `buildSceneTree` / `flattenVisible`, the
+  constraintGroup/constraint + splat), the `GroupKind` union its `group` nodes carry
+  as a discriminator (a group's id is a plain string, which no exhaustive `Record`
+  can key on — see `ui/groupMenu.ts`) + `buildSceneTree` / `flattenVisible`, the
   `nodeIdFor*` / `*IdForNode` namespaced id pair per kind, and
   `nodeIdForSelection` — the selection → highlighted-row mapping, an exhaustive
   `Record` over `Selection['kind']` (it replaced a ternary chain ending in `: null`,
@@ -464,6 +470,12 @@ default" — see DECISIONS.md).
   builds from the arrays and maps it already has). Both are exhaustive `Record`s
   over the kind union; `nodeEnabled` replaced a six-deep ternary chain ending in
   a bare `: true`, which every kind added after `splat` would have inherited.
+- `downloadFile.ts` — the app's **only** browser download (spec §15.2): a blob URL
+  and a synthetic `<a download>` click. Every other write goes through the File
+  System Access API into the scene folder (`sceneIO.ts`), which needs a picked folder
+  and a granted permission; the camera info sidecar has no place in that contract and
+  must work on the boot scene, where no save target exists. One function, no
+  decisions in it.
 - `reorder.ts` — pure drag-reorder logic (spec §5.5.1). Two halves: `siblingRows` /
   `insertionTargetAt` turn a pointer Y plus measured row extents into "insert before
   this sibling" (or null → illegal drop), and `moveBefore` / `moveVolumeBefore` do
@@ -548,6 +560,20 @@ default" — see DECISIONS.md).
   on-entity + converted rather than a side map.
 - `defaults.ts` — the 10 default CCTV cameras (blank names → display as `Camera N`).
 - `math.ts` — Euler (YXZ, degrees) ↔ quaternion helpers.
+- `cameraInfo.ts` — everything about the camera info sidecar file (spec §15) that is
+  a *decision* rather than a ray cast: `buildCameraInfo` (label, Euler, rounding,
+  `hit: null`, order, the double encoding), `cameraInfoJson`, `cameraInfoFileName`.
+  Pure by construction — it takes the center-ray hits as an argument, because casting
+  them is `centerRay.ts`'s job — so this is where the tests are. Its `exportEuler`
+  is **XYZ degrees** and deliberately disagrees with `math.ts`'s YXZ yaw/pitch/roll:
+  see [DECISIONS.md](DECISIONS.md).
+- `centerRay.ts` — the ray half of the same export (spec §15.3), and equally pure:
+  `cameraForward` (quaternion → −Z forward, hand-rolled so the worker bundles no
+  Three.js, with a test asserting parity against `three`), `nearestHit`
+  (Möller–Trumbore over a `SceneMesh`, no backface culling, unbounded, nearest wins),
+  and `centerRayHits`. Runs in `cameraInfoWorker.ts`; measured *faster* than the
+  Three.js raycaster it replaced, because an imported GLB is one submesh and culling
+  never fires — see [DECISIONS.md](DECISIONS.md).
 - `aim.ts` — pure aim-drag math for the **Selected** view (spec §2.4.1, §5.2):
   `aimDelta` maps a pointer delta over the frame guide to a new orientation
   (mouselook — the aim follows the pointer — at a FOV-derived deg/px), plus
@@ -832,6 +858,12 @@ the two sessions are mutually exclusive rather than each reserving its own.
   it replaced two if/else chains whose trailing `else` assumed `volume`, so the
   constraint kinds added later were routed to `onDeleteVolume`/`onDuplicateVolume`
   and did nothing at all. Tested in `test/entityMenu.test.ts`.
+- `groupMenu.ts` — the same idea for **group headers** (spec §15.1):
+  `Record<GroupKind, GroupMenuItem[]>`, where **Cameras** declares one item (Export
+  camera info) and every other group declares `[]`. An empty list opens no menu, so
+  the other headers keep the no-op behavior they had before headers had menus at all;
+  an empty array rather than an absent key is what makes "no items" a stated decision
+  and a new group a compile error. Tested in `test/groupMenu.test.ts`.
 
 ## Selection model
 
