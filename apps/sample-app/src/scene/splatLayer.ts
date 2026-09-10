@@ -448,7 +448,14 @@ export class SplatLayer implements GizmoAttachable, SplatDepthWriter {
       // `onDirty` is Spark's "I have new sort/LOD results, re-render" signal —
       // the hook to use if the viewport ever moves off a continuous animation
       // loop, which it has not (§4.4).
-      this.sparkRenderer = new spark.SparkRenderer({ renderer: this.renderer });
+      //
+      // **`encodeLinear: true`** because these captures draw into the fog
+      // compositor's offscreen **linear** scene target, not the canvas (§4.7):
+      // Spark's shader otherwise emits sRGB, which the composite's own
+      // `colorspace_fragment` then encodes a second time — a capture that reads
+      // bright and washed out beside geometry that is correct. It is the value
+      // Spark itself picks whenever it owns a target.
+      this.sparkRenderer = new spark.SparkRenderer({ renderer: this.renderer, encodeLinear: true });
       this.group.add(this.sparkRenderer);
     }
     // `lod` is deliberately absent: with `packedSplats` supplied, Spark reads the

@@ -8,6 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import type { Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 
 import {
@@ -320,4 +321,22 @@ test('before Spark loads there is nothing to draw', () => {
   // `SparkRenderer` arrives with the first capture load (§4.2); until then the
   // pass has no material to flip and no splats to rasterize.
   assert.equal(needsSplatDepthPass({ sparkReady: false, meshCount: 0, visible: true }), false);
+});
+
+// --- SparkRenderer colour-space parity (§4.7) ------------------------------
+//
+// Spark cannot run under `node --test`, so this is a source assertion in the
+// same spirit as `volumetric.test.ts`'s shader parity: it proves nothing about
+// the pixels, and catches the one edit that would silently drop the option.
+// The failure it guards is invisible everywhere but the screen — captures
+// gamma-encoded twice by the fog composite, bright and washed out beside
+// geometry that is correct.
+
+test('the SparkRenderer is constructed for a linear render target', () => {
+  const source = readFileSync(new URL('../src/scene/splatLayer.ts', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /new spark\.SparkRenderer\(\{[^}]*encodeLinear:\s*true[^}]*\}\)/,
+    'the captures draw into the compositor’s linear scene target, so Spark must convert (§4.7)',
+  );
 });

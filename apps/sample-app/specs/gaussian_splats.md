@@ -450,6 +450,26 @@ the reason the row reports its splat count (§6.2) rather than only its file siz
 capture turns out too heavy, the remedies are all upstream: export fewer splats, or
 crop the capture to the area being planned.
 
+### 4.7 Colour space
+
+The captures draw into the fog compositor's offscreen scene target, not the canvas
+(`volumetric_rendering.md` §4), and that target is **linear**: Three.js applies its
+output transform only on the canvas write, which the composite pass does once for the
+whole frame.
+
+Spark's splat shader writes its decoded colours **as sRGB** by default
+(`encodeLinear: false`) — correct for a direct canvas draw, wrong here, where the
+composite would then encode them a second time. A capture rendered that way is visibly
+bright and washed out, with lifted blacks, while the geometry beside it is correct:
+the two do not share a shader, and only the splats miss the conversion.
+
+The `SparkRenderer` is therefore constructed **`encodeLinear: true`**, which is the
+same value Spark picks for itself whenever it owns a render target. Its conversion is
+a plain 2.2 power against Three.js's piecewise sRGB transfer; the sub-percent
+divergence in the deepest tones is accepted rather than reimplemented.
+
+The depth-only redraw (§4.5) is unaffected — it runs with `colorWrite` off.
+
 ---
 
 ## 5. Visibility
@@ -847,6 +867,11 @@ Tested under `node --test`:
   (an invisible occluder would punch capture-shaped holes in the fog), and false
   before Spark loads. It is a pure function precisely so the pass's *whether* is
   tested while its *draw* stays in the untestable layer below.
+
+- **`SparkRenderer` colour-space parity** — a source assertion that `splatLayer.ts`
+  constructs its `SparkRenderer` with `encodeLinear: true` (§4.7), in the same spirit
+  as `volumetric.test.ts`'s shader-source parity: Spark cannot run under `node --test`,
+  and the failure this guards against is silent everywhere but the screen.
 
 Not covered by tests, and deliberately kept thin: `splatLayer.ts` — canvas creation,
 `SparkRenderer` construction, the stream load, `mesh.visible`, the depth-only redraw

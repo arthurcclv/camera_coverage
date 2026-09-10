@@ -6,6 +6,33 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The splats convert to linear themselves, because the fog composite owns the sRGB write
+
+Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.7.
+
+Three.js applies its output colour-space transform **only on a canvas write**. Since
+the fog compositor moved the main pass into an offscreen target
+(`volumetric_rendering.md` §4), that write is the composite's own
+`#include <colorspace_fragment>`, and everything drawn into the scene target must be
+**linear** by the time it lands there.
+
+Three's own materials already are. Spark's splat shader is not: it emits **sRGB**
+unless told otherwise, which is right for a direct canvas draw and wrong here — the
+composite then encodes it a second time, and the capture reads bright and washed out
+next to geometry that is correct. Nothing errors, nothing logs, and the geometry
+looking fine is exactly what makes it read as a bad capture rather than a bug in the
+frame.
+
+So the `SparkRenderer` is constructed **`encodeLinear: true`**, which is the value
+Spark picks for itself whenever it owns a render target. The alternative — tagging the
+scene target `SRGBColorSpace` so Three round-trips it — would have been a wider change
+for the same pixels, and would leave the composite mixing fog and scene in sRGB, which
+is the wrong space for that blend.
+
+The rule this leaves behind: **anything drawn into the scene target with a shader of
+its own owes the frame linear output.** The depth-only splat redraw is exempt because
+it writes no colour at all.
+
 ## The camera info export owns its own Euler convention, and its own raycaster
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §15.
