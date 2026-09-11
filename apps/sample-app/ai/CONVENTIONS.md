@@ -130,7 +130,18 @@ cannot be keyed on one.
 - Runner is `node:test` (`node --test --experimental-strip-types
   "test/**/*.test.ts"`) with `node:assert/strict`. No framework, no bundler.
 - **Tests target pure functions and CPU-side Three.js objects — never the React
-  render tree or the GPU** (no renderer, no `viewport.ts`, no render loop).
+  render tree or the GPU** (no renderer, no `viewport.ts`, no render loop). The one
+  sanctioned exception is a **recording renderer stub**: a plain object with the handful
+  of `WebGLRenderer` methods a pass calls, which records the calls in order
+  (`cameraLabels.test.ts`). It is still no GPU and no render loop — what it pins is the
+  *pass protocol*, the part that is invisible in a screenshot and silent when wrong: which
+  target gets bound, that a state target is cleared exactly once, and that the target,
+  `autoClear`, clear colour and viewport handed in are all put back. Use it only for a
+  pass whose correctness **is** that ordering; assert the recorded sequence exactly, since
+  a stray clear is the failure it exists to catch. **GLSL** is asserted the same weak way
+  either side of it: export the shader source as a constant and match the reference's
+  terms against it (`volumetric.test.ts`, `cameraLabels.test.ts`) — never by reaching into
+  a material for `.fragmentShader`.
   Most suites are pure: `sceneTree`, `coverageOverlay`, `transformSpace`,
   `volumetric`, `leftPanelSplit`, `probeVisibility`, `viewportSelection`,
   `sectionHeatmap`, `sceneReducer`, `coverageRun` (the run coordinator: generation

@@ -33,7 +33,8 @@ import { createViewport, type Viewport } from '../viewport.ts';
 import { aimDelta } from '../../cameras/aim.ts';
 import { eulerToQuat, quatToEuler, type EulerAngles } from '../../cameras/math.ts';
 import type { CameraViewFit } from '../viewCameras.ts';
-import { CameraGizmoSet } from '../cameraGizmos.ts';
+import { CameraGizmoSet, type CameraFocus } from '../cameraGizmos.ts';
+import { CameraLabelLayer, canvasLabelRasterizer } from '../cameraLabels.ts';
 import { ProbeGizmoSet } from '../probeGizmos.ts';
 import { SectionGizmoSet } from '../sectionGizmos.ts';
 import { SamplingVolumeGizmoSet } from '../samplingVolumeGizmos.ts';
@@ -97,6 +98,11 @@ export interface SceneViewState {
   transformSpace: TransformSpace;
   activeView: ViewId;
   gizmosVisible: boolean;
+  /**
+   * The **Camera names** layer toggle (spec §2.4). Subordinate to `gizmosVisible`:
+   * with the camera layer hidden there is no body for a label to sit beside.
+   */
+  cameraNamesVisible: boolean;
   zonesVisible: boolean;
   sectionsVisible: boolean;
   stale: boolean;
@@ -187,6 +193,7 @@ const sectionId = (s: Selection): string | null => (s?.kind === 'section' ? s.id
 export class SceneView {
   private readonly viewport: Viewport;
   private readonly gizmos: CameraGizmoSet;
+  private readonly cameraLabels: CameraLabelLayer;
   private readonly probeGizmos: ProbeGizmoSet;
   private readonly sectionGizmos: SectionGizmoSet;
   private readonly volumeGizmos: SamplingVolumeGizmoSet;
@@ -252,6 +259,9 @@ export class SceneView {
   private constructor(viewport: Viewport) {
     this.viewport = viewport;
     this.gizmos = new CameraGizmoSet();
+    // Rasterised at the renderer's own pixel ratio so label text is crisp on a HiDPI
+    // display (spec §5.3).
+    this.cameraLabels = new CameraLabelLayer(canvasLabelRasterizer(viewport.renderer.getPixelRatio()));
     this.probeGizmos = new ProbeGizmoSet();
     this.sectionGizmos = new SectionGizmoSet();
     this.volumeGizmos = new SamplingVolumeGizmoSet();
@@ -271,6 +281,9 @@ export class SceneView {
     // max-blends into its own target and is composited over the scene
     // (`volumetric_rendering.md` §4, `fogCompositor.ts`).
     viewport.setFogScene(this.overlay.scene);
+    // Nor are the name labels: they draw over the composited canvas so the fog cannot
+    // haze the one thing that has to stay readable (`volumetric_rendering.md` §4.1).
+    viewport.setLabelOverlay(this.cameraLabels);
 
     // A viewport click raycasts each pickable set and the nearest hit wins
     // (`pick.ts`); attach maps a selection kind straight to the set that owns its
@@ -538,9 +551,27 @@ export class SceneView {
     // --- camera gizmos (spec §5.3): [cameras, selectedCameraId, flagged, activeView].
     // `activeView` joins the diff because the camera being rendered through draws
     // neither body nor frustum (spec §2.4.1). -----------------------------------
+    // Bodies and their name labels are driven by the same pair of ids, so it is
+    // derived once for both (spec §5.3, §2.4.1).
+    const focus: CameraFocus = {
+      selectedId: camId(next.selection),
+      suppressedId: next.activeView === 'camera' ? camId(next.selection) : null,
+    };
     if (!prev || prev.cameras !== next.cameras || camId(prev.selection) !== camId(next.selection) || prev.flaggedCameras !== next.flaggedCameras || prev.activeView !== next.activeView) {
-      const suppressed = next.activeView === 'camera' ? camId(next.selection) : null;
-      this.gizmos.update(next.cameras, camId(next.selection), next.flaggedCameras, suppressed);
+      this.gizmos.update(next.cameras, focus.selectedId, next.flaggedCameras, focus.suppressedId);
+    }
+
+    // --- camera name labels (spec §5.3): the gizmo diff plus the names toggle. Same
+    // inputs, because a label draws exactly when its body does — `cameraBodyVisible`
+    // is shared, so only the extra toggle joins the diff. ------------------------
+    if (
+      !prev ||
+      prev.cameras !== next.cameras ||
+      camId(prev.selection) !== camId(next.selection) ||
+      prev.activeView !== next.activeView ||
+      prev.cameraNamesVisible !== next.cameraNamesVisible
+    ) {
+      this.cameraLabels.update(next.cameras, focus, next.cameraNamesVisible);
     }
 
     // --- probe gizmos (spec §12.4): [probes, selectedProbeId] -------------------
@@ -639,6 +670,9 @@ export class SceneView {
     // --- gizmo layer visibility (spec §2.4) ------------------------------------
     if (!prev || prev.gizmosVisible !== next.gizmosVisible) {
       this.gizmos.group.visible = next.gizmosVisible;
+      // The labels are a separate scene, so the layer toggle has to reach them too —
+      // hiding the cameras hides their names whatever the names toggle says (§2.4).
+      this.cameraLabels.scene.visible = next.gizmosVisible;
     }
 
     // --- zone (sampling-volume) layer visibility (spec §2.4) -------------------
@@ -701,6 +735,7 @@ export class SceneView {
     this.viewport.transformControls.removeEventListener('objectChange', this.onObjectChange);
     this.overlay.dispose();
     this.gizmos.dispose();
+    this.cameraLabels.dispose();
     this.probeGizmos.dispose();
     this.sectionGizmos.dispose();
     this.volumeGizmos.dispose();

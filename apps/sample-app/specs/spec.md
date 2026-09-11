@@ -399,6 +399,12 @@ heatmap legend at its bottom-right (§13.6):
     just not drawn or clickable in the viewport. The layer toggle and the
     per-camera flag hide independently; §2.4.3 covers the flag. Defaults to
     visible.
+  - **Camera names** — shows/hides the per-camera name labels (§5.3) without
+    hiding the cameras themselves. **Subordinate to Cameras**: with the camera
+    layer hidden there is no body to sit beside, so the labels are hidden too
+    whatever this row says. It is the escape from the wall of text a site with
+    ~100 cameras draws when zoomed out — the labels keep a constant pixel size by
+    design, so distance never thins them. Defaults to visible.
   - **Zones** — shows/hides all sampling-volume gizmos (`sampling_volumes.md` §5)
     at once. Purely visual and independent of the `useZones` compute setting
     (`sampling_volumes.md` §6.3) and per-zone enabled state: hiding the gizmos
@@ -1072,6 +1078,86 @@ camera (§5.4). A non-selected camera shows only its body, never a frustum, rega
 of enabled or flagged (`CAMERA_INSIDE_GEOMETRY`) state. A disabled camera draws nothing unless it is the
 selection, which dims its body to 0.3 and keeps its frustum (§2.4.3). A viewport-level toggle can hide/show the whole camera layer at once
 (§2.4).
+
+**Name label.** Beside each drawn body the camera's display name — the trimmed
+`name`, or the `Camera N` fallback (§5.6's rule, shared via `cameraLabel()`) — is drawn
+as a **2D label**: **white** 11 px/600 text carrying a **2 px black outline** and no
+plate behind it, anchored **4 screen-pixels to the right of the body's own drawn edge**
+and vertically centred on it. The gap is measured to the **first glyph**, not to the
+texture that carries it: the margin that keeps the outline from being clipped is
+transparent, so counting it as gap would make the number in this spec and the space on
+the screen two different things — the offset applied is the gap *less* that margin. An
+outline rather than a plate because at ~100 cameras the plates are the picture — a grid of opaque black rectangles hides the very coverage fog
+and site capture they are annotating, while an outline costs only the glyphs' own area
+and still separates the name from whatever it crosses. It is white rather than the
+palette's `#e6e8eb` because the contrast now comes from the outline, not from a dark
+ground: against the brightest thing a label can cross the pair reads as black-on-white,
+and the lighter of the two texts is the one that survives it. The texture keeps a small
+transparent margin around the glyphs so the outline is never clipped at its edge.
+Measured from the **edge**, not the centre: the body is world-sized, so how wide it
+draws depends entirely on the framing, and a fixed gap from the centre would put the
+label on top of a body a couple of metres from the eye — exactly the close-up the
+Perspective view exists for. The label itself is **screen-space**: constant pixel size and a constant gap at every distance and in every
+view, the three orthographic elevations included, so a name is as readable across a
+1120 m site as across a room. A name wider than **140 px** is **ellipsised** — the full
+text stays in the camera panel (§5.1), and a label that grew with its name would blanket
+the viewport at site scale. The ellipsis alone is the floor: a name too long for even
+one character to fit still draws its ellipsis, because a label that marks *there is a
+name here* is worth more than a blank.
+
+The label draws **exactly when the body draws**: same layer toggle, same
+disabled-camera rule (§2.4.3), same rendering-through suppression below. One shared
+predicate decides for both, so the two can never disagree. A second viewport toggle,
+**Camera names** (§2.4), hides the labels without hiding the cameras. Labels are **not
+clickable** — picking is unchanged (§5.2), so a label can never steal a click from the
+body it names, and a name that overlaps a neighbouring camera costs nothing.
+
+**The body's visibility decides the label's, and nothing else does.** A label is drawn
+when the camera's **body** is unobstructed, and hidden when something in the scene
+stands in front of that body — a wall, a box, a splat capture. When it is drawn it is
+drawn **whole and on top**: over geometry, over the captures, and over the coverage
+fog, whatever happens to lie in front of the label itself. The label is never
+*partially* eaten by an edge it overlaps, which is the difference between a label and a
+decal — a name clipped down its middle by a pillar three metres closer to the eye reads
+as a rendering fault, and is unreadable besides.
+
+That makes the occlusion test **one sample per label, not one per pixel**: the pass
+runs after the fog composite where the canvas depth no longer describes the scene, so
+the shader reads the scene's depth texture at the **body's** own screen position and
+draws or drops the whole quad (`volumetric_rendering.md` §4.1). The tolerance clears the
+body's own radius — the **larger** of the two body sizes, so a selected body is cleared
+too — and what the depth buffer cannot resolve at that distance (sized, with its safety
+factor, in `volumetric_rendering.md` §4.1), and nothing beyond those two: a camera whose
+body is visible is never hidden by the body itself, and a camera hidden behind anything
+thicker than the pair loses its label. Neither term scales with the **eye distance**, which
+is the failure this pass exists to avoid: a tolerance that did would, at site scale,
+leave metres of geometry unable to hide anything.
+
+**A label's opacity never changes abruptly.** Occlusion is a binary fact about the
+scene, but showing it as one makes labels strobe: the anchor's pixel drifts sub-pixel as
+the view moves, the depth under it is unstable where the body is near-coplanar with a
+surface or in front of a 3DGS capture, and a body crossing a wall's silhouette crosses
+it within a frame or two. So the raw test drives a **damped opacity**, smoothed two
+ways:
+
+- **spatially** — the depth is sampled over a small ring around the body rather than at
+  one texel, and each sample ramps across a depth **band** instead of switching at a
+  threshold, which removes the jitter at a grazing edge;
+- **temporally** — the result is eased toward, never jumped to, with a fixed time
+  constant (~150 ms, so a transition completes in roughly a third of a second). The
+  easing is **frame-rate independent**: it is a function of elapsed time, not of frames
+  drawn, so the fade looks the same at 30 fps as at 120, and a long stall (a tab in the
+  background) resumes with a bounded step rather than a jump.
+
+A camera passing behind a wall therefore fades out over that time constant, and a new
+label — a camera just added, or one whose anchor has come back into view — fades in over
+it rather than appearing at full strength. A label near an edge settles at full opacity
+or none, never at a permanent half.
+
+The one instant change is **deliberate user action**: hiding the layer with the
+**Camera names** or **Cameras** toggle (§2.4), disabling a camera, or entering the
+Selected view takes effect at once. Those are not occlusion, and easing them would read
+as lag in the control.
 
 **Exception — rendering through the camera.** While the viewport renders *through*
 the selected camera (the **Selected** view, §2.4.1), that camera draws

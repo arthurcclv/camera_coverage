@@ -6,6 +6,241 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## The label occlusion tolerance is sized in metres of *body*, not in percent of eye distance
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3,
+[`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md) §4.1.
+
+The probe's depth comparison carried `tol = 0.35 + 0.01 * anchorDist`, with a ramp band
+of `tol + 0.02 * anchorDist` on top. The constant is the camera body — the probe samples
+the anchor pixel, and the body's own sphere is what the depth texture usually holds there
+— and the distance terms were a hand-waved allowance for depth precision.
+
+They do not survive the real site. At 400 m of eye distance the pair comes to a 4.4 m
+tolerance and a 17 m band, so an occluder has to stand **17 metres** in front of a camera
+before its label disappears. Every camera mounted on a wall, or tucked behind a
+container, kept its name visible from any distant viewpoint — the failure mode this whole
+pass exists to prevent. Up close the numbers are harmless, which is why it read as "only
+in certain perspectives."
+
+**Decision.** Neither term scales with the eye distance. The tolerance is the body's
+radius — a fixed 0.22 m sphere at every scene scale, taken at the selected body's 1.4x so
+one uniform covers both sizes — plus what the depth buffer genuinely cannot resolve
+there: `z² · (1/near − 1/far) / 2²⁴` under a perspective camera, a constant
+`(far − near) / 2²⁴` under an orthographic one, times a safety factor of 8 for the
+interpolation, the linearisation and a capture's noisier pass-1b depth. The band is one
+further tolerance. At 400 m that is ~1 m to start fading and ~2 m to hide, against 4.4 m
+and 17 m before.
+
+The precision term is the right *shape*, not just a smaller number: a perspective buffer
+stores a reciprocal, so its world-space step grows with the square of the distance. The
+old linear fit was ~50x too generous at 400 m and would have been too tight at 2000 m.
+
+`uMaxBodyRadius` is a uniform rather than a per-anchor attribute: the selected and
+unselected radii differ by 0.09 m, comfortably inside the precision term the tolerance
+already carries, so a per-anchor value would buy nothing for an extra buffer upload every
+frame. The name says *max* because that is what it holds — the vertex shader's own
+`uBodyRadius` is the per-camera value, and one name for two different quantities was
+worth losing.
+
+The numbers live in TypeScript (`DEPTH_STEPS`, `DEPTH_SAFETY`, `MAX_BODY_RADIUS`) and the
+shader is built from them, with `labelOcclusionToleranceM()` mirroring the arithmetic —
+the same "CPU reference is the tested truth" discipline the fog shader follows
+(`volumetric_rendering.md` §6). It is what makes the claim above testable: asserting the
+shader *source* only pins the syntax, and a `dist * dist` term that is metres wide at
+site scale passes that while failing the thing the spec actually says.
+
+---
+
+## Camera name labels are outlined text, not text on a plate
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3.
+
+The first labels drew `#e6e8eb` on an 80%-black rounded plate — the badge treatment from
+[VISUAL_DESIGN.md](VISUAL_DESIGN.md), applied to viewport chrome for consistency. That
+holds up at the room scale the demo defaults to and fails at the site scale it exists
+for: ~96 cameras is ~96 opaque rectangles scattered over the viewport, and what they
+cover is the coverage fog and the 3DGS capture the labels are there to annotate. The
+plate is also the largest thing the label draws, so the overlap between neighbouring
+labels is far worse than the names alone would cause.
+
+**Decision.** No plate. White `#ffffff` glyphs with a 2 px black outline — `strokeText`
+at `lineWidth` 4 (canvas strokes straddle the path, so half lands outside), round joins
+and caps, drawn *before* the fill so the inner half of the stroke stays off the
+letterforms and the 600 weight survives. That order is the load-bearing part, so the
+painting is its own function (`paintLabelText`) over the handful of 2D-context calls it
+needs rather than a whole canvas, and a recording stub pins the order under `node --test`
+(CONVENTIONS.md). The label now costs only the glyphs' own area,
+and reads against both the dark ground and a bright splat.
+
+The text goes to **white** rather than staying at the palette's `#e6e8eb`: with the dark
+plate gone the contrast comes entirely from the outline, and against the brightest thing
+a label can cross the pair reads as black-on-white, where the lighter of the two texts is
+the one that survives. This is the one place viewport chrome departs from the Text
+palette, and the reason is the missing ground, not a second type system.
+
+The plate's padding stays, re-purposed as a transparent **margin** (4x4 px) so the
+outline is not clipped at the texture's edge — `LABEL_PAD_Y` went 2 -> 4 because the
+ascender fills the 14 px line box and the stroke needs room above it. The fragment
+shader's transparent-pixel early-out now discards that margin instead of the plate's
+rounded corners.
+
+The gap from the body's drawn edge went **8 px -> 4 px**, and it is now measured to the
+**first glyph** rather than to the quad. Both follow from the plate going away. The
+plate was opaque, so its own edge was what the eye read as the label's edge and 8 px was
+the space between two solid shapes; the glyphs carry no such edge, and the same 8 px
+reads as a detached name. And because the quad now leads with 4 px of transparent
+margin, a gap measured to the quad would put the first glyph 4 px further out than the
+number claims — so `LABEL_QUAD_OFFSET_PX` is the gap *less* the margin (0 px today), and
+the number in the spec is the space that lands on screen.
+
+---
+
+## The reconcile loop is a function, so the label layer shares it without inheriting
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3.
+
+`GizmoSet` owned the create/update/sweep loop as a protected method, which is the right
+home for the four gizmo sets and the wrong one for the name labels. The labels are a
+keyed layer reconciled against the cameras exactly like a gizmo set, but they hang their
+meshes in a `THREE.Scene` of their own rather than under `group` (they draw after the fog
+composite, §4.1), and they are never TransformControls-attachable. Extending `GizmoSet`
+would have meant implementing `attachTargetOf` for a caller that does not exist — a
+refused bequest — and the first version instead **copied the loop**, entries map, `seen`
+set and sweep included.
+
+Neither is necessary: the loop does not depend on the group or the attach target, only on
+a `Map` and three callbacks. So it moved out to `reconcileKeyed(entries, items, {create,
+update, dispose})` in `gizmoSet.ts`, `GizmoSet.reconcile` became one call to it, and the
+label layer calls it directly. One copy of the loop, no inheritance the layer would only
+partly honour. `create` takes the whole item rather than just its id, because a label
+needs the camera's name to rasterise on first sight.
+
+---
+
+## A label's fade survives both slot recycling and a capacity change
+
+Behavior in [`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md) §4.1.
+
+The per-label opacity lives in one texel of a persistent target that is **never cleared**
+— that is what makes a new label fade in rather than pop, and an existing one keep its
+average across frames. Two housekeeping events broke it in the first version, both by
+re-initialising the whole target: recycling the slot of a departed camera (whose texel
+still held that camera's fade) and growing the target past its 64-label step. The second
+one fires on the real site during a normal load — ~96 cameras — so every label on screen
+restarted its fade-in at once, which is exactly the pop the design exists to prevent.
+
+Both are now local. A recycled slot has **its own texel** zeroed, which is all that was
+ever needed: the new label fades in and no other label's average moves. That also
+simplifies the allocator — it can be a plain free list, where before it preferred fresh
+slots and recycled only when capacity was full, precisely to avoid the whole-target
+reset. A capacity change **copies** the old row into the grown target, one triangle
+sampling the old texture at `uv.x * newCapacity / oldCapacity` — texel-for-texel under
+`NearestFilter`, and zero past the old capacity, which is what a not-yet-probed texel
+holds anyway.
+
+Both are **draws, not clears**, and that is the one non-obvious part. The natural way to
+zero one texel is a scissored clear, and the natural way to copy a row is to draw it
+through a narrower viewport — but `WebGLRenderer` multiplies both a viewport and a
+scissor by its pixel ratio, so on a HiDPI display either would address the wrong texels
+of a target whose width is a label count rather than a pixel count. A draw carries its
+own mapping and is immune. Both are queued, since they need the renderer and `update()`
+does not have one, and flushed at the top of the next probe pass — before the probe
+itself, so no frame sees a half-built target. A one-time clear still supersedes both: if
+nothing has been probed yet there is no state to preserve.
+
+---
+
+## Camera name labels are textured quads in a post-composite pass, not sprites
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3 and
+[`../specs/volumetric_rendering.md`](../specs/volumetric_rendering.md) §4.1.
+
+A name beside each camera looks like a job for `THREE.Sprite`: it billboards for free
+and the app already rasterises text-free sprites for the orientation gizmo's negative
+axis rings. Two requirements ruled it out, in sequence.
+
+**Constant pixel size.** A world-sized label is unreadable on a 440x201x1120 m site
+from any framing that shows more than a corner of it, and microscopic in the Top
+elevation. Constant *screen* size is what makes the labels worth having — but
+`SpriteMaterial` scales with distance, so keeping a fixed pixel height means writing a
+scale per label per frame from JS, in five views with two different projections.
+Doing it in a **vertex shader** instead is both exact and free: offset the projected
+position in NDC by `px * 2 / resolution * clipW` and the quad is the same pixel size
+under perspective and orthographic projection alike, with no per-frame work and no new
+per-frame hook on `Viewport`.
+
+**Legible over the fog, occluded by walls.** A label drawn in the scene is hazed by
+the coverage overlay exactly when the overlay is densest, which defeats the point of
+labelling. Moving it after the composite fixes legibility and costs the depth buffer:
+pass 3 is a full-screen triangle, so the canvas depth no longer describes the scene
+(`volumetric_rendering.md` §4.1). The occlusion is bought back by sampling the shared
+`DepthTexture` in the shader — the same depth the fog reads, no second traversal.
+
+**Flicker is damped twice, and the temporal half is done by the blend unit.** A
+single tap against a single threshold strobes wherever the anchor sits on a boundary —
+sub-pixel view drift moves which texel is read, and the depth in that texel is unstable
+against a near-coplanar surface or a capture's pass-1b depth. Spreading the test
+*spatially* (a ring of taps, each ramped over a depth band) fixes the jitter but not the
+pop: a body crossing a wall's silhouette crosses it in a frame or two, and all nine taps
+cross together.
+
+Easing over *time* needs per-label state, and the result lives on the GPU. A readback
+would stall the pipeline; a ping-pong pair of state targets works but doubles the
+machinery. The cheaper route is to let the **blend unit** do the easing: one persistent
+`capacity x 1` half-float target, never cleared, written by a points draw of one pixel
+per label with `ConstantAlphaFactor` / `OneMinusConstantAlphaFactor`, which evaluates to
+`k * raw + (1 - k) * previous` — an exponential moving average, accumulated in the
+target, with no second target and no shader-side state. `k = 1 - exp(-dt / tau)` makes
+it frame-rate independent, and `dt` is capped so a backgrounded tab resumes with a
+bounded step.
+
+That probe pass pays for itself twice over: the nine depth taps move from *every pixel
+of every label* to **one fragment per label**, so the smoother version is also the
+cheaper one. Half float rather than RGBA8 because an 8-bit texel quantises the average's
+increments and it stalls short of its limit.
+
+**The sample is at the anchor, so the test is all-or-nothing.** The obvious
+implementation samples at each fragment's own `gl_FragCoord`, which makes the label
+behave like a decal in the scene: a pillar three metres nearer than the camera cuts the
+name down the middle, and the half that survives is unreadable *and* looks like a
+rendering fault. What the label is actually asserting is "**this point** is a camera",
+so the thing that should decide its visibility is whether that point is obstructed —
+one sample, carried from the vertex shader as a varying, at the body's screen position.
+The whole quad then survives or discards together, and a surviving label draws over
+geometry, captures and fog alike. The cost is a tolerance in the comparison: the depth
+at a camera's anchor pixel is usually the camera *body* itself, so a strict test would
+hide every label behind its own gizmo.
+
+Both requirements land on a **custom `ShaderMaterial`**, and a `Sprite` cannot carry
+one: its billboarding lives inside `SpriteMaterial`'s own shader. So the label is a
+plain `Mesh` + `PlaneGeometry` whose vertex shader billboards, sizes, and offsets it in
+one step. The cost is ~60 lines of GLSL and an ortho/perspective branch in the depth
+linearisation — against which `InstancedMesh` was also rejected, since 96 small canvas
+textures are cheaper to reason about than a text atlas that repacks on every rename.
+
+The rasteriser is injected (`(text) => {texture, widthPx, heightPx}`) so the layer
+constructs under bare `node --test`, where there is no `document`.
+
+---
+
+## Label visibility is one predicate, not two copies
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3.
+
+Labels live in a different scene from the bodies they name, but must appear and
+disappear with them — the layer toggle, the disabled-camera rule, and the
+rendering-through suppression all apply to both. Two `update()` methods in two files
+re-deriving the same condition is precisely the drift `statsDisplay.ts` exists to
+prevent for the coverage numbers, so the condition was extracted instead:
+`cameraBodyVisible(camera, selectedId, suppressedId)` in `cameraGizmos.ts`, called by
+both layers, with the **Camera names** toggle ANDed on top for labels only.
+
+It is also the testable half of the feature. The predicate is pure, so the rule is
+pinned by unit tests rather than by looking at the viewport.
+
+---
+
 ## Reset view fits the scene's bounding sphere, not its box
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4.

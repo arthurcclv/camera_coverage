@@ -13,6 +13,11 @@ export interface ViewportLayerMenuProps {
   coverageVisible: boolean;
   sectionsVisible: boolean;
   camerasVisible: boolean;
+  /**
+   * The per-camera name labels (spec §5.3). Subordinate to `camerasVisible`: with
+   * the camera layer hidden there is no body for a label to sit beside.
+   */
+  cameraNamesVisible: boolean;
   zonesVisible: boolean;
   /** Constraint gizmos + the placement pool scatter (`camera_placement.md` §5.2, §6.1). */
   constraintsVisible: boolean;
@@ -29,6 +34,7 @@ export interface ViewportLayerMenuProps {
   onToggleCoverage(): void;
   onToggleSections(): void;
   onToggleCameras(): void;
+  onToggleCameraNames(): void;
   onToggleZones(): void;
   onToggleConstraints(): void;
   onToggleSplats(): void;
@@ -64,6 +70,17 @@ function CameraIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polygon points="23 7 16 12 23 17 23 7" />
       <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+    </svg>
+  );
+}
+
+// Camera names = a name beside a point, which is what the layer draws (§5.3).
+function CameraNameIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="4" cy="12" r="2" fill="currentColor" stroke="none" />
+      <rect x="9" y="8" width="13" height="8" rx="2" />
+      <path d="M12 12h7" />
     </svg>
   );
 }
@@ -171,6 +188,12 @@ export function ViewportLayerMenu(props: ViewportLayerMenuProps) {
           <LayerRow label="Coverage" icon={<LayersIcon />} checked={props.coverageVisible} onToggle={props.onToggleCoverage} />
           <LayerRow label="Sections" icon={<GridIcon />} checked={props.sectionsVisible} onToggle={props.onToggleSections} />
           <LayerRow label="Cameras" icon={<CameraIcon />} checked={props.camerasVisible} onToggle={props.onToggleCameras} />
+          <LayerRow
+            label="Camera names"
+            icon={<CameraNameIcon />}
+            checked={props.cameraNamesVisible}
+            onToggle={props.onToggleCameraNames}
+          />
           <LayerRow label="Zones" icon={<ZonesIcon />} checked={props.zonesVisible} onToggle={props.onToggleZones} />
           <LayerRow
             label="Constraints"

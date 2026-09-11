@@ -91,6 +91,16 @@ export class FogCompositor {
   /** Scratch for `getClearColor`, so the per-frame save/restore allocates nothing. */
   private readonly prevClear = new THREE.Color();
 
+  /**
+   * The depth the scene pass wrote, for a later pass that needs occlusion but has no
+   * depth buffer of its own (`volumetric_rendering.md` §4.1). The camera name labels
+   * draw over the composited canvas and discard against exactly this texture, which
+   * is the same one the fog depth-tests through.
+   */
+  get sceneDepthTexture(): THREE.DepthTexture | null {
+    return this.sceneTarget.depthTexture ?? null;
+  }
+
   constructor() {
     const depth = new THREE.DepthTexture(1, 1);
     this.sceneTarget = new THREE.WebGLRenderTarget(1, 1, { depthTexture: depth });

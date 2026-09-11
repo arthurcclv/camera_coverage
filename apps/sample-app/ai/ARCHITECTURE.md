@@ -27,11 +27,15 @@ lives in the world (`spec.md` §2.3, `gaussian_splats.md` §4):
       └─ splat group  ← SparkRenderer, one SplatMesh per row, the clip SplatEdit
 ```
 
-The coverage fog is the one thing **not** in that scene. It owns its own
-`THREE.Scene` and draws in its own pass, so a frame is three steps — scene → fog →
-composite — rather than one `render` call: `fogCompositor.ts` (below) draws the
-scene above to an offscreen target, accumulates the fog into a second target sharing
-that target's `DepthTexture`, and composites the two. That is why the fog takes no
+Two layers are deliberately **not** in that scene: the coverage fog and the camera
+name labels. Each owns its own `THREE.Scene` and draws in its own pass, so a frame is
+four steps — scene → fog → composite → labels — rather than one `render` call.
+`fogCompositor.ts` (below) draws the scene above to an offscreen target, accumulates
+the fog into a second target sharing that target's `DepthTexture`, and composites the
+two; `cameraLabels.ts` then runs its own two steps over the composited canvas — a one-pixel-
+per-label occlusion probe against that same `DepthTexture`, eased over time in a small
+persistent target, and then the label quads at the opacity it yields
+(`volumetric_rendering.md` §4.1). That is why the fog takes no
 draw order and has no entry in `renderOrder.ts` (`volumetric_rendering.md` §4).
 
 Everything in the scene shares one depth buffer, so a capture is occluded by the
@@ -431,9 +435,37 @@ default" — see DECISIONS.md).
   several meshes, so that set opts in rather than every set paying for it.
   `GizmoPicker` /
   `GizmoAttachable` are the minimal interfaces `SceneView` holds the sets behind
-  in its pick and attach registries. See DECISIONS.md's GizmoSet entry.
+  in its pick and attach registries. Also exports the reconcile loop on its own as
+  **`reconcileKeyed(entries, items, {create, update, dispose})`**, for a keyed layer that
+  wants the loop without the base class — `cameraLabels.ts` is the one such layer, and
+  `GizmoSet.reconcile` is itself one call to it, so there is a single copy of the loop.
+  See DECISIONS.md's GizmoSet entry.
 - `cameraGizmos.ts` — per-camera frustum wireframe + pickable "body" sphere;
-  selection / flag / disable styling. Extends `PickableGizmoSet`.
+  selection / flag / disable styling. Extends `PickableGizmoSet`. Exports
+  `cameraBodyVisible()`, the one predicate deciding whether a camera draws at all —
+  `cameraLabels.ts` calls the same function so a label can never outlive its body.
+- `cameraLabels.ts` — the per-camera **name label** layer (spec §5.3): one textured
+  quad per camera in a `THREE.Scene` of its own, drawn in a fourth pass after the fog
+  composite (`volumetric_rendering.md` §4.1). The quad billboards, sizes itself in
+  screen pixels and applies its right-offset entirely in the **vertex shader**, so
+  the layer costs no per-frame JS. Occlusion is resolved in a **state pass of its own**
+  (pass 4a): one point per label probes the scene `DepthTexture` at that camera's
+  **anchor** over a ring of taps, and the blend unit eases the result into a persistent
+  `capacity x 1` half-float target — an EMA with no readback and no ping-pong pair. Each
+  label's quad then reads its own texel as opacity, so a label behind a wall fades out
+  whole rather than being clipped per pixel. See DECISIONS.md.
+  The 4 px gap is measured from the body's **projected edge** to the label's **first
+  glyph**, so the vertex shader carries the body's world radius (`CAMERA_BODY_RADIUS`,
+  exported by `cameraGizmos.ts`) and converts it to pixels per frame, and the offset it
+  is handed is the gap less the texture's transparent margin (`LABEL_QUAD_OFFSET_PX`).
+  The probe's depth tolerance keeps its numbers in TypeScript and builds the shader from
+  them, with `labelOcclusionToleranceM()` as the tested CPU mirror. Reconciles through `reconcileKeyed` (gizmoSet.ts)
+  rather than extending `GizmoSet`, which it could not use as-is — see DECISIONS.md.
+  Takes its rasteriser as a constructor argument (`canvasLabelRasterizer` in the app, a
+  stub in the suite) so the layer constructs with no DOM and is testable under bare
+  `node --test`. `cameraLabelText.ts` holds the pure
+  measure-and-ellipsise logic, and `paintLabelText()` takes the 2D-context calls it
+  needs as a protocol so the stroke-before-fill order is testable with a recording stub.
 - `probeGizmos.ts` — per-probe octahedron markers + green sightlines to visible
   cameras. Extends `PickableGizmoSet` (overrides `dispose` to also clear the
   non-entry sightline overlay).

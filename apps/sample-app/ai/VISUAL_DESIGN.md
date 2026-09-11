@@ -82,7 +82,26 @@ readout beside it is what carries absolute value.
 | Constraint / vertex selected, selected-disabled constraint | `0xffd23f` (yellow) / handles and lines at opacity 0.35 | `camera_placement.md` §6.1 |
 | Placement pool scatter | violet ramped 0.35→1.0 by the position's own reachable count; chosen positions `0xffd23f`. **4 px screen-space dots** (`sizeAttenuation: false`) drawn as an instanced **sprite**, not `THREE.Points` — WebGPU point primitives are fixed at 1 px, and a world-space size small enough for a 6 m room is sub-pixel on the 1120 m site | `camera_placement.md` §5.2 |
 | Draft polyline (armed draw mode) | `0xffd23f`: a 7 px screen-space dot per clicked vertex plus a solid line between them, both `depthTest: false` at `RenderOrder.draftOverlay`. Solid rather than dashed because two dashed constructions rendered nothing under this WebGPU backend (`CONVENTIONS.md`) | `camera_placement.md` §6.2 |
+| Camera name label | 11 px/600 system stack, **white `#ffffff`** with a **2 px black outline**, no plate, 4x4 px transparent margin — **constant screen size**, 4 px right of the body's drawn edge (measured to the first glyph, not the texture), ellipsised past 140 px. Uniform colour on purpose: state stays the body's job (spec §5.3) | `scene/cameraLabels.ts` |
 | Coverage overlay fog | user hue, default **red** (hue 0), `hsl(h,100%,50%)` | `scene/coverageOverlay.ts` |
+
+**Viewport text is chrome, and follows the UI's type scale, not the scene's.** A
+camera name beside its body is read as a label, so it takes the badge treatment used
+everywhere else in the app — 11 px/600 — and holds that size at every zoom level and in
+every view. What it does **not** take from the badges is their ground: it is **white
+with a thin black outline** and no plate at all. At ~100 cameras a plate per name is a
+grid of opaque rectangles over the coverage fog and the site capture, so the separation
+comes from an outline around the glyphs instead, and the text goes to white rather than
+the palette's `#e6e8eb` because its contrast now rests on that outline rather than on a
+dark ground (spec §5.3). Anything else drawn as text in the viewport should follow the
+same treatment rather than inventing a second, world-scaled typography. Labels draw *over* the coverage fog, the geometry and the captures — they
+are chrome, not scene — but disappear entirely when the thing they name is behind a
+wall, so the picture stays honest about what is hidden. Whole or not at all: a label
+clipped by an edge it overlaps reads as a rendering fault. And the disappearing is a
+**fade**, ~150 ms: opacity in the viewport is never switched, because a label popping on
+and off as the view moves is the most distracting thing a static piece of chrome can do
+(spec §5.3). Deliberate user actions — a layer toggle, disabling a camera — stay
+instant; easing those would read as lag.
 
 The **frustum wireframe renders for the selected camera only** (spec §5.3); every
 other camera shows just its body dot. So the default (blue `0x7fb8e6`) frustum
@@ -501,8 +520,11 @@ this rig, check the asset's metalness before touching the lights.
   has no keyboard navigation to hang a keyboard reorder on, so there is no
   non-pointer equivalent. Documented in the spec rather than half-built; adding it
   means building roving-tabindex tree navigation first.
-- **Motion:** the only animation is the spinner; keep new motion minimal and
-  non-essential.
+- **Motion:** two animations exist — the spinner, and the camera labels' ~150 ms
+  opacity fade (spec §5.3), which is there precisely to *remove* motion that would
+  otherwise be a pop. Keep new motion minimal and non-essential, and never ease a
+  deliberate user action: a layer toggle applies instantly, or the control reads as
+  laggy.
 
 ## When adding UI
 

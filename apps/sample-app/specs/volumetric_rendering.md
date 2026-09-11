@@ -145,6 +145,9 @@ pass 2  fog    -> fogTarget, cleared (0,0,0,0), colour only
                   depth-write off, MaxEquation, premultiplied color*alpha
 pass 3  full-screen triangle -> canvas
                   screen = scene.rgb * (1 - fog.a) + fog.rgb
+pass 4  overlay scene -> canvas, autoClear off (§4.1)
+                  occlusion by shader discard against sceneTarget's DepthTexture,
+                  sampled once per overlay at its anchor -> all-or-nothing
 ```
 
 - **Max is safe in pass 2** precisely because that target holds *only fog*. There
@@ -202,6 +205,142 @@ only the layers whose order still decides something.
 
 The cost over drawing in-scene is one full-screen colour target, one full-screen
 triangle, and the blit of the scene through it.
+
+### 4.1 Pass 4 — the post-composite overlay
+
+Not everything drawn in the scene wants to be *hazed* by the fog. The camera **name
+labels** (`spec.md` §5.3) are chrome that names an object, not a surface the fog is
+measuring: a label under the overlay is exactly as unreadable as the fog is dense,
+which is the opposite of what a label is for. They are therefore drawn in a **fourth
+pass**, straight to the canvas after pass 3, from a scene of their own that is never
+added to the viewport scene — the same arrangement the fog itself uses, and the same
+`autoClear: false` composite the orientation gizmo's corner draw already does
+(`spec.md` §2.4). Pass 4 runs **before** that gizmo, which stays topmost.
+
+**Pass 4 has no usable depth buffer, and that is the whole design problem.** Pass 3 is
+a full-screen triangle: it writes colour to the canvas and nothing else, so by pass 4
+the canvas depth bears no relation to the scene. An overlay that still wants to be
+occluded by geometry — and the labels do, so a camera behind a wall does not announce
+itself through the wall — therefore cannot use `depthTest` at all. It reads
+`sceneTarget`'s `DepthTexture` in its own shader instead, the same shared depth the fog
+depth-tests through in pass 2; `FogCompositor` exposes it as `sceneDepthTexture` for
+the purpose.
+
+**The sample is taken at the overlay's *anchor*, not per fragment — so the test is
+all-or-nothing.** A label is chrome attached to a point in the scene: what decides
+whether it may be seen is whether **that point** is obstructed, not whether each of its
+pixels is (`spec.md` §5.3). The vertex shader therefore carries the anchor's screen
+position and view depth to the fragment shader as varyings — constant across the quad,
+since every corner is offset from one anchor — and the fragment shader samples the
+depth texture *there*. The whole quad survives or the whole quad discards; a pillar
+crossing the label does not cut the name in half, and the surviving label draws over
+geometry, captures and fog alike.
+
+Sampling in the fragment shader rather than the vertex shader is deliberate: the test's
+result is per-**label**, but `discard` only exists in the fragment stage, and a vertex
+texture fetch buys nothing when the sample is the same for all four vertices.
+
+**The test is damped, not switched** (`spec.md` §5.3). One texel against one threshold
+is a knife edge in two directions at once — the anchor's pixel drifts sub-pixel as the
+view moves, and the depth written there is itself unstable where the anchor is
+near-coplanar with a surface or standing in front of a capture whose depth comes from
+the pass 1b redraw. A label on that boundary flickers frame to frame; a label crossing a
+wall's silhouette pops. So the raw result is smoothed twice over.
+
+**Spatially**, inside the probe shader: each tap ramps across a depth **band** instead
+of switching, the taps are taken over a small ring (3x3, a few device pixels across)
+instead of one texel, and their mean is shaped so mostly-clear reads fully visible and
+mostly-buried fully hidden.
+
+**Temporally**, by keeping one texel of state per overlay and easing it toward the raw
+result — which needs a pass of its own, because the state has to survive the frame:
+
+```
+pass 4a probe points -> stateTarget (capacity x 1, RGBA16F), never cleared
+                        one point per label, its slot picks the texel
+                        raw visibility from the depth ring + band
+                        blend CONSTANT_ALPHA / ONE_MINUS_CONSTANT_ALPHA
+                        => texel = k * raw + (1 - k) * texel  (an EMA)
+pass 4  label quads  -> canvas, alpha = its own texel of stateTarget
+                        discard below ~0 visibility / ~0 texel alpha (an early-out)
+```
+
+The two `discard` thresholds in pass 4 are an **early-out, not the test**: the eased
+value multiplies alpha, as above, and both cutoffs sit far enough below anything visible
+to be a cost saving only — a label already faded out, and the label's transparent
+margin.
+
+The easing is done **by the blend unit**, not in a shader: `gl.blendColor`'s constant
+alpha is `k`, so the target accumulates an exponential moving average of the raw test
+with no ping-pong pair and no read of the bound target. `k = 1 - exp(-dt / tau)` with
+`tau` ~150 ms makes the fade **frame-rate independent**, and `dt` is clamped so a long
+stall resumes with a bounded step instead of a jump.
+
+Three consequences worth knowing:
+
+- **The state target is never cleared** after its one-time initialisation to 0, which is
+  also why a new label fades in: its texel starts at zero. The two events that would
+  otherwise force a clear are handled without one, because a clear would restart *every*
+  label's fade — visible on a ~96-camera site, where the first growth step fires during a
+  normal load. A slot handed on from a departed label has **its own texel** zeroed by a
+  one-point draw, so the new label fades in and no other average moves; and a **capacity
+  change copies** the old row into the grown target rather than starting it empty — one
+  triangle over the new row, sampling the old texture at `uv.x * newCapacity /
+  oldCapacity`, which is texel-for-texel under `NearestFilter` and zero past the old
+  capacity. Both are draws and pass 4a's own caller has the renderer, so both are queued
+  and flushed at the top of the next pass 4a, before the probe.
+
+  Both are draws rather than a scissored or viewport-limited **clear** for one reason
+  worth writing down: `WebGLRenderer` multiplies a viewport and a scissor by its pixel
+  ratio, so on a HiDPI display either would address the wrong texels of a target whose
+  size is counted in labels, not in screen pixels.
+- **Pass 4a is one fragment per label**, so the nine depth taps are paid ~100 times a
+  frame rather than once per label pixel — cheaper than testing in the label shader, not
+  just smoother.
+- **RGBA16F, not RGBA8**: an 8-bit texel quantises the EMA's increments and the average
+  stalls short of its limit. Half float costs 2 bytes per label and removes the
+  question.
+
+Two things this pass must get right:
+
+- **Compare linearised depths.** A `DepthTexture` holds the non-linear window-space
+  `z`, whose precision is crushed toward the far plane; comparing raw values makes the
+  discard threshold distance-dependent. Both sides are linearised to view-space
+  distance first, which means branching on the **projection in use** — the app has
+  three orthographic views as well as two perspective ones (`spec.md` §2.4), and the
+  ortho linearisation has no reciprocal term.
+- **Clear the anchor's own object.** The depth at a camera's anchor pixel is usually
+  the camera **body**'s front surface — the body is in the scene, centred on that very
+  point — so a strict comparison would hide every label behind its own gizmo. The
+  comparison carries a tolerance of the body's **radius** plus what the depth buffer
+  itself cannot resolve at that distance, and nothing else. Both terms are sized from
+  something real. The radius is the body's own, world-sized and fixed at every scale
+  (0.22 m) — but the **larger** of the two body sizes, the selected body's 0.308 m, and
+  the same for every label: one uniform rather than a per-anchor attribute, because the
+  0.09 m between them is well under the precision term it is added to. The precision
+  term is a 24-bit buffer's worst-case quantisation — `z² · (1/near − 1/far) / 2²⁴`
+  under a perspective camera, a constant `(far − near) / 2²⁴` under an orthographic one
+  — carried with a **safety factor of 8**, because quantisation is only the first of the
+  errors between a depth texel and the surface it stands for: the interpolation across
+  the fragment and the linearisation back to view space each add their own, and a
+  capture's pass-1b depth (§4) is noisier still than either. Eight of the cheapest
+  error, not a fraction of the eye distance: the factor makes the term a *fixed*
+  multiple of what the buffer cannot resolve, and at the app's `near`/`far` it is 0.76 m
+  at 400 m and 6 m at 1120 m. A tolerance that instead grew as a fraction of the eye
+  distance hides the failure this pass exists to catch: on a 1120 m site viewed from
+  400 m, 1% of the distance is a 4 m blind spot around every body, and a camera mounted
+  on a wall keeps its label when seen from the wrong side of the wall. The ramp band is
+  one further tolerance wide, so an occluder is fully counted at twice it.
+- **An anchor behind the eye reads as hidden.** Its clip `w` is negative, so its
+  projected position is meaningless and the quad is clipped by the near plane anyway.
+  Its state is driven to 0 rather than left where it was, so a label that comes back
+  into view **fades in** instead of appearing at whatever opacity it had when it left.
+- **Where the depth texture is empty, nothing is occluded.** Pass 1b fills in the 3DGS
+  captures' depth (§4 above), so labels behind a capture are hidden by it; anything
+  else that renders without writing depth will not occlude a label, and that is the
+  correct default — an overlay hidden by something invisible is a bug report.
+
+The cost is one extra draw of a handful of small quads and no additional target.
 
 Consequences, for callers to reason about (§9 of `spec.md` relies on these):
 
@@ -264,6 +403,34 @@ pattern (pure functions under `node:test`):
   opaque one replaces it; and a **dim fog over a bright scene is still visible**,
   tinting it — the property whose absence made the overlay vanish at site scale
   (§4).
+
+- **Passes 4a + 4 (camera name labels, §4.1)** — `test/cameraLabels.test.ts`.
+  `renderProbePass()` branches its depth linearisation on the projection in use and reads
+  as unoccluded when there is no depth texture yet; the state target is **cleared exactly
+  once** and the bound render target, `autoClear`, clear colour and viewport are all
+  restored, pinned against a recording renderer stub; a layer with no labels runs no pass
+  at all. The **never-cleared** guarantee is pinned on both its paths, by a recorded call
+  sequence with no `clear` in it: a recycled slot produces one reset draw for exactly that
+  slot, and crossing the capacity step produces one copy draw at the right scale — each
+  followed by a frame that is a plain probe again.
+- **The label's offset clears the body** — the vertex shader carries the body's world
+  radius and projects it, so the 4 px gap is measured from the body's drawn edge; the
+  radius follows the selection, which scales the body up.
+- **The fade** — `fadeStep` is pinned as `1 - exp(-dt / tau)`: one 32 ms frame moves
+  exactly as far as two 16 ms frames (frame-rate independence, the property the whole
+  design rests on), a zero-length or backwards frame moves nothing, and a multi-second
+  stall is capped — the cap sitting deliberately below `tau`. The blend factors
+  (`ConstantAlphaFactor` / `OneMinusConstantAlphaFactor`) are asserted, since they
+  *are* the easing; and the first frame's step is 0, which is what makes a label fade
+  in on load rather than pop.
+- **Shader source parity for both passes** — the label shader's `clip.w` pixel-size
+  term, its state-texel lookup and alpha multiply, and its *absence* of any depth work;
+  the probe shader's anchor-vs-slot split, both `…DepthToViewZ` conversions, the tap
+  ring, the per-tap band `smoothstep`, the shaping `smoothstep`, the behind-the-eye
+  case, and the absence of `gl_FragCoord` — sampling there would be exactly the
+  per-pixel test `spec.md` §5.3 rules out. The **damping** is pinned the same way: the
+  tap ring, the `smoothstep` band per tap, the shaping `smoothstep` over their mean, and
+  the fact that the result multiplies alpha rather than driving a bare `discard`.
 
 - **Shader source parity** — the GLSL fragment shader's source is asserted to carry
   the reference's terms (the slab `min`/`max` pair, the `tEnter` clamp to 0, the

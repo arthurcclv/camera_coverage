@@ -670,6 +670,9 @@ export function App() {
   // never persisted; one-shot, so a delivered hit clears it.
   const [placing, setPlacing] = useState(false);
   const [gizmosVisible, setGizmosVisible] = useState(true);
+  // The **Camera names** layer toggle (spec §2.4, §5.3). On by default; it is the
+  // escape from the wall of text a site with ~100 cameras draws when zoomed out.
+  const [cameraNamesVisible, setCameraNamesVisible] = useState(true);
   // Master show/hide-all for the sampling-volume gizmos (viewport toolbar, spec
   // §2.4). Purely visual — independent of `useZones` and per-zone enabled state.
   const [zonesVisible, setZonesVisible] = useState(true);
@@ -1274,6 +1277,7 @@ export function App() {
       transformSpace,
       activeView,
       gizmosVisible,
+      cameraNamesVisible,
       zonesVisible,
       sectionsVisible,
       stale,
@@ -1303,7 +1307,7 @@ export function App() {
       room, previewCameras, placementPreviewCameras, probes, sections, volumes, selection, placementOpen,
       engine.state.flaggedCameras,
       sectionCellGrids, visibleZones, drawableGroups, overlayOptions, transformMode,
-      transformSpace, activeView, gizmosVisible, zonesVisible, sectionsVisible, stale,
+      transformSpace, activeView, gizmosVisible, cameraNamesVisible, zonesVisible, sectionsVisible, stale,
       voxelSize, clipBand, sightlines, placing,
       constraints, activeVertex, constraintsVisible, poolPositions, chosenPoolIndices,
       drawing, extending, drawAnchor, draftPoints, draftVertices, placementMoveLines,
@@ -2821,6 +2825,7 @@ export function App() {
               coverageVisible={overlayOptions.visible}
               sectionsVisible={sectionsVisible}
               camerasVisible={gizmosVisible}
+              cameraNamesVisible={cameraNamesVisible}
               zonesVisible={zonesVisible}
               constraintsVisible={constraintsVisible}
               splatsVisible={splatsVisible}
@@ -2828,6 +2833,7 @@ export function App() {
               onToggleCoverage={() => setOverlayOptions((o) => ({ ...o, visible: !o.visible }))}
               onToggleSections={() => setSectionsVisible((v) => !v)}
               onToggleCameras={() => setGizmosVisible((v) => !v)}
+              onToggleCameraNames={() => setCameraNamesVisible((v) => !v)}
               onToggleZones={() => setZonesVisible((v) => !v)}
               onToggleConstraints={() => setConstraintsVisible((v) => !v)}
               onToggleSplats={() => setSplatsVisible((v) => !v)}

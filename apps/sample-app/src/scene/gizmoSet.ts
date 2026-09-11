@@ -10,6 +10,9 @@
  * `getAttachTarget` — is identical across all four sets, so it lives here once and
  * each set supplies only its own entry shape and per-entry mesh work.
  *
+ * The loop itself is also exported on its own as {@link reconcileKeyed}, for a keyed
+ * layer that wants it without the rest of the base class (`cameraLabels.ts`).
+ *
  * `GizmoSet` is the non-pickable spine (sections are selected from the hierarchy
  * row, never the viewport — spec §13.8). `PickableGizmoSet` adds the nearest-hit
  * `pickHit` raycast shared by the three sets that *are* viewport-pickable
@@ -18,6 +21,46 @@
  * their differing entry shapes (`pick.ts` reduces the hits to the nearest).
  */
 import * as THREE from 'three';
+
+/**
+ * The create/update/sweep loop every keyed Three.js layer runs: create an entry the
+ * first time an id is seen, mutate it in place afterwards, and dispose it when the id
+ * disappears.
+ *
+ * A free function rather than only a `GizmoSet` method because one layer needs the loop
+ * without the rest of the base class: the camera **name labels** (`cameraLabels.ts`)
+ * hang their meshes in a `THREE.Scene` of their own rather than under `group`, and are
+ * never TransformControls-attachable, so inheriting `GizmoSet` would mean implementing
+ * `attachTargetOf` for a caller that does not exist (see DECISIONS.md). The loop itself
+ * is the part worth sharing, so it lives here as a function and `GizmoSet.reconcile`
+ * is one call to it.
+ */
+export function reconcileKeyed<E, I extends { id: string }>(
+  entries: Map<string, E>,
+  items: readonly I[],
+  hooks: {
+    /** Takes the whole item, not just its id: a layer may need its fields to build. */
+    create(item: I): E;
+    update(entry: E, item: I): void;
+    dispose(entry: E): void;
+  },
+): void {
+  const seen = new Set<string>();
+  for (const item of items) {
+    seen.add(item.id);
+    let entry = entries.get(item.id);
+    if (!entry) {
+      entry = hooks.create(item);
+      entries.set(item.id, entry);
+    }
+    hooks.update(entry, item);
+  }
+  for (const [id, entry] of entries) {
+    if (seen.has(id)) continue;
+    hooks.dispose(entry);
+    entries.delete(id);
+  }
+}
 
 /** One gizmo-set ray hit: the entity id it would select and its ray distance. */
 export interface GizmoHit {
@@ -69,22 +112,11 @@ export abstract class GizmoSet<E> {
    * signature differs by, so only the shared skeleton lives here.
    */
   protected reconcile<I extends { id: string }>(items: I[], update: (entry: E, item: I) => void): void {
-    const seen = new Set<string>();
-    for (const item of items) {
-      seen.add(item.id);
-      let entry = this.entries.get(item.id);
-      if (!entry) {
-        entry = this.createEntry(item.id);
-        this.entries.set(item.id, entry);
-      }
-      update(entry, item);
-    }
-    for (const [id, entry] of this.entries) {
-      if (!seen.has(id)) {
-        this.disposeEntry(entry);
-        this.entries.delete(id);
-      }
-    }
+    reconcileKeyed(this.entries, items, {
+      create: (item) => this.createEntry(item.id),
+      update,
+      dispose: (entry) => this.disposeEntry(entry),
+    });
   }
 
   /** The entity's TransformControls attach target, or undefined if not present. */

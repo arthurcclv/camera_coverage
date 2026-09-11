@@ -72,6 +72,7 @@ import {
 import { createSceneLights } from './sceneLighting.ts';
 import { VIEWPORT_CLEAR_COLOR, SplatLayer } from './splatLayer.ts';
 import { FogCompositor } from './fogCompositor.ts';
+import type { LabelOverlay } from './cameraLabels.ts';
 
 /**
  * The selected camera's pose + lens, as the **Selected** view needs it (spec
@@ -135,6 +136,12 @@ export interface Viewport {
    * scene.
    */
   setFogScene(fogScene: THREE.Scene): void;
+  /**
+   * Hand the viewport the overlay drawn **after** the fog composite
+   * (`volumetric_rendering.md` §4.1) — the camera name labels (spec §5.3). Until it
+   * is called the frame simply ends one pass earlier.
+   */
+  setLabelOverlay(overlay: LabelOverlay): void;
   orbitControls: OrbitControls;
   transformControls: TransformControls;
   dispose(): void;
@@ -257,6 +264,9 @@ export function createViewport(
   // path whether or not a run has produced fog.
   const fog = new FogCompositor();
   let fogScene: THREE.Scene | null = null;
+  let labelOverlay: LabelOverlay | null = null;
+  // Scratch for the label pass's drawing-buffer size, so the frame allocates nothing.
+  const drawingBufferSize = new THREE.Vector2();
 
   // Fixed light rig (spec §2.3.1) — see `sceneLighting.ts` for the rationale.
   scene.add(...Object.values(createSceneLights()));
@@ -741,6 +751,28 @@ export function createViewport(
     // canvas (`volumetric_rendering.md` §4).
     fog.renderScene(renderer, scene, cameras[activeView], splats);
     fog.composite(renderer, fogScene, cameras[activeView]);
+    // Passes 4a + 4 (`volumetric_rendering.md` §4.1): chrome that must read *over* the
+    // fog rather than under it. The canvas has no scene depth left after the composite,
+    // so the overlay is handed the compositor's `DepthTexture` and resolves its own
+    // occlusion against it — `renderProbePass` runs its state pass (4a) and restores
+    // the target it found. `autoClear` off so pass 4 composites onto the canvas.
+    //
+    // The frame timestamp goes with it: this loop is the clock, and the overlay's fade
+    // is a function of elapsed time rather than of frames drawn (spec §5.3).
+    if (labelOverlay) {
+      renderer.getDrawingBufferSize(drawingBufferSize);
+      labelOverlay.renderProbePass({
+        renderer,
+        depth: fog.sceneDepthTexture,
+        width: drawingBufferSize.x,
+        height: drawingBufferSize.y,
+        camera: cameras[activeView],
+        nowMs: performance.now(),
+      });
+      renderer.autoClear = false;
+      renderer.render(labelOverlay.scene, cameras[activeView]);
+      renderer.autoClear = true;
+    }
     // Mirror the live view, then draw the gizmo over the corner (it manages its
     // own viewport + depth clear, spec §2.4).
     // autoClear is disabled so the gizmo's internal render composites over the
@@ -787,6 +819,9 @@ export function createViewport(
     cameraGuideSizePx,
     renderer,
     splats,
+    setLabelOverlay(next: LabelOverlay): void {
+      labelOverlay = next;
+    },
     setFogScene(next: THREE.Scene): void {
       fogScene = next;
     },
