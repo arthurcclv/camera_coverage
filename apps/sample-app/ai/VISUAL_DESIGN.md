@@ -281,6 +281,14 @@ this rig, check the asset's metalness before touching the lights.
   takes `.view-menu-row.disabled` — opacity 0.4, no hover background, and a `title`
   carrying the reason, matching how the toolbar disables Scale rather than hiding it.
   Currently only the **Selected** row uses it (no camera selected, spec §2.4.1).
+- **Reset view** (`.view-reset-btn`, inside `.view-toolbar-group`): a 30 px-wide
+  icon-only `.btn.secondary` immediately right of the View selector, `gap: 6px`
+  from it and `align-self: stretch` so the pair matches height and reads as one
+  group (spec §2.4). Its glyph is **four corner brackets closing on a centre
+  dot** — "frame the scene" — deliberately not a circular-arrow undo glyph,
+  which would imply it reverts the last action rather than the framing. Disabled
+  in the Selected view at **opacity 0.4** with the reason in `title`, the same
+  dimmed-not-hidden treatment as the disabled selector row above.
 - **Frame guide** (`.camera-frame-guide`): in the Selected view, a **1 px
   `#ffd23f`** rectangle centered over the canvas marking the selected camera's true
   image (spec §2.4.1). It takes the *selected-camera yellow* from the gizmo table

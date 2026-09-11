@@ -820,8 +820,27 @@ button.tree-caret:focus-visible {
   transform: translateX(-50%);
   z-index: 1;
 }
+.view-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .view-menu-anchor {
   position: relative;
+}
+/* Reset view (spec §2.4): icon-only, square, sized to match the selector button
+   beside it so the pair reads as one group. */
+.view-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  width: 30px;
+  align-self: stretch;
+}
+.view-reset-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .view-menu-btn {
   display: flex;

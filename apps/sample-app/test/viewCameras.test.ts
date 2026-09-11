@@ -12,6 +12,8 @@ import {
   fallbackBounds,
   fitCameraView,
   fitOrtho,
+  fitPerspective,
+  flyNavigation,
   isOrthographic,
   isUsableBounds,
   navigationEnabled,
@@ -50,6 +52,18 @@ test('the camera view is perspective, not ortho, and has no navigation (spec §2
   for (const v of ['perspective', 'top', 'front', 'right'] as const) {
     assert.equal(navigationEnabled(v), true, `${v} keeps orbit-control navigation`);
   }
+});
+
+test('only the perspective view flies (`navigation.md` §7)', () => {
+  // The wheel and the middle drag are ours in Perspective only; the three
+  // elevations keep OrbitControls' frustum zoom, and the Selected view neither.
+  assert.equal(flyNavigation('perspective'), true);
+  for (const v of ['top', 'front', 'right', 'camera'] as const) {
+    assert.equal(flyNavigation(v), false, `${v} must keep OrbitControls' own zoom`);
+  }
+  // Not the same predicate as orbit, even though they agree on today's five
+  // views: the elevations refuse rotation while keeping the wheel.
+  for (const v of VIEW_IDS) assert.equal(flyNavigation(v), orbitEnabled(v));
 });
 
 test('perspective clip planes are a valid range reaching well past the room (spec §2.4)', () => {
@@ -216,4 +230,85 @@ test('fitCameraView survives a degenerate aspect (pre-layout container)', () => 
   // A degenerate camera aspect falls back to square rather than producing NaN.
   const fit = fitCameraView(CAM_FOV, 0, 16 / 9);
   assert.ok(Number.isFinite(fit.renderFov) && fit.renderFov > 0);
+});
+
+// --- fitPerspective: the Reset view button (spec §2.4) ------------------------
+
+/** The real workspace, as the scale the room-sized startup pose fails at. */
+const SITE_MIN = new THREE.Vector3(0, 0, 0);
+const SITE_MAX = new THREE.Vector3(440, 201, 1120);
+
+/** Every corner of a box, for checking it is really inside a frustum. */
+function corners(min: THREE.Vector3, max: THREE.Vector3): THREE.Vector3[] {
+  const out: THREE.Vector3[] = [];
+  for (const x of [min.x, max.x]) for (const y of [min.y, max.y]) for (const z of [min.z, max.z]) {
+    out.push(new THREE.Vector3(x, y, z));
+  }
+  return out;
+}
+
+test('fitPerspective targets the bounds center and preserves the viewing direction', () => {
+  const dir = new THREE.Vector3(0.3, -0.8, 0.5).normalize();
+  const fit = fitPerspective(SITE_MIN, SITE_MAX, dir, 55, 16 / 9);
+
+  const center = new THREE.Vector3().addVectors(SITE_MIN, SITE_MAX).multiplyScalar(0.5);
+  assert.ok(fit.target.distanceTo(center) < 1e-9);
+  // The camera sits back along its own forward vector, so looking at the target
+  // leaves the orientation exactly as it was — the button frames the scene, it
+  // does not undo the user's orientation (spec §2.4).
+  const forward = new THREE.Vector3().subVectors(fit.target, fit.position).normalize();
+  assert.ok(forward.distanceTo(dir) < 1e-9);
+});
+
+test('fitPerspective frames the whole scene, at any scale and any aspect', () => {
+  const dir = new THREE.Vector3(-0.4, -0.7, -0.6).normalize();
+  for (const aspect of [0.5, 1, 16 / 9, 3]) {
+    for (const [min, max] of [
+      [SITE_MIN, SITE_MAX],
+      [new THREE.Vector3(-12, 0, -12), new THREE.Vector3(12, 6, 12)],
+    ] as const) {
+      const fit = fitPerspective(min, max, dir, 55, aspect);
+      const cam = new THREE.PerspectiveCamera(55, aspect, PERSPECTIVE_NEAR, PERSPECTIVE_FAR);
+      cam.position.copy(fit.position);
+      cam.lookAt(fit.target);
+      cam.updateMatrixWorld(true);
+      cam.updateProjectionMatrix();
+      const frustum = new THREE.Frustum().setFromProjectionMatrix(
+        new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse),
+      );
+      for (const corner of corners(min, max)) {
+        assert.ok(frustum.containsPoint(corner), `aspect ${aspect}: corner ${corner.toArray()} outside`);
+      }
+    }
+  }
+});
+
+test('fitPerspective distance is independent of viewing direction', () => {
+  // A bounding *sphere* is fitted, not the box: fitting the box would make the
+  // same reset land at a different distance from every angle.
+  const center = new THREE.Vector3().addVectors(SITE_MIN, SITE_MAX).multiplyScalar(0.5);
+  const distances = [
+    new THREE.Vector3(0, -1, 0),
+    new THREE.Vector3(1, 0, 0),
+    new THREE.Vector3(-0.5, -0.5, 0.7).normalize(),
+  ].map((d) => fitPerspective(SITE_MIN, SITE_MAX, d, 55, 16 / 9).position.distanceTo(center));
+  for (const d of distances) assert.ok(Math.abs(d - distances[0]) < 1e-9);
+});
+
+test('fitPerspective scales the padding with the bounds', () => {
+  const dir = new THREE.Vector3(0, -1, 0);
+  const center = new THREE.Vector3().addVectors(SITE_MIN, SITE_MAX).multiplyScalar(0.5);
+  const near = fitPerspective(SITE_MIN, SITE_MAX, dir, 55, 1).position.distanceTo(center);
+  const wide = fitPerspective(SITE_MIN, SITE_MAX, dir, 20, 1).position.distanceTo(center);
+  // A narrower FOV must pull the camera further back to hold the same bounds.
+  assert.ok(wide > near);
+  assert.ok(near > (SITE_MAX.distanceTo(SITE_MIN) / 2) * FIT_PADDING);
+});
+
+test('fitPerspective survives a degenerate direction and a bad aspect', () => {
+  const fit = fitPerspective(SITE_MIN, SITE_MAX, new THREE.Vector3(0, 0, 0), 55, Number.NaN);
+  assert.ok(Number.isFinite(fit.position.x));
+  assert.ok(Number.isFinite(fit.position.y));
+  assert.ok(Number.isFinite(fit.position.z));
+  assert.ok(fit.position.distanceTo(fit.target) > 0);
 });

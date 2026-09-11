@@ -46,6 +46,9 @@ import {
   fallbackBounds,
   fitCameraView,
   fitOrtho,
+  fitPerspective,
+  flyNavigation,
+  isOrthographic,
   navigationEnabled,
   orbitEnabled,
   orthoFrustumForAspect,
@@ -54,6 +57,18 @@ import {
   type OrthoViewId,
   type ViewId,
 } from './viewCameras.ts';
+import {
+  dampStep,
+  groundRefDistance,
+  middleDragStep,
+  pivotAlongView,
+  sceneDiagonal,
+  speedModifierOf,
+  viewportNdc,
+  wheelAxisDelta,
+  wheelNotches,
+  wheelStep,
+} from './navigation.ts';
 import { createSceneLights } from './sceneLighting.ts';
 import { VIEWPORT_CLEAR_COLOR, SplatLayer } from './splatLayer.ts';
 import { FogCompositor } from './fogCompositor.ts';
@@ -91,6 +106,13 @@ export interface Viewport {
   /** Switch the active view, re-pointing controls + raycaster (spec §2.4). */
   setActiveView(view: ViewId): void;
   /**
+   * Re-frame the active view on the current scene bounds — the **Reset view**
+   * button (spec §2.4). A no-op in the Selected view, which has no framing of
+   * its own (§2.4.1). For the Perspective view this is the only way back from a
+   * camera flown far from the scene (`navigation.md` §5).
+   */
+  resetActiveView(): void;
+  /**
    * Point the **Selected** view at a camera, or `null` to clear it (spec §2.4.1).
    * Copies the pose and re-fits the rendered FOV + frame guide. A no-op on the
    * render while another view is active, but the source is retained so entering
@@ -118,8 +140,19 @@ export interface Viewport {
   dispose(): void;
 }
 
+// Damping applied to rotate, pan (by OrbitControls) and the Perspective view's
+// wheel/middle-drag travel (by us, `navigation.md` §4.5) — one factor, so the
+// viewport reads as one system rather than a smooth orbit beside a jumpy zoom.
+const DAMPING_FACTOR = 0.08;
+
 // Orientation gizmo corner inset, in CSS pixels (bottom-left, spec §2.4).
 const GIZMO_INSET = 16;
+
+// The Perspective camera's startup pose (spec §2.4): a steep-ish 3/4 elevation,
+// and the point it first looks at — which is also where the orbit pivot starts,
+// so the two cannot disagree and the first frame is not a re-aim.
+const STARTUP_POSITION = new THREE.Vector3(13, 24, 15);
+const STARTUP_LOOK_AT = new THREE.Vector3(0, 1, 0);
 
 // Axis colors shared by the gizmo's positive balls and our negative rings.
 const AXIS_COLORS: Record<'negX' | 'negY' | 'negZ', string> = {
@@ -155,8 +188,8 @@ export function createViewport(
   // coverage overlay short, so it reads as a translucent haze rather than a
   // near-opaque wall at a grazing viewing angle (see coverageOverlay.ts).
   const camera = new THREE.PerspectiveCamera(55, 1, PERSPECTIVE_NEAR, PERSPECTIVE_FAR);
-  camera.position.set(13, 24, 15);
-  camera.lookAt(0, 1, 0);
+  camera.position.copy(STARTUP_POSITION);
+  camera.lookAt(STARTUP_LOOK_AT);
 
   // The three ortho elevations. Frustum/placement are placeholders until each
   // view is first activated and auto-fit to the scene bounds (spec §2.4).
@@ -175,19 +208,21 @@ export function createViewport(
     camera: cameraView,
   };
 
-  // Per-view remembered state (spec §2.4): orbit target, whether the one-time
-  // auto-fit has run, and each ortho view's base frustum half-height (kept so a
-  // resize can re-derive left/right for the new aspect without losing scale).
-  // The `camera` view has no remembered framing — it is derived wholly from the
-  // selected camera (spec §2.4.1) — so its entries here stay unused.
-  const viewTargets: Record<ViewId, THREE.Vector3> = {
-    perspective: new THREE.Vector3(0, 1, 0),
+  // Per-ortho-view remembered state (spec §2.4): the orbit target the view was
+  // left at, and its base frustum half-height (kept so a resize can re-derive
+  // left/right for the new aspect without losing scale). Keyed on `OrthoViewId`
+  // rather than `ViewId` because the other two views genuinely have no entry to
+  // keep: the `camera` view is derived wholly from the selected camera (spec
+  // §2.4.1), and the Perspective view's remembered framing is its camera pose
+  // alone, its pivot being per-gesture scratch (`navigation.md` §3) — a stale
+  // target stored for it would be read back on the next switch and re-aim the
+  // camera, which is exactly the bug this keying makes unrepresentable.
+  const viewTargets: Record<OrthoViewId, THREE.Vector3> = {
     top: new THREE.Vector3(),
     front: new THREE.Vector3(),
     right: new THREE.Vector3(),
-    camera: new THREE.Vector3(),
   };
-  const orthoHalfHeight: Record<ViewId, number> = { perspective: 0, top: 0, front: 0, right: 0, camera: 0 };
+  const orthoHalfHeight: Record<OrthoViewId, number> = { top: 0, front: 0, right: 0 };
   const fitted = new Set<ViewId>();
   let activeView: ViewId = DEFAULT_VIEW;
 
@@ -266,9 +301,14 @@ export function createViewport(
   }
 
   const orbitControls = new OrbitControls(camera, renderer.domElement);
-  orbitControls.target.copy(viewTargets.perspective);
+  orbitControls.target.copy(STARTUP_LOOK_AT);
   orbitControls.enableDamping = true;
-  orbitControls.dampingFactor = 0.08;
+  orbitControls.dampingFactor = DAMPING_FACTOR;
+  // The wheel is ours (`navigation.md` §4.1): OrbitControls' dolly converges on
+  // `target` and is the stall this design removes. Rotate and pan stay its job —
+  // once `target` is re-seated per gesture (§3) they already do the right thing.
+  // This also disables its middle-drag dolly, replaced below (§4.2).
+  orbitControls.enableZoom = false;
   orbitControls.update();
 
   const transformControls = new TransformControls(camera, renderer.domElement);
@@ -304,6 +344,187 @@ export function createViewport(
     return { min: contentBounds.min, max: contentBounds.max };
   }
 
+  // --- Perspective navigation (`navigation.md`) ------------------------------
+  //
+  // Everything here is per-gesture scratch. `OrbitControls` keeps rotate and pan;
+  // what this adds is (a) re-seating its pivot from the ground at each drag start,
+  // which is what stops pan from shrinking, and (b) owning the wheel and the
+  // middle drag, which translate camera *and* pivot together so the
+  // camera-to-pivot distance never changes and forward travel cannot stall (§1).
+
+  /** Un-damped remainder of wheel/middle-drag travel, in world space (§4.5). */
+  const pendingTravel = new THREE.Vector3();
+  const travelDirection = new THREE.Vector3();
+  /** The in-flight middle drag, if any (§4.2). */
+  let middleDrag: { pointerId: number; lastY: number } | null = null;
+
+  const rayOrigin = new THREE.Vector3();
+  const rayDirection = new THREE.Vector3();
+
+  /**
+   * Whether the Perspective view's fly gestures apply right now (§4.1, §4.2) —
+   * the view's own capability (`viewCameras.flyNavigation`) and the live controls
+   * state, which a `TransformControls` drag turns off mid-gesture.
+   */
+  function flyGesturesActive(): boolean {
+    return flyNavigation(activeView) && orbitControls.enabled;
+  }
+
+  /**
+   * Frames rendered, and the diagonal computed in the current one. `D` has to be
+   * recomputed as the scene changes — loading a splat capture into a room-scale
+   * scene grows it by ~1000x and navigation speed must follow immediately — but
+   * `sceneContentBounds` walks every top-level object and boxes it, so §2 caps
+   * that at **once per animation frame**: a trackpad emits wheel events far
+   * faster than frames, and each one would otherwise re-walk the scene.
+   */
+  let frameIndex = 0;
+  let diagonalFrame = -1;
+  let diagonalValue = 0;
+
+  /** Scene diagonal, at most once per frame (§2). */
+  function currentDiagonal(): number {
+    if (diagonalFrame !== frameIndex) {
+      const { min, max } = sceneContentBounds();
+      diagonalValue = sceneDiagonal(min, max);
+      diagonalFrame = frameIndex;
+    }
+    return diagonalValue;
+  }
+
+  /**
+   * World ray through a client-space point, or through the viewport centre when
+   * `clientX` is null. Writes `rayOrigin`/`rayDirection` (normalized).
+   */
+  function rayThrough(clientX: number | null, clientY: number | null): void {
+    const ndc = viewportNdc(clientX, clientY, renderer.domElement.getBoundingClientRect());
+    // `unproject` reads `matrixWorld`, which is otherwise only refreshed at render
+    // time — a stale one skews every ray taken between frames.
+    camera.updateMatrixWorld();
+    rayOrigin.copy(camera.position);
+    rayDirection.set(ndc.x, ndc.y, 0.5).unproject(camera).sub(camera.position).normalize();
+  }
+
+  /** `dRef` under a screen point, or under the viewport centre for null (§2). */
+  function refDistanceAt(clientX: number | null, clientY: number | null): number {
+    const diagonal = currentDiagonal();
+    rayThrough(clientX, clientY);
+    return groundRefDistance(rayOrigin, rayDirection, diagonal);
+  }
+
+  /**
+   * Re-seat the orbit pivot before OrbitControls uses it (§3). The **direction**
+   * is always the viewport centre, so the pivot stays in front of the camera; the
+   * **distance** comes from the centre for an orbit and from the cursor for a pan,
+   * since OrbitControls derives its pan rate from the camera-to-target distance
+   * and §4.3 wants that to be the ground under the cursor.
+   */
+  function reseatPivot(clientX: number | null, clientY: number | null): void {
+    const distance = refDistanceAt(clientX, clientY);
+    rayThrough(null, null);
+    orbitControls.target.copy(pivotAlongView(rayOrigin, rayDirection, distance));
+  }
+
+  /** Ease this frame's share of `pendingTravel` onto the camera and pivot (§4.5). */
+  function applyPendingTravel(): void {
+    const length = pendingTravel.length();
+    if (length === 0) return;
+    // Only the Perspective camera flies. `setActiveView` and `resetActiveView`
+    // both clear the accumulator, so this is a backstop rather than the guard —
+    // but an ease in flight must never write an ortho view's pan target, which
+    // §7 leaves entirely to OrbitControls.
+    if (!flyNavigation(activeView)) {
+      pendingTravel.set(0, 0, 0);
+      return;
+    }
+    const { apply, remaining } = dampStep(length, DAMPING_FACTOR);
+    travelDirection.copy(pendingTravel).divideScalar(length);
+    // Camera *and* pivot, by the same vector — the invariant the whole design
+    // rests on: the distance between them never changes, so there is nothing for
+    // forward travel to converge on.
+    camera.position.addScaledVector(travelDirection, apply);
+    orbitControls.target.addScaledVector(travelDirection, apply);
+    if (remaining === 0) pendingTravel.set(0, 0, 0);
+    else pendingTravel.copy(travelDirection).multiplyScalar(remaining);
+  }
+
+  function onWheel(e: WheelEvent): void {
+    if (!flyGesturesActive()) return;
+    // Claimed unconditionally, including the ctrl+wheel a trackpad pinch arrives
+    // as, which the browser would otherwise turn into a page zoom (§4.6). This is
+    // why the speed modifiers are Shift and Alt rather than Ctrl, and why the
+    // listener is registered non-passive.
+    e.preventDefault();
+    const notches = wheelNotches(wheelAxisDelta(e.deltaY, e.deltaX), e.deltaMode);
+    if (notches === 0) return;
+    const diagonal = currentDiagonal();
+    rayThrough(e.clientX, e.clientY);
+    const step = wheelStep(groundRefDistance(rayOrigin, rayDirection, diagonal), speedModifierOf(e));
+    // Along the cursor ray, not the view axis: translating a perspective camera
+    // along a ray leaves every point on that ray on the same pixel, so what is
+    // under the cursor stays under it at any depth — no depth match needed (§4.1).
+    // Scroll-down is positive `deltaY` and flies backward.
+    pendingTravel.addScaledVector(rayDirection, -notches * step);
+  }
+
+  function onPointerDown(e: PointerEvent): void {
+    if (!flyGesturesActive()) return;
+    if (e.button === 0) {
+      reseatPivot(null, null);
+    } else if (e.button === 2) {
+      reseatPivot(e.clientX, e.clientY);
+    } else if (e.button === 1) {
+      // preventDefault suppresses the compatibility mousedown, and with it
+      // Chrome's middle-click autoscroll.
+      e.preventDefault();
+      middleDrag = { pointerId: e.pointerId, lastY: e.clientY };
+      renderer.domElement.setPointerCapture(e.pointerId);
+      // Attached here rather than for the element's whole life, so an unstarted
+      // gesture costs nothing (`ai/CONVENTIONS.md`, pointer gestures). Removed on
+      // up/cancel below, and by `dispose` if one is still in flight.
+      addMiddleDragListeners();
+    }
+  }
+
+  function onPointerMove(e: PointerEvent): void {
+    if (!middleDrag || e.pointerId !== middleDrag.pointerId) return;
+    const deltaY = e.clientY - middleDrag.lastY;
+    middleDrag.lastY = e.clientY;
+    if (!flyGesturesActive()) return;
+    const height = renderer.domElement.clientHeight || 1;
+    const distance = refDistanceAt(null, null);
+    rayThrough(null, null);
+    pendingTravel.addScaledVector(rayDirection, middleDragStep(deltaY, distance, height));
+  }
+
+  function onPointerUp(e: PointerEvent): void {
+    if (!middleDrag || e.pointerId !== middleDrag.pointerId) return;
+    endMiddleDrag(e.pointerId);
+  }
+
+  function endMiddleDrag(pointerId: number): void {
+    middleDrag = null;
+    removeMiddleDragListeners();
+    if (renderer.domElement.hasPointerCapture(pointerId)) {
+      renderer.domElement.releasePointerCapture(pointerId);
+    }
+  }
+
+  function addMiddleDragListeners(): void {
+    renderer.domElement.addEventListener('pointermove', onPointerMove);
+    renderer.domElement.addEventListener('pointerup', onPointerUp);
+    renderer.domElement.addEventListener('pointercancel', onPointerUp);
+  }
+
+  function removeMiddleDragListeners(): void {
+    renderer.domElement.removeEventListener('pointermove', onPointerMove);
+    renderer.domElement.removeEventListener('pointerup', onPointerUp);
+    renderer.domElement.removeEventListener('pointercancel', onPointerUp);
+  }
+
+  renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
+  renderer.domElement.addEventListener('pointerdown', onPointerDown);
+
   // One-time auto-fit of an ortho view to the current scene bounds (spec §2.4).
   function fitOrthoView(view: OrthoViewId): void {
     const cam = cameras[view] as THREE.OrthographicCamera;
@@ -322,6 +543,36 @@ export function createViewport(
     cam.updateProjectionMatrix();
     viewTargets[view].copy(fit.target);
     orthoHalfHeight[view] = fit.halfHeight;
+  }
+
+  /**
+   * Re-frame the active view on the bounds as they are *now* (spec §2.4). The
+   * ortho views re-run exactly the auto-fit they got on first activation, which
+   * is also the only thing that re-fits them after geometry changes; Perspective
+   * keeps its viewing direction and is pulled back to frame the scene.
+   */
+  function resetActiveView(): void {
+    // The Selected view is derived wholly from the selected camera (spec §2.4.1).
+    if (activeView === 'camera') return;
+
+    if (isOrthographic(activeView)) {
+      fitOrthoView(activeView);
+      fitted.add(activeView);
+      orbitControls.target.copy(viewTargets[activeView]);
+      orbitControls.update();
+      return;
+    }
+
+    // Any travel still easing out would otherwise drift the camera off the fresh
+    // framing over the next few frames (`navigation.md` §4.5).
+    pendingTravel.set(0, 0, 0);
+    const { min, max } = sceneContentBounds();
+    const forward = camera.getWorldDirection(new THREE.Vector3());
+    const fit = fitPerspective(min, max, forward, camera.fov, aspect());
+    camera.position.copy(fit.position);
+    orbitControls.target.copy(fit.target);
+    camera.lookAt(fit.target);
+    orbitControls.update();
   }
 
   /**
@@ -377,9 +628,20 @@ export function createViewport(
 
   function setActiveView(view: ViewId): void {
     if (view === activeView && (view === 'perspective' || view === 'camera' || fitted.has(view))) return;
-    // Save the framing of the view we're leaving so returning restores it — the
-    // Selected view has none, and its orbit target is meaningless (spec §2.4.1).
-    if (navigationEnabled(activeView)) viewTargets[activeView].copy(orbitControls.target);
+    // Save the framing of the view we're leaving so returning restores it. Only
+    // the ortho elevations have one to save: the Selected view's orbit target is
+    // meaningless (spec §2.4.1), and the Perspective view's pivot is per-gesture
+    // scratch, re-seated from the ground at the next drag (`navigation.md` §3),
+    // so its remembered framing is the camera pose alone — which lives on the
+    // camera object and needs no saving here.
+    if (isOrthographic(activeView)) {
+      viewTargets[activeView].copy(orbitControls.target);
+    }
+    // Travel still easing out belongs to the view being left (`navigation.md`
+    // §4.5). Left in place it would spend the next frames dragging whatever
+    // `orbitControls.target` now points at — an ortho view's pan target — in a
+    // direction the user asked for in a different camera.
+    pendingTravel.set(0, 0, 0);
 
     // The Selected view is locked outright: no orbit, no pan, no zoom, since the
     // viewport *is* the camera's image. A drag aims the camera instead, which
@@ -403,14 +665,33 @@ export function createViewport(
 
     // Re-point the controls + gizmo at the new camera (spec §2.4).
     orbitControls.object = cam;
-    orbitControls.target.copy(viewTargets[view]);
+    if (isOrthographic(view)) {
+      orbitControls.target.copy(viewTargets[view]);
+    } else {
+      // Perspective. Its remembered framing is the camera pose alone, so the
+      // pivot is re-seated on the ground **along the camera's current view axis**
+      // (`navigation.md` §3) instead of being restored from a saved point. This
+      // is not cosmetic: `orbitControls.update()` below ends in `lookAt(target)`,
+      // so a pivot anywhere off that axis re-aims the camera — flying out over
+      // the site, glancing at Top and coming back used to yank the view around to
+      // face the startup look-at point, keeping the position and losing the
+      // orientation.
+      reseatPivot(null, null);
+    }
     const canOrbit = orbitEnabled(view);
     orbitControls.enableRotate = canOrbit;
     // Ortho views: left-drag pans (the view stays axis-aligned); perspective
     // keeps left-drag orbit, right-drag pan.
+    // `navigation.md` applies to the Perspective view only (§7). The ortho views
+    // keep OrbitControls' wheel/middle dolly, which scales their frustum and has
+    // neither defect — there is no 'forward' under parallel projection, and their
+    // pan is already 1:1 at every zoom. In Perspective both are ours instead:
+    // the wheel and the middle drag fly the camera (§4.1, §4.2).
+    const flies = flyNavigation(view);
+    orbitControls.enableZoom = !flies;
     orbitControls.mouseButtons = {
       LEFT: canOrbit ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN,
-      MIDDLE: THREE.MOUSE.DOLLY,
+      ...(flies ? {} : { MIDDLE: THREE.MOUSE.DOLLY }),
       RIGHT: THREE.MOUSE.PAN,
     };
     orbitControls.update();
@@ -448,6 +729,10 @@ export function createViewport(
   resize();
 
   renderer.setAnimationLoop(() => {
+    // Invalidates the cached scene diagonal, so navigation re-measures the scene
+    // at most once a frame however many wheel events arrive (`navigation.md` §2).
+    frameIndex += 1;
+    applyPendingTravel();
     orbitControls.update();
     // The scene — geometry, gizmos, and the splat captures, which are an
     // `Object3D` in it and so share its depth buffer (`gaussian_splats.md` §4.1)
@@ -468,6 +753,11 @@ export function createViewport(
 
   function dispose(): void {
     renderer.setAnimationLoop(null);
+    renderer.domElement.removeEventListener('wheel', onWheel);
+    renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+    // A middle drag in flight when the viewport is torn down still has its
+    // per-gesture listeners attached.
+    removeMiddleDragListeners();
     fog.dispose();
     resizeObserver.disconnect();
     orientationGizmo.dispose();
@@ -492,6 +782,7 @@ export function createViewport(
       return activeView;
     },
     setActiveView,
+    resetActiveView,
     setCameraViewSource,
     cameraGuideSizePx,
     renderer,

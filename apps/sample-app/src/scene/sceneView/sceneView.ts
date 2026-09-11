@@ -681,6 +681,16 @@ export class SceneView {
     this.prev = next;
   }
 
+  /**
+   * Re-frame the active view on the current scene bounds — the **Reset view**
+   * button (spec §2.4). Imperative rather than a `sync` field: it is an *action*,
+   * not state, and a snapshot field would have to carry a nonce to fire twice in
+   * a row for the same view.
+   */
+  resetActiveView(): void {
+    this.viewport.resetActiveView();
+  }
+
   dispose(): void {
     const dom = this.viewport.renderer.domElement;
     dom.removeEventListener('pointerdown', this.onPointerDown);

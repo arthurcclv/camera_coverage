@@ -6,6 +6,95 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Reset view fits the scene's bounding sphere, not its box
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §2.4.
+
+**Reset view** pulls the Perspective camera back along its current viewing direction
+until the padded scene bounds fit the frustum. The obvious thing to fit is the
+bounding **box**, and that is what the button appears to want: the tightest framing
+of the actual content. It is not what it does.
+
+A box's *projected* extent depends on the angle it is viewed from — a 440x201x1120 m
+site presents its 440 m face from the front and its 1204 m diagonal from the corner.
+Fitting the box would therefore make the same button, pressed on the same scene, land
+the camera at a different distance depending on where the user happened to be looking
+when they pressed it, and would visibly change the framing as they orbited afterwards.
+For a **recovery** control — §5 of `navigation.md` makes this the only way back from a
+camera flown out of the scene — a predictable result matters more than a tight one.
+
+So the **bounding sphere** is fitted: `radius = |max - min| / 2 x FIT_PADDING`, and the
+distance follows from the binding half-angle. The cost is empty margin on a long, thin
+workspace, which is bounded by the box-to-circumsphere ratio and is of the same order
+as the padding `FIT_PADDING` adds deliberately anyway. `fitPerspective` is direction-
+independent as a result, which is what `test/viewCameras.test.ts` pins.
+
+The ortho auto-fits keep fitting the **box**, and are right to: their view direction is
+locked to a world axis, so which two extents land on screen is fixed and the
+angle-dependence that motivates the sphere cannot arise.
+
+---
+
+## Navigation measures against the ground plane, not against the orbit pivot
+
+Behavior in [`../specs/navigation.md`](../specs/navigation.md).
+
+Stock `OrbitControls` measures everything against a fixed world-space pivot: the wheel
+multiplies the camera-to-pivot distance by a constant, and pan is scaled by that same
+distance so a pixel of drag moves the world one pixel. On a 440x201x1120 m site that
+produces two complaints that read as separate bugs and are one: **zoom appears to stop**
+(the camera converges on the pivot and never reaches it) and **pan shrinks as you zoom**
+(the scale factor it is derived from is collapsing).
+
+So the pivot stops being the yardstick. A **reference distance** is derived per gesture
+by intersecting a ray with the **ground plane at world y = 0** — the plane the grid is
+drawn on — clamped to `3 x` the scene diagonal so a grazing ray stays finite, with
+`0.10 x` the diagonal as the fallback when the ray misses. The wheel then translates
+camera *and* pivot together along the cursor ray, which is why travel is unbounded: the
+camera-to-pivot distance never changes, so there is nothing to converge on. The pivot
+itself is re-seated from the ground at each drag start, so orbit circles what the user
+is looking at instead of a point fixed when the view was framed.
+
+This is the Google Maps model, and the reason it needs no depth information: when the
+world is **one known surface**, the depth under the cursor is a closed-form ray-plane
+intersection. Maps also clamps tilt so that intersection is always well-conditioned;
+a free 3D camera cannot, hence the distance clamp.
+
+**Two alternatives were rejected, both of which would stick pixels to every surface
+rather than only to the ground.** Reading the scene depth buffer is the exact answer,
+but WebGL2 forbids `readPixels` on a `DepthTexture`, so it needs an extra 1x1 pass plus
+a synchronous read-back in the input path, and it puts the navigation maths behind a GPU
+in the tests. Raycasting the splats is equally exact and headlessly testable, but splat
+meshes are deliberately `raycastable: false` (`gaussian_splats.md` §6.5) so that no
+raycast index is built for them, and a large capture would pay for one in load time and
+memory. The ground plane costs neither, and every quantity in `navigation.md` §2-§4 is
+consequently a pure function of camera pose, cursor, viewport size and scene diagonal.
+
+**What that trades away, deliberately:** pixels stick exactly only on the ground, so a
+pixel grabbed on a wall or a splat structure slides; orbit near a wall pivots on the
+floor behind it; and pan rate varies with the ground distance under the cursor rather
+than being a constant metres-per-pixel. That last one is not the defect above — pan
+collapsed because the *pivot* was collapsing, not because the rule was 1:1.
+
+**Unbounded travel is paired with an explicit way home, not a leash.** Nothing clamps how
+far the camera may fly. The alternative — bounding it to some multiple of the scene
+diagonal — would make getting lost impossible, but it refuses motion the user asked for
+with nothing on screen to explain why the wheel stopped. So the camera goes wherever it
+is pointed, and the **Reset view** button (`spec.md` §2.4) re-frames the active view on
+the current bounds. That button is not pure overhead bought for this: the ortho views
+wanted it independently, since their auto-fit runs once and nothing else re-fits them
+after the geometry changes.
+
+**`OrbitControls` is kept.** Once the pivot is re-seated per gesture its rotate (spins
+about `target`) and its pan (translates camera and target 1:1 against `target`'s
+distance) are already the wanted behavior, so only its **zoom** is taken over — the
+wheel and the middle drag, both of which `enableZoom = false` turns off in one go,
+replaced by an own non-passive wheel listener, which also has to claim
+`ctrl`+wheel, since that is how a trackpad pinch arrives and the browser would otherwise
+zoom the page. That is why the speed modifiers are **Shift and Alt**, not Ctrl. Writing a
+custom controller instead would have duplicated damping, pointer capture and the
+`TransformControls` dragging interlock for no behavior that is not reachable this way.
+
 ## The splats convert to linear themselves, because the fog composite owns the sRGB write
 
 Behavior in [`../specs/gaussian_splats.md`](../specs/gaussian_splats.md) §4.7.

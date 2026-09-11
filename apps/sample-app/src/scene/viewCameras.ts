@@ -54,9 +54,12 @@ export const PERSPECTIVE_FAR = 10000;
 
 /**
  * Ortho views are the three axis-aligned elevations. An explicit whitelist, not
- * `!== 'perspective'` — the `camera` view (§2.4.1) is perspective too.
+ * `!== 'perspective'` — the `camera` view (§2.4.1) is perspective too. Typed as
+ * a predicate so a caller that has narrowed a `ViewId` this way can index the
+ * per-ortho-view records (`viewport.ts`'s remembered targets and half-heights)
+ * without a cast.
  */
-export function isOrthographic(view: ViewId): boolean {
+export function isOrthographic(view: ViewId): view is OrthoViewId {
   return view === 'top' || view === 'front' || view === 'right';
 }
 
@@ -78,6 +81,22 @@ export function orbitEnabled(view: ViewId): boolean {
  */
 export function navigationEnabled(view: ViewId): boolean {
   return view !== 'camera';
+}
+
+/**
+ * Whether the view navigates with the **fly gestures** of `navigation.md` — the
+ * wheel translating the camera along the cursor ray (§4.1) and the middle drag
+ * flying it along the view axis (§4.2) — rather than with `OrbitControls`' own
+ * zoom. True for the Perspective view alone (`navigation.md` §7).
+ *
+ * It is `orbitEnabled`'s twin and not the same predicate: rotation and fly
+ * happen to coincide on one view today, but they answer different questions, and
+ * the ortho elevations keep the wheel while refusing rotation. Both are here
+ * rather than inline in `viewport.ts` so the view→capability mapping is in one
+ * tested place (`test/viewCameras.test.ts`).
+ */
+export function flyNavigation(view: ViewId): boolean {
+  return view === 'perspective';
 }
 
 /**
@@ -196,6 +215,58 @@ export function fitOrtho(
     near: 0.01,
     far: distance * 2 + size.length(),
   };
+}
+
+export interface PerspectiveFit {
+  /** World position for the camera. */
+  position: THREE.Vector3;
+  /** Look-at / orbit target (scene-bounds center). */
+  target: THREE.Vector3;
+}
+
+/**
+ * Fit the **Perspective** camera to the scene bounds for a vertical `fov`
+ * (degrees) and viewport `aspect` (w/h) — the **Reset view** button of spec §2.4.
+ *
+ * Unlike the ortho fits this does **not** run automatically: the perspective
+ * camera is placed once at construction and thereafter goes wherever the user
+ * flies it, without limit (`navigation.md` §5). This is the way back.
+ *
+ * `direction` is the camera's **current** forward vector, and is preserved — the
+ * camera is pulled back along it from the bounds center until the padded bounds
+ * fit both frustum axes. Resetting the orientation too would make the button
+ * "undo my orientation" rather than "frame the scene", and would throw away a
+ * viewing angle the user chose deliberately.
+ *
+ * The scene's bounding **sphere** is fitted rather than its box, so the framing
+ * does not change as the camera orbits — a box's projected extent depends on the
+ * viewing angle, and fitting it would make the same reset produce a different
+ * distance from every direction. It costs a little empty margin on a long, thin
+ * workspace, which `FIT_PADDING` would have added anyway.
+ */
+export function fitPerspective(
+  min: THREE.Vector3,
+  max: THREE.Vector3,
+  direction: THREE.Vector3,
+  fov: number,
+  aspect: number,
+): PerspectiveFit {
+  const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+  const radius = (new THREE.Vector3().subVectors(max, min).length() / 2) * FIT_PADDING;
+  const safeAspect = aspect > 0 && Number.isFinite(aspect) ? aspect : 1;
+
+  const halfV = (Math.max(fov, 1) * Math.PI) / 360;
+  // The horizontal half-angle is the binding one on a narrow viewport.
+  const halfH = Math.atan(Math.tan(halfV) * safeAspect);
+  const distance = radius / Math.sin(Math.min(halfV, halfH));
+
+  // A degenerate direction (a zero vector from a caller with no camera yet) would
+  // put the camera at the center looking at itself; fall back to the startup 3/4.
+  const forward = direction.lengthSq() > 0
+    ? direction.clone().normalize()
+    : new THREE.Vector3(13, 23, 15).normalize().negate();
+
+  return { position: center.clone().addScaledVector(forward, -distance), target: center };
 }
 
 /**

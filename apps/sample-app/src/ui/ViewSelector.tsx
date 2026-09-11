@@ -11,6 +11,11 @@
  * A row may be **disabled** — the Selected row is, whenever the selection is not
  * a camera (§2.4.1). A disabled row is dimmed, carries a tooltip explaining why,
  * and does not respond to clicks.
+ *
+ * Immediately to its right sits the **Reset view** button (§2.4), which re-frames
+ * the active view on the current scene bounds. It lives here rather than beside
+ * this component so the two read as one toolbar group. It is disabled in the
+ * Selected view, which has no framing of its own to reset (§2.4.1).
  */
 import { useEffect, useRef, useState } from 'react';
 import { VIEW_IDS, VIEW_LABELS, type ViewId } from '../scene/viewCameras.ts';
@@ -20,6 +25,25 @@ export interface ViewSelectorProps {
   onSelect(view: ViewId): void;
   /** Views that cannot currently be chosen, mapped to the reason (a tooltip). */
   disabledViews?: ReadonlyMap<ViewId, string>;
+  /** Re-frame the active view on the current scene bounds (spec §2.4). */
+  onResetView(): void;
+}
+
+/**
+ * Four corner brackets closing on a centre dot — "frame the scene", which is what
+ * the reset does; deliberately not a circular-arrow undo glyph, which would imply
+ * it reverts the last action.
+ */
+function FrameIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 8V5a2 2 0 0 1 2-2h3" />
+      <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+      <path d="M21 16v3a2 2 0 0 1-2 2h-3" />
+      <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+      <circle cx="12" cy="12" r="2.5" />
+    </svg>
+  );
 }
 
 function ChevronIcon() {
@@ -30,7 +54,7 @@ function ChevronIcon() {
   );
 }
 
-export function ViewSelector({ activeView, onSelect, disabledViews }: ViewSelectorProps) {
+export function ViewSelector({ activeView, onSelect, disabledViews, onResetView }: ViewSelectorProps) {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
 
@@ -51,45 +75,63 @@ export function ViewSelector({ activeView, onSelect, disabledViews }: ViewSelect
     };
   }, [open]);
 
+  // The Selected view is derived wholly from the selected camera (spec §2.4.1),
+  // so there is no framing to reset. Same dimmed-plus-tooltip treatment the
+  // Selected *row* gets when no camera is selected.
+  const resetDisabledReason =
+    activeView === 'camera' ? 'The Selected view has no framing of its own to reset' : undefined;
+
   return (
-    <div className="view-menu-anchor" ref={anchorRef}>
+    <div className="view-toolbar-group">
+      <div className="view-menu-anchor" ref={anchorRef}>
+        <button
+          type="button"
+          className={`btn secondary view-menu-btn${open ? ' active' : ''}`}
+          title="View"
+          aria-label={`View: ${VIEW_LABELS[activeView]}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span className="view-menu-label">{VIEW_LABELS[activeView]}</span>
+          <ChevronIcon />
+        </button>
+        {open && (
+          <ul className="menu view-menu" role="menu" aria-label="View">
+            {VIEW_IDS.map((view) => {
+              const disabledReason = disabledViews?.get(view);
+              return (
+                <li
+                  key={view}
+                  role="menuitemradio"
+                  aria-checked={view === activeView}
+                  aria-disabled={disabledReason ? true : undefined}
+                  title={disabledReason}
+                  className={`view-menu-row${view === activeView ? ' selected' : ''}${disabledReason ? ' disabled' : ''}`}
+                  onClick={() => {
+                    if (disabledReason) return;
+                    onSelect(view);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="view-menu-check">{view === activeView ? '✓' : ''}</span>
+                  {VIEW_LABELS[view]}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
       <button
         type="button"
-        className={`btn secondary view-menu-btn${open ? ' active' : ''}`}
-        title="View"
-        aria-label={`View: ${VIEW_LABELS[activeView]}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
+        className="btn secondary view-reset-btn"
+        title={resetDisabledReason ?? 'Reset view — frame the scene'}
+        aria-label="Reset view"
+        disabled={!!resetDisabledReason}
+        onClick={onResetView}
       >
-        <span className="view-menu-label">{VIEW_LABELS[activeView]}</span>
-        <ChevronIcon />
+        <FrameIcon />
       </button>
-      {open && (
-        <ul className="menu view-menu" role="menu" aria-label="View">
-          {VIEW_IDS.map((view) => {
-            const disabledReason = disabledViews?.get(view);
-            return (
-              <li
-                key={view}
-                role="menuitemradio"
-                aria-checked={view === activeView}
-                aria-disabled={disabledReason ? true : undefined}
-                title={disabledReason}
-                className={`view-menu-row${view === activeView ? ' selected' : ''}${disabledReason ? ' disabled' : ''}`}
-                onClick={() => {
-                  if (disabledReason) return;
-                  onSelect(view);
-                  setOpen(false);
-                }}
-              >
-                <span className="view-menu-check">{view === activeView ? '✓' : ''}</span>
-                {VIEW_LABELS[view]}
-              </li>
-            );
-          })}
-        </ul>
-      )}
     </div>
   );
 }

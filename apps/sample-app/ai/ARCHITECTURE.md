@@ -348,11 +348,48 @@ default" — see DECISIONS.md).
   holds the handles and does the awaits; every decision lives here.
 - `viewport.ts` — `WebGLRenderer` construction (synchronous), orbit + transform
   controls, the light rig (from `sceneLighting.ts`), grid, render loop, and the five view
-  cameras of the View selector. The
+  cameras of the View selector. It owns the **Perspective view's wheel and
+  middle-drag** directly (`navigation.md` §4): there `OrbitControls` runs with
+  `enableZoom = false` and keeps only rotate and pan, and every distance those two
+  use comes from re-seating `orbitControls.target` at each drag start. `enableZoom`
+  is set **per view** in `setActiveView` — back on in the three ortho elevations,
+  where the wheel and middle dolly still scale the frustum and neither defect
+  exists (`navigation.md` §7). All of the arithmetic lives in `navigation.ts`; this
+  module holds only the listeners, the per-frame `pendingTravel` accumulator, and
+  the Three.js objects. Two costs are capped here rather than in the pure module:
+  the scene diagonal is memoised **per animation frame** (§2 — a trackpad emits
+  wheel events faster than frames, and each measurement walks and boxes every
+  top-level object), and the middle drag's `pointermove`/`pointerup` listeners are
+  attached inside `pointerdown` and removed on up/cancel, so an unstarted gesture
+  costs nothing (CONVENTIONS.md). Its remembered per-view state is keyed on
+  `OrthoViewId`, not `ViewId`: the Perspective view's framing is its camera pose
+  alone, so there is no target to store for it and a stale one cannot be read back
+  on the next switch. The
   **Selected** view (spec §2.4.1) is driven through `setCameraViewSource` and
   publishes its frame-guide rect back out via the `onCameraGuide` option, so the
   outline App draws and the FOV the renderer used come from one `fitCameraView`
   call and cannot disagree.
+- `navigation.ts` — the pure math behind the Perspective view's navigation
+  (`navigation.md` §2–§4), and the reason `viewport.ts` stays a wiring module:
+  `sceneDiagonal`, `groundHitDistance` (ray → the y = 0 plane, `null` when it is
+  parallel or the hit is behind the camera), `groundRefDistance` (that hit clamped
+  to `3 × D`, falling back to `0.10 × D`), `pivotAlongView` (§3 — the pivot seats
+  on the camera's **own view axis**, which is what lets a view switch keep the
+  orientation the user left), `wheelStep` (`max(0.10 × dRef, 0.05 m)` × the
+  Shift/Alt `speedMultiplier`, dispatched through a `SPEED_MULTIPLIERS` record),
+  `middleDragStep` (`2 × dRef` per viewport height), `dampStep`, and the input
+  normalisation the listeners would otherwise decide inline: `wheelNotches`
+  (`deltaMode`), `wheelAxisDelta` (a shifted wheel arrives on `deltaX` in some
+  browsers), `speedModifierOf` (held keys → modifier) and `viewportNdc`
+  (client point → NDC, the viewport centre for a null point).
+  Pan has **no** entry here: once the pivot is seated at the ground distance,
+  `OrbitControls`' own 1:1 pan is already §4.3's rule (`ai/DECISIONS.md`).
+  Takes plain `{x, y, z}` rather than `THREE.Vector3` — structurally compatible,
+  so `viewport.ts` passes the real ones — and holds no scene reference and no
+  state, so the whole navigation model is assertable in `node --test` without a
+  GPU (`test/navigation.test.ts`), the same way `centerRay.ts` and
+  `surfaceHit.ts` are. That testability is the entire reason the design reads the
+  ground plane rather than the depth buffer: see [DECISIONS.md](DECISIONS.md).
 - `sceneLighting.ts` — `createSceneLights()`: the viewport's fixed four-light rig
   (hemisphere + key/fill directionals + ambient, spec §2.3.1). A pure factory
   returning a `SceneLights` record keyed by role — not an array, so neither the
@@ -361,11 +398,19 @@ default" — see DECISIONS.md).
   live renderer (which needs a real GPU context). Unit-tested in
   `test/sceneLighting.test.ts`, which pins the §2.3.1 table exactly and then the
   property it exists for (no direction unlit).
-- `viewCameras.ts` — the pure geometry behind the View selector: `ViewId` (five
+- `viewCameras.ts` — the pure geometry behind the View selector and the **Reset
+  view** button: `ViewId` (five
   views) and `OrthoViewId` (the three elevations — `Exclude<ViewId,'perspective'>`
-  is *not* that set, since the `camera` view is perspective too), the labels,
-  `isOrthographic`/`orbitEnabled`/`navigationEnabled`, `fitOrtho` for the ortho
-  auto-fit, and `fitCameraView` for the Selected view's rendered FOV + guide rect.
+  is *not* that set, since the `camera` view is perspective too), the labels, the
+  four view→capability predicates
+  `isOrthographic`/`orbitEnabled`/`navigationEnabled`/`flyNavigation` (the last
+  being whether `navigation.md`'s wheel and middle drag apply, i.e. whether
+  `OrbitControls`' own zoom is off — kept here rather than inline in `viewport.ts`
+  so the mapping is tested in one place), `fitOrtho` for the ortho
+  auto-fit, `fitPerspective` for the Reset view button (spec §2.4) — a bounding
+  **sphere** fit, so the same reset lands the same distance away from every
+  viewing angle, and the camera's current direction is preserved rather than
+  reset — and `fitCameraView` for the Selected view's rendered FOV + guide rect.
 - `entityVisibility.ts` — the two *derived* sets behind spec §2.4.3's hiding rule:
   `drawableGroupIds` (the enabled groups plus the one placement mode is open on) and
   `visibleZoneIds` (the enabled zones union every drawable group's target `zoneIds`).

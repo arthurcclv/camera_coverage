@@ -54,6 +54,7 @@ use explicit `.ts` extensions — Vite/esbuild resolve these without extra confi
 ```
 apps/sample-app/
   specs/spec.md            ← this document
+  specs/navigation.md      Perspective-view camera navigation: wheel/middle/pan/orbit (§2.4)
   index.html
   package.json
   tsconfig.json
@@ -67,6 +68,7 @@ apps/sample-app/
     scene/
       buildRoom.ts         room + boxes → { positions, indices } + Three.js meshes
       viewport.ts          WebGLRenderer + orbit/transform controls, render loop; four view cameras (perspective + top/front/right ortho) + bottom-left orientation-axis triad (§2.4)
+      navigation.ts        pure Perspective-view navigation math: ground-plane reference distance, wheel/middle step, pan rate, wheel-notch normalisation (navigation.md)
       cameraGizmos.ts      per-camera frustum gizmos
       probeGizmos.ts       per-probe markers + selected-probe sightlines (§12.4)
       probeVisibility.ts   retained ChunkResults + world-point → camera-mask lookup (§12.2)
@@ -316,13 +318,20 @@ heatmap legend at its bottom-right (§13.6):
   layer toggle below, which is why the fifth row is named **Selected** — dropping
   the word entirely rather than competing with it:
   - **Perspective** — the default `PerspectiveCamera` (a 3/4 orbit view) with
-    full orbit + pan + zoom. Selected on load.
+    full orbit + pan + forward/backward travel. Selected on load. Its navigation
+    is specified in [`navigation.md`](./navigation.md): the wheel translates the
+    camera along the cursor ray rather than dollying toward a fixed pivot, so it
+    is **unbounded** in both directions, and pan is measured against the ground
+    plane rather than against a pivot the camera converges on.
   - **Top / Front / Right** — three **orthographic** cameras (true parallel
     projection) fixed to the world axes: **Top** looks down −Y (screen-up −Z),
     **Front** looks along −Z from +Z (up +Y), **Right** looks along −X from +X
     (up +Y). In an orthographic view orbit/rotation is **locked** — the view
     stays a true axis-aligned elevation — and only **pan** (drag) and **zoom**
-    (wheel, dollying the ortho frustum) are available.
+    (wheel, dollying the ortho frustum) are available. `navigation.md` does
+    **not** apply to these views (`navigation.md` §7): under parallel projection
+    translating the camera along its own axis changes nothing on screen, and
+    ortho pan is already 1:1 at every zoom level.
   - **Selected** — a perspective view rendered from the **currently selected
     camera** (§5), so the viewport shows what that camera sees. Both this row and
     the selector button read the static label "Selected" — never the camera's own
@@ -330,8 +339,10 @@ heatmap legend at its bottom-right (§13.6):
 
   Each of those **first four** views is a persistent camera with its **own
   remembered framing**: the first time a view is selected its frustum/position is
-  auto-fit to the scene bounds and centered; afterward it keeps whatever pan/zoom
-  the user left it at,
+  auto-fit to the scene bounds and centered; afterward it keeps whatever framing
+  the user left it at — for the Perspective view that framing is the **camera
+  pose alone**, since its orbit pivot is per-gesture scratch
+  (`navigation.md` §3) —
   so returning to a view restores its last framing (the auto-fit does not re-run,
   and is not re-applied when scene geometry later changes). Selection and the
   transform gizmos (§5.2) stay fully **enabled in those four views** — switching
@@ -342,6 +353,30 @@ heatmap legend at its bottom-right (§13.6):
   clicks (§2.4.1). Whichever view is **active** is **transient viewport state**, like
   the layer toggles: it is **not** written to the scene file (§14) and resets to
   Perspective on every load.
+- **Immediately right of the View selector** — a **Reset view** button: an
+  icon-only button that **re-frames the active view** on the scene bounds as they
+  are *now*, discarding whatever framing the user has navigated to.
+  - **Perspective** keeps its current viewing **direction** and is moved back
+    along it until the scene's bounding **sphere** fills the padded frustum.
+    Direction is preserved rather than reset to the startup 3/4 elevation so the
+    button reads as "frame the scene", not "undo my orientation". The sphere
+    rather than the bounding **box** so that the same reset lands the camera the
+    same distance away from every viewing angle — a box's projected extent
+    depends on the angle it is viewed from, so fitting it would make the button's
+    result depend on where the user happened to be looking. It costs a little
+    extra margin on a long, thin workspace.
+  - **Top / Front / Right** re-run the same auto-fit they got on first activation.
+    This is therefore also the only way to re-fit a view **after scene geometry
+    changes**, which the one-time auto-fit deliberately does not do by itself.
+  - **Selected** has no framing of its own (§2.4.1), so the button is **disabled**
+    in that view — dimmed, inert, and carrying a tooltip with the reason, exactly
+    as the selector's own Selected row is when no camera is selected.
+
+  For the Perspective view this is the **only** way back from a camera that has
+  been flown far from the scene, since nothing limits how far it may travel
+  ([`navigation.md`](./navigation.md) §5). Re-framing is **transient viewport
+  state** like the active view itself: it writes nothing to the scene file (§14).
+
 - **Top-right** — a single **eye icon button** that opens a **layer-visibility
   dropdown**: a checklist of the viewport-only layers that can clutter or obscure
   the scene. Each row is a checkbox (checked = layer visible) beside the layer's

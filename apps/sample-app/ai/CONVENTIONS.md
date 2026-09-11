@@ -8,7 +8,8 @@ Coding standards and organization for the demo app. Match the existing code. See
 
 The app is built from `specs/spec.md` (+ `specs/volumetric_rendering.md`,
 `specs/sampling_volumes.md`, `specs/aim_optimization.md`,
-`specs/camera_placement.md`, and `specs/gaussian_splats.md`). Every
+`specs/camera_placement.md`, `specs/gaussian_splats.md`, and
+`specs/navigation.md`). Every
 source file opens with a doc comment citing the spec section it implements.
 Behavior changes update the spec first — see WORKFLOWS.md.
 
@@ -135,7 +136,10 @@ cannot be keyed on one.
   `sectionHeatmap`, `sceneReducer`, `coverageRun` (the run coordinator: generation
   guard + reset/addChunk/clear fan-out), `sceneView/pick`, `sceneView/transformReadback`,
   `sceneLighting` (the viewport's light rig, extracted from `viewport.ts` precisely
-  so it is reachable here), `splats`, `splatAssets`.
+  so it is reachable here), `navigation` (the Perspective view's navigation math,
+  extracted for the same reason — `navigation.md` §6 makes headless testability the
+  stated reason the design reads the ground plane rather than the depth buffer),
+  `splats`, `splatAssets`.
   A few drive real (renderer-free) Three.js gizmo objects and assert on their
   state — `cameraGizmos`, `samplingVolumeGizmos`, and `gizmoSet` (the shared spine,
   via a minimal subclass: reconcile/dispose/getAttachTarget/pickHit) — which is how

@@ -2796,7 +2796,12 @@ export function App() {
             </div>
           )}
           <div className="viewport-toolbar-center">
-            <ViewSelector activeView={activeView} onSelect={setActiveView} disabledViews={disabledViews} />
+            <ViewSelector
+              activeView={activeView}
+              onSelect={setActiveView}
+              disabledViews={disabledViews}
+              onResetView={() => viewRef.current?.resetActiveView()}
+            />
           </div>
           {/* Frame guide (spec §2.4.1): outlines the selected camera's true image
               inside the padded render. Percentages come straight from the fit
