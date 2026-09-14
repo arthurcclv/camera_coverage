@@ -12,7 +12,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PLACEABLE_KINDS, canPlace, placeTarget, placeTooltip } from '../src/scene/placement.ts';
+import { PLACEABLE_KINDS, canPlace, placeTarget, placeTooltipKey } from '../src/scene/placement.ts';
 import type { Selection } from '../src/scene/viewportSelection.ts';
 
 test('the supported kinds are exactly camera, probe, and constraint (spec §2.4.2)', () => {
@@ -59,20 +59,19 @@ test('canPlace agrees with placeTarget across every selection kind', () => {
   assert.equal(canPlace(null, null), false);
 });
 
-test('the tooltip names the selection requirement when disabled (spec §2.4.2)', () => {
-  const tip = placeTooltip(null, null, false);
-  assert.match(tip, /select a camera, a probe, or a polyline vertex/i);
-  assert.equal(placeTooltip({ kind: 'volume', id: 'volume-1' }, null, false), tip);
+test('the tooltip key names the selection requirement when disabled (spec §2.4.2, §18.4)', () => {
+  const key = placeTooltipKey(null, null, false);
+  assert.equal(key, 'placeTooltipDisabled');
+  assert.equal(placeTooltipKey({ kind: 'volume', id: 'volume-1' }, null, false), key);
   // A constraint with no vertex resolved is disabled for the same reason.
-  assert.equal(placeTooltip({ kind: 'constraint', id: 'con-1' }, null, false), tip);
+  assert.equal(placeTooltipKey({ kind: 'constraint', id: 'con-1' }, null, false), key);
 });
 
-test('the tooltip tells the user what to do once armed, and what it will move', () => {
+test('the tooltip key tells the user what to do once armed, and what it will move', () => {
   const selection: Selection = { kind: 'camera', id: 'cam-1' };
-  assert.equal(placeTooltip(selection, null, false), 'Place on surface');
-  assert.match(placeTooltip(selection, null, true), /click the geometry/i);
+  assert.equal(placeTooltipKey(selection, null, false), 'placeTooltipEntity');
+  assert.equal(placeTooltipKey(selection, null, true), 'placeTooltipEntityArmed');
   // A vertex target says so, since the button is shared with whole entities.
-  const vertexTip = placeTooltip({ kind: 'constraint', id: 'con-1' }, 1, false);
-  assert.match(vertexTip, /vertex/i);
-  assert.match(placeTooltip({ kind: 'constraint', id: 'con-1' }, 1, true), /click the geometry/i);
+  assert.equal(placeTooltipKey({ kind: 'constraint', id: 'con-1' }, 1, false), 'placeTooltipVertex');
+  assert.equal(placeTooltipKey({ kind: 'constraint', id: 'con-1' }, 1, true), 'placeTooltipVertexArmed');
 });

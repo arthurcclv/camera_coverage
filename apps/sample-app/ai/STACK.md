@@ -53,6 +53,22 @@ There is a single `three` build in the bundle, so the app carries no alias, no
 `optimizeDeps` carve-out, and no two-copies-of-`three.core.js` hazard. Spark itself
 stays out of the main chunk, dynamically imported on the first capture load.
 
+## Internationalization (spec §18)
+
+| Tech | Version | Role |
+|---|---|---|
+| **`i18next`** | ^25 | Translation core: namespaced dictionaries, interpolation, pluralization (`_one`/`_other`). |
+| **`react-i18next`** | ^15 | `useTranslation()` hook, `initReactI18next`. |
+| **`i18next-browser-languagedetector`** | ^8 | First-load locale detection (`navigator.language`) + `localStorage` persistence for an override. |
+
+Config lives in `src/i18n/index.ts`: seven namespaced dictionaries per locale
+(`common`, `camera`, `scene`, `optimize`, `placement`, `sections`, `volumes`),
+imported eagerly from `src/locales/{en,zh-TW}/*.json` — small, closed locale set
+(two), so no lazy-loading/backend plugin. `supportedLngs: ['en', 'zh-TW']` with
+`nonExplicitSupportedLngs: false` and `load: 'currentOnly'` keeps a generic `zh`
+or `zh-CN` from being coerced to `zh-TW` (spec §18.2) rather than falling back
+to English.
+
 ## Testing & tooling
 
 | Tech | Role |

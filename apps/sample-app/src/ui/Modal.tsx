@@ -14,6 +14,8 @@
  * opened it on close.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
+import i18n from '../i18n/index.ts';
 
 /**
  * The open modals, outermost first (spec §14.7). Only the **overwrite
@@ -98,8 +100,14 @@ export function Modal({ title, stacked = false, onCancel, children, footer }: Mo
  * What a folder that cannot be enumerated or probed says (spec §14.8) — renamed,
  * unmounted, or permission lost. Shared, because either dialog can hit it and
  * both recover the same way: stay open, offer **Change…**.
+ *
+ * A function rather than a plain constant: it is read from `.then()` callbacks
+ * outside render (§18), not JSX, so it goes through the `i18next` instance
+ * directly instead of the `useTranslation` hook.
  */
-export const FOLDER_UNAVAILABLE = 'This folder is no longer available. Choose another.';
+export function FOLDER_UNAVAILABLE(): string {
+  return i18n.t('scene:modal.folderUnavailable');
+}
 
 /**
  * The folder a dialog is currently pointed at, and the **Change…** that
@@ -127,13 +135,14 @@ export function usePickedFolder(
  * and the button that re-picks it.
  */
 export function FolderLine({ name, onChange, disabled }: { name: string; onChange(): void; disabled: boolean }) {
+  const { t } = useTranslation('common');
   return (
     <div className="modal-folder">
       <span className="modal-folder-name" title={name}>
         {name}/
       </span>
       <button type="button" className="btn secondary" disabled={disabled} onClick={onChange}>
-        Change…
+        {t('change')}
       </button>
     </div>
   );

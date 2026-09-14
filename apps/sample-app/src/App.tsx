@@ -39,11 +39,11 @@ import type { SplatLoadState, SplatObject } from './scene/splats.ts';
 import {
   DEFAULT_TRANSFORM_SPACE,
   spaceIconKind,
-  spaceTooltip,
+  spaceTooltipKey,
   toggleSpace,
   type TransformSpace,
 } from './scene/transformSpace.ts';
-import { canPlace, placeTarget, placeTooltip } from './scene/placement.ts';
+import { canPlace, placeTarget, placeTooltipKey } from './scene/placement.ts';
 import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
@@ -77,6 +77,7 @@ import {
   resolveWriteAction,
   type DestinationClashes,
   type LastSave,
+  type Message,
   type SaveIntent,
   type SaveTarget,
 } from './scene/saveTarget.ts';
@@ -112,6 +113,8 @@ import { HeatmapLegend } from './ui/HeatmapLegend.tsx';
 import { StatsPanel } from './ui/StatsPanel.tsx';
 import { SectionStatsPanel } from './ui/SectionStatsPanel.tsx';
 import { RunBar } from './ui/RunBar.tsx';
+import { TopBar } from './ui/TopBar.tsx';
+import { useTranslation } from 'react-i18next';
 import { SceneFileControls } from './ui/SceneFileControls.tsx';
 import { ConfirmOverwriteDialog } from './ui/ConfirmOverwriteDialog.tsx';
 import { LoadSceneDialog } from './ui/LoadSceneDialog.tsx';
@@ -199,13 +202,13 @@ const AUTO_RUN_MAX_HZ = 10;
 
 /** Human-readable message for a scene-file import/export failure (spec §14.8). */
 /**
- * What the union row of a §6.3 comparison is called.
+ * i18n key (spec §18.4) for what the union row of a §6.3 comparison is called.
  *
  * With zones off there is no union — the counted set is the whole valid volume,
  * and calling it "All enabled zones" would name something the user did not create.
  */
-function unionLabel(state: { useZones: boolean; volumes: unknown[] }): string {
-  return state.useZones && state.volumes.length > 0 ? 'All enabled zones' : 'Whole workspace';
+function unionLabelKey(state: { useZones: boolean; volumes: unknown[] }): string {
+  return state.useZones && state.volumes.length > 0 ? 'unionLabelZones' : 'unionLabelWorkspace';
 }
 
 function describeSceneError(err: unknown): string {
@@ -313,6 +316,10 @@ const DEFAULT_OVERLAY_OPTIONS: OverlayOptions = {
 };
 
 export function App() {
+  const { t } = useTranslation('common');
+  // Resolves a saveTarget.ts Message (spec §18.4) to display text — the one
+  // point these composers cross from pure/testable data into translated copy.
+  const toMessage = useCallback((m: Message): string => t(m.key, m.params), [t]);
   // The default scene (spec §14.1) is computed once; `geometryObjects`/`room`
   // (its built render+collision artifact) can later be replaced wholesale by
   // Import/Reset (spec §14.4, §14.7) — see `applyScene` below.
@@ -1011,8 +1018,8 @@ export function App() {
 
   // The Selected row is the one view that can be unavailable (spec §2.4.1).
   const disabledViews = useMemo<ReadonlyMap<ViewId, string>>(
-    () => (selectedCameraId ? new Map() : new Map([['camera', 'Select a camera to use this view'] as const])),
-    [selectedCameraId],
+    () => (selectedCameraId ? new Map() : new Map([['camera', t('selectedViewDisabledReason')] as const])),
+    [selectedCameraId, t],
   );
 
   const enabledCameraCount = cameras.filter((c) => c.enabled).length;
@@ -1754,7 +1761,7 @@ export function App() {
    * one "+" entry that is not always enabled, and the string is the hint the row
    * shows.
    */
-  const addSplatBlocker = saveTarget == null ? 'Load or save a scene first.' : null;
+  const addSplatBlocker = saveTarget == null ? t('addSplatBlocker') : null;
 
   const handleAddSplat = useCallback(() => {
     if (saveTarget != null) setAddSplatFolder(saveTarget.folder);
@@ -2016,7 +2023,7 @@ export function App() {
     // Computed here, once, rather than tracked on every edit (§14.4).
     // Snapshot equality, so a drag that ends where it started is not a change.
     const dirty = sceneSnapshot(currentScene()) !== sceneBaselineRef.current;
-    setUnsavedWarning(dirty ? describeUnsavedWarning(saveTarget?.name ?? null) : null);
+    setUnsavedWarning(dirty ? toMessage(describeUnsavedWarning(saveTarget?.name ?? null)) : null);
     if (saveTarget != null) {
       setLoadDialogFolder(saveTarget.folder);
       return;
@@ -2102,7 +2109,7 @@ export function App() {
         // `requestPermission` needs. Already-writable handles never prompt (§14.5).
         if (!(await ensureWritePermission(dir))) {
           // Target kept, so a retry or another folder is one click away (§14.8).
-          setSceneError(describeSaveFailure(name, 'write permission was denied'));
+          setSceneError(toMessage(describeSaveFailure(name, 'write permission was denied')));
           return;
         }
         if (copyFrom != null) await copyAssets(copyFrom, dir, assetSrcs);
@@ -2115,9 +2122,11 @@ export function App() {
         flashSavedStatus({ assetsCopied: copyFrom == null ? 0 : assetSrcs.length });
       } catch (err) {
         setSceneError(
-          err instanceof AssetCopyError
-            ? describeAssetCopyFailure(err.src, err.reason)
-            : describeSaveFailure(name, describeSceneError(err)),
+          toMessage(
+            err instanceof AssetCopyError
+              ? describeAssetCopyFailure(err.src, err.reason)
+              : describeSaveFailure(name, describeSceneError(err)),
+          ),
         );
       } finally {
         setSceneIOBusy(false);
@@ -2147,7 +2156,7 @@ export function App() {
         await writeScene(target, sameFolder);
         return;
       }
-      setConfirmOverwrite({ target, sameFolder, lines: describeOverwriteConfirm(target, clashes) });
+      setConfirmOverwrite({ target, sameFolder, lines: describeOverwriteConfirm(target, clashes).map(toMessage) });
     },
     [writeScene],
   );
@@ -2385,7 +2394,7 @@ export function App() {
         pendingBeforeRef.current = null;
         const zones = stateRef.current.zones;
         const after = snapshotCoverage(coverageRun.zoneCoverage(zones));
-        setComparison(compareCoverage(before, after, zones, unionLabel(stateRef.current)));
+        setComparison(compareCoverage(before, after, zones, t(unionLabelKey(stateRef.current))));
       }
     }
   }, [engine, room, ensureLoaded, debouncedVoxelSize, coverageRun, runGrid]);
@@ -2549,10 +2558,15 @@ export function App() {
   }, [probes, probeQueries]);
 
   return (
-    // The placement mode keeps this shell and replaces what the two side
-    // columns hold (§5) — the widths, the borders and the viewport are the
-    // app's, because the mode's claim is exclusion, not screen space.
-    <div className="app">
+    // The top bar (§18.3) sits outside the placement mode's show/hide rules —
+    // unlike the two side columns and the viewport toolbar, it stays visible in
+    // every mode, including placement.
+    <div className="app-shell">
+      <TopBar />
+      {/* The placement mode keeps this shell and replaces what the two side
+          columns hold (§5) — the widths, the borders and the viewport are the
+          app's, because the mode's claim is exclusion, not screen space. */}
+      <div className="app">
       {placementOpen && placementGroup && (
         <div className="left-panel placement-inputs">
           <CandidatePositionsPanel
@@ -2575,7 +2589,7 @@ export function App() {
             fileSystemAccessAvailable={fileSystemAccessAvailable}
             busy={sceneIOBusy}
             error={sceneDialogOpen ? null : sceneError}
-            status={describeSceneFileStatus(saveTarget, lastSave)}
+            status={toMessage(describeSceneFileStatus(saveTarget, lastSave))}
             onLoad={handleLoadClick}
             onSave={handleSave}
             onSaveAs={handleSaveAs}
@@ -2628,14 +2642,14 @@ export function App() {
               onDuplicateSplat={handleDuplicateSplat}
               onReorder={handleReorder}
               onExportCameraInfo={handleExportCameraInfo}
-              exportCameraInfoBlocker={exportingCameraInfo ? 'Still casting the camera rays…' : null}
+              exportCameraInfoBlocker={exportingCameraInfo ? t('exportingCameraRays') : null}
             />
           </div>
           <div
             className="panel-divider"
             role="separator"
             aria-orientation="horizontal"
-            aria-label="Resize hierarchy and detail panels"
+            aria-label={t('resizeHierarchyPanels')}
             onPointerDown={onDividerPointerDown}
             onPointerMove={onDividerPointerMove}
             onPointerUp={onDividerPointerUp}
@@ -2745,8 +2759,8 @@ export function App() {
                 <button
                   type="button"
                   className={`btn secondary icon-btn${selection?.kind === 'probe' || transformMode === 'translate' ? ' active' : ''}`}
-                  title="Move"
-                  aria-label="Move"
+                  title={t('transformMove')}
+                  aria-label={t('transformMove')}
                   aria-pressed={selection?.kind === 'probe' || transformMode === 'translate'}
                   onClick={() => setTransformMode('translate')}
                 >
@@ -2755,8 +2769,8 @@ export function App() {
                 <button
                   type="button"
                   className={`btn secondary icon-btn${selection?.kind !== 'probe' && transformMode === 'rotate' ? ' active' : ''}`}
-                  title="Rotate"
-                  aria-label="Rotate"
+                  title={t('transformRotate')}
+                  aria-label={t('transformRotate')}
                   aria-pressed={selection?.kind !== 'probe' && transformMode === 'rotate'}
                   disabled={selection?.kind === 'probe'}
                   onClick={() => setTransformMode('rotate')}
@@ -2766,8 +2780,8 @@ export function App() {
                 <button
                   type="button"
                   className={`btn secondary icon-btn${selection?.kind === 'volume' && transformMode === 'scale' ? ' active' : ''}`}
-                  title="Scale"
-                  aria-label="Scale"
+                  title={t('transformScale')}
+                  aria-label={t('transformScale')}
                   aria-pressed={selection?.kind === 'volume' && transformMode === 'scale'}
                   disabled={selection?.kind !== 'volume'}
                   onClick={() => setTransformMode('scale')}
@@ -2777,8 +2791,8 @@ export function App() {
                 <button
                   type="button"
                   className="btn secondary icon-btn"
-                  title={spaceTooltip(transformSpace)}
-                  aria-label={spaceTooltip(transformSpace)}
+                  title={t(spaceTooltipKey(transformSpace))}
+                  aria-label={t(spaceTooltipKey(transformSpace))}
                   onClick={() => setTransformSpace((s) => toggleSpace(s))}
                 >
                   {spaceIconKind(transformSpace) === 'box' ? <BoxIcon /> : <GlobeIcon />}
@@ -2788,8 +2802,8 @@ export function App() {
                 <button
                   type="button"
                   className={`btn secondary icon-btn${placing ? ' active' : ''}`}
-                  title={placeTooltip(selection, activeVertex, placing)}
-                  aria-label={placeTooltip(selection, activeVertex, placing)}
+                  title={t(placeTooltipKey(selection, activeVertex, placing))}
+                  aria-label={t(placeTooltipKey(selection, activeVertex, placing))}
                   aria-pressed={placing}
                   disabled={!canPlace(selection, activeVertex)}
                   onClick={() => setPlacing((p) => !p)}
@@ -2849,12 +2863,13 @@ export function App() {
                 ? sections.find((s) => s.id === clipSectionId) ?? null
                 : null;
             const clipGrid = clipSection ? sectionCellGrids.get(clipSection.id) ?? null : null;
-            const scale = chooseHeatmapLegend(clipSection, clipGrid, {
+            const template = chooseHeatmapLegend(clipSection, clipGrid, {
               visible: overlayOptions.visible,
               overlayHue: overlayOptions.overlayHue,
               mode: overlayOptions.mode,
             });
-            if (!scale) return null;
+            if (!template) return null;
+            const scale = { ...template, caption: t(template.captionKey) };
             return (
               <div className="viewport-legend">
                 <HeatmapLegend scale={scale} />
@@ -3004,6 +3019,7 @@ export function App() {
           onCancel={() => setConfirmOverwrite(null)}
         />
       )}
+      </div>
     </div>
   );
 }

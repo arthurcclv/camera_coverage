@@ -24,6 +24,7 @@
  * it — exposing either only offered a way to rebuild a pool for a difference
  * no plot can show.
  */
+import { useTranslation } from 'react-i18next';
 import { Slider } from './Slider.tsx';
 import type { ConstraintGroup } from '../placement/region.ts';
 
@@ -33,26 +34,27 @@ export interface NewCameraDefaultsPanelProps {
 }
 
 export function NewCameraDefaultsPanel({ group, onChangeGroup }: NewCameraDefaultsPanelProps) {
+  const { t } = useTranslation('placement');
   const set = (patch: Partial<ConstraintGroup>) => onChangeGroup(group.id, patch);
 
   return (
     <div className="panel placement-defaults">
-      <p className="panel-title">New camera defaults</p>
+      <p className="panel-title">{t('newCameraDefaultsPanel.title')}</p>
 
       <div className="panel-body">
         <div className="row">
-          <label htmlFor="cg-prefix">Name prefix</label>
+          <label htmlFor="cg-prefix">{t('newCameraDefaultsPanel.namePrefixLabel')}</label>
           <input
             id="cg-prefix"
             type="text"
             className="text-input"
             value={group.namePrefix}
-            placeholder="(blank → Camera N)"
+            placeholder={t('newCameraDefaultsPanel.namePrefixPlaceholder')}
             onChange={(e) => set({ namePrefix: e.target.value })}
           />
         </div>
         <Slider
-          label="FOV"
+          label={t('newCameraDefaultsPanel.fovLabel')}
           value={group.fov}
           min={10}
           max={170}
@@ -61,7 +63,7 @@ export function NewCameraDefaultsPanel({ group, onChangeGroup }: NewCameraDefaul
           onChange={(fov) => set({ fov })}
         />
         <Slider
-          label="Range (far)"
+          label={t('newCameraDefaultsPanel.rangeLabel')}
           value={group.far}
           min={0.5}
           max={100}

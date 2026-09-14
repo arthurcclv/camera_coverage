@@ -17,6 +17,7 @@
  * re-pointing a row at a different capture is Delete + Add, which is also what
  * keeps the decode cache's refcount honest (§3.3).
  */
+import { useTranslation } from 'react-i18next';
 import { eulerToQuat, quatToEuler } from '../cameras/math.ts';
 import {
   isFlippedZ,
@@ -41,6 +42,7 @@ export interface SplatPanelProps {
 const MIN_SPLAT_SCALE = 1e-3;
 
 export function SplatPanel({ splat, loadState, onRename, onChange, onPreset }: SplatPanelProps) {
+  const { t } = useTranslation(['scene', 'common']);
   if (!splat) return null;
 
   const euler = quatToEuler(splat.rotation);
@@ -59,13 +61,13 @@ export function SplatPanel({ splat, loadState, onRename, onChange, onPreset }: S
   return (
     <div className="panel">
       <p className="panel-title">
-        Splat — {splatLabel(splat)}
+        {t('splatPanel.titlePrefix', { label: splatLabel(splat) })}
         {badge && <span className={failed ? 'badge splat-error' : 'badge splat'}>{badge}</span>}
       </p>
 
       <div className="panel-body">
         <div className="row">
-          <label htmlFor="splat-name">Name</label>
+          <label htmlFor="splat-name">{t('common:name')}</label>
           <input
             id="splat-name"
             className="text-input"
@@ -80,16 +82,16 @@ export function SplatPanel({ splat, loadState, onRename, onChange, onPreset }: S
         {/* The file this row points at, read-only (§7). Hover gives the full
             path, since a nested `src` outruns the row. */}
         <div className="row">
-          <label>Source</label>
+          <label>{t('splatPanel.sourceLabel')}</label>
           <span className="splat-source" title={splat.src}>
             {splat.src}
           </span>
         </div>
 
-        <p className="hint">Registration</p>
+        <p className="hint">{t('splatPanel.registrationHint')}</p>
 
         <Vec3Field
-          label="Position"
+          label={t('common:position')}
           digits={2}
           columns={[
             { label: 'X', value: splat.position[0], onCommit: (v) => setPosition(0, v) },
@@ -112,7 +114,7 @@ export function SplatPanel({ splat, loadState, onRename, onChange, onPreset }: S
             needs to stand up in the Y-up scene, which is why the bound is 90
             and not the camera panel's 89 (§7). */}
         <Vec3Field
-          label="Rotation"
+          label={t('common:rotation')}
           digits={2}
           columns={[
             { label: 'X', value: euler.pitch, min: -90, max: 90, onCommit: (v) => setEuler({ pitch: v }) },
@@ -124,13 +126,13 @@ export function SplatPanel({ splat, loadState, onRename, onChange, onPreset }: S
         {/* One uniform number in an ungrouped field — deliberately *not* a
             grouped vector field (`spec.md` §5.2.1, §2.1). */}
         <div className="row">
-          <label htmlFor="splat-scale">Scale</label>
+          <label htmlFor="splat-scale">{t('common:scale')}</label>
           <NumberInput
             value={splat.scale}
             min={MIN_SPLAT_SCALE}
             digits={3}
             seed="full"
-            ariaLabel="Splat scale"
+            ariaLabel={t('splatPanel.scaleAriaLabel')}
             onCommit={(v) => onChange(splat.id, { scale: v })}
           />
         </div>
@@ -144,18 +146,18 @@ export function SplatPanel({ splat, loadState, onRename, onChange, onPreset }: S
             type="button"
             className={`btn secondary${flipped ? ' active' : ''}`}
             aria-pressed={flipped}
-            title="Rotate the capture 180° about Z — the usual fix for a Z-down reconstruction"
+            title={t('splatPanel.flipZTitle')}
             onClick={() => onPreset(splat.id, 'flipZ')}
           >
-            Flip 180° Z
+            {t('splatPanel.flipZButton')}
           </button>
           <button
             type="button"
             className="btn secondary"
-            title="Back to position [0,0,0], no rotation, scale 1"
+            title={t('splatPanel.resetTitle')}
             onClick={() => onPreset(splat.id, 'reset')}
           >
-            Reset transform
+            {t('splatPanel.resetButton')}
           </button>
         </div>
       </div>

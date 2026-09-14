@@ -4,6 +4,7 @@
  * selected; guards its own "nothing selected" state too since the spec
  * enumerates it as a first-class no-data state.
  */
+import { useTranslation } from 'react-i18next';
 import { computeSectionStats, type Section, type SectionCellGrid, type SectionOrientation } from '../scene/sectionHeatmap.ts';
 
 export interface SectionStatsPanelProps {
@@ -17,20 +18,21 @@ export interface SectionStatsPanelProps {
   cameraNameById: Map<string, string>;
 }
 
-const ORIENTATION_LABELS: Record<SectionOrientation, string> = {
-  horizontal: 'Horizontal',
-  'vertical-x': 'Vertical X',
-  'vertical-z': 'Vertical Z',
+const ORIENTATION_LABEL_KEYS: Record<SectionOrientation, string> = {
+  horizontal: 'orientationValue.horizontal',
+  'vertical-x': 'orientationValue.verticalX',
+  'vertical-z': 'orientationValue.verticalZ',
 };
 
 export function SectionStatsPanel({ section, cellGrid, hasRunOnce, stale, cameraNameById }: SectionStatsPanelProps) {
+  const { t } = useTranslation('sections');
   return (
     <div className="panel">
-      <p className="panel-title">Section stats</p>
+      <p className="panel-title">{t('sectionStatsPanel.title')}</p>
       {!section ? (
-        <p className="hint">Select a section to see its stats.</p>
+        <p className="hint">{t('sectionStatsPanel.selectHint')}</p>
       ) : !hasRunOnce || !cellGrid ? (
-        <p className="hint">Run coverage to see section stats.</p>
+        <p className="hint">{t('sectionStatsPanel.runHint')}</p>
       ) : (
         <SectionStatsBody section={section} cellGrid={cellGrid} stale={stale} cameraNameById={cameraNameById} />
       )}
@@ -39,59 +41,60 @@ export function SectionStatsPanel({ section, cellGrid, hasRunOnce, stale, camera
 }
 
 function SectionStatsBody({ section, cellGrid, stale, cameraNameById }: { section: Section; cellGrid: SectionCellGrid; stale: boolean; cameraNameById: Map<string, string> }) {
+  const { t } = useTranslation('sections');
   const stats = computeSectionStats(cellGrid);
   return (
     <>
       <div className="stat-line">
-        <span>Orientation</span>
-        <b>{ORIENTATION_LABELS[section.orientation]}</b>
+        <span>{t('sectionStatsPanel.orientation')}</span>
+        <b>{t(ORIENTATION_LABEL_KEYS[section.orientation])}</b>
       </div>
       <div className="stat-line">
-        <span>Thickness</span>
+        <span>{t('sectionStatsPanel.thickness')}</span>
         <b>
           {section.min.toFixed(2)}–{section.max.toFixed(2)} m
         </b>
       </div>
       <div className="stat-line">
-        <span>Footprint</span>
+        <span>{t('sectionStatsPanel.footprint')}</span>
         <b>
           {(section.maxA - section.minA).toFixed(1)} × {(section.maxB - section.minB).toFixed(1)} m
         </b>
       </div>
       <div className="stat-line">
-        <span>Cells</span>
+        <span>{t('sectionStatsPanel.cells')}</span>
         <b>{stats.totalCells.toLocaleString()}</b>
       </div>
       <div className="stat-line">
-        <span>Colored cells</span>
+        <span>{t('sectionStatsPanel.coloredCells')}</span>
         <b>{stats.validCells.toLocaleString()}</b>
       </div>
       <div className="stat-line">
-        <span>Obstacle cells</span>
+        <span>{t('sectionStatsPanel.obstacleCells')}</span>
         <b>{stats.obstacleCells.toLocaleString()}</b>
       </div>
       <div className="stat-line">
-        <span>Section coverage</span>
+        <span>{t('sectionStatsPanel.sectionCoverage')}</span>
         <b>{(stats.sectionCoverage * 100).toFixed(1)}%</b>
       </div>
       <div className="stat-line">
-        <span>Blind cells</span>
+        <span>{t('sectionStatsPanel.blindCells')}</span>
         <b>
           {stats.blindCells.toLocaleString()} ({(stats.blindCellsPct * 100).toFixed(1)}%)
         </b>
       </div>
       <div className="stat-line">
-        <span>Min coverage</span>
+        <span>{t('sectionStatsPanel.minCoverage')}</span>
         <b>{(stats.minCoverage * 100).toFixed(1)}%</b>
       </div>
       <div className="stat-line">
-        <span>Max coverage</span>
+        <span>{t('sectionStatsPanel.maxCoverage')}</span>
         <b>{(stats.maxCoverage * 100).toFixed(1)}%</b>
       </div>
-      {stale && <p className="hint warn">⚠ Coverage out of date — recompute</p>}
+      {stale && <p className="hint warn">{t('sectionStatsPanel.staleWarning')}</p>}
 
       <p className="panel-title" style={{ marginTop: 10 }}>
-        Per camera
+        {t('sectionStatsPanel.perCamera')}
       </p>
       {stats.perCamera.map((c) => (
         <div className="stat-line" key={c.id}>

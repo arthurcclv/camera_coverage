@@ -1,6 +1,7 @@
 /**
  * Run button + stale/backend indicators (spec §8, §8.1, §11).
  */
+import { useTranslation } from 'react-i18next';
 import type { EngineStatus } from '../engine/useEngine.ts';
 
 export interface RunBarProps {
@@ -24,22 +25,23 @@ export interface RunBarProps {
 export function RunBar({
   status, stale, backend, errorMessage, warnings, autoRun, onAutoRunChange, onRun, runDisabled,
 }: RunBarProps) {
+  const { t } = useTranslation('common');
   const busy = status === 'initializing' || status === 'computing';
   return (
     <div className="panel">
       <div className="status-line">
         <button className="btn" disabled={busy || runDisabled} onClick={onRun}>
-          {status === 'computing' ? 'Running…' : status === 'initializing' ? 'Initializing…' : 'Run coverage'}
+          {status === 'computing' ? t('running') : status === 'initializing' ? t('initializing') : t('runCoverage')}
         </button>
         <label className="checkbox-row" style={{ margin: 0 }}>
           <input type="checkbox" checked={autoRun} onChange={(e) => onAutoRunChange(e.target.checked)} />
-          Auto-run
+          {t('autoRun')}
         </label>
         {busy && <span className="spinner" />}
         {backend && (
           <span className={`badge backend-${backend}`}>{backend === 'webgpu' ? 'WebGPU' : 'CPU'}</span>
         )}
-        {stale && !busy && <span className="badge stale">Recompute — inputs changed</span>}
+        {stale && !busy && <span className="badge stale">{t('recomputeInputsChanged')}</span>}
       </div>
       {errorMessage && <div className="error-banner">{errorMessage}</div>}
       {warnings?.map((w) => (

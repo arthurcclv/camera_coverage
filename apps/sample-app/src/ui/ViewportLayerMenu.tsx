@@ -8,6 +8,7 @@
  * regardless of scene contents (toggling an empty layer is a no-op).
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export interface ViewportLayerMenuProps {
   coverageVisible: boolean;
@@ -148,6 +149,7 @@ function LayerRow({ label, icon, checked, onToggle }: { label: string; icon: Rea
 }
 
 export function ViewportLayerMenu(props: ViewportLayerMenuProps) {
+  const { t } = useTranslation('common');
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
 
@@ -175,8 +177,8 @@ export function ViewportLayerMenu(props: ViewportLayerMenuProps) {
       <button
         type="button"
         className={`btn secondary icon-btn${open ? ' active' : ''}`}
-        title="Layer visibility"
-        aria-label="Layer visibility"
+        title={t('layerVisibility')}
+        aria-label={t('layerVisibility')}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
@@ -184,19 +186,19 @@ export function ViewportLayerMenu(props: ViewportLayerMenuProps) {
         <EyeIcon />
       </button>
       {open && (
-        <ul className="menu layer-menu" role="menu" aria-label="Layer visibility">
-          <LayerRow label="Coverage" icon={<LayersIcon />} checked={props.coverageVisible} onToggle={props.onToggleCoverage} />
-          <LayerRow label="Sections" icon={<GridIcon />} checked={props.sectionsVisible} onToggle={props.onToggleSections} />
-          <LayerRow label="Cameras" icon={<CameraIcon />} checked={props.camerasVisible} onToggle={props.onToggleCameras} />
+        <ul className="menu layer-menu" role="menu" aria-label={t('layerVisibility')}>
+          <LayerRow label={t('layerCoverage')} icon={<LayersIcon />} checked={props.coverageVisible} onToggle={props.onToggleCoverage} />
+          <LayerRow label={t('layerSections')} icon={<GridIcon />} checked={props.sectionsVisible} onToggle={props.onToggleSections} />
+          <LayerRow label={t('layerCameras')} icon={<CameraIcon />} checked={props.camerasVisible} onToggle={props.onToggleCameras} />
           <LayerRow
-            label="Camera names"
+            label={t('layerCameraNames')}
             icon={<CameraNameIcon />}
             checked={props.cameraNamesVisible}
             onToggle={props.onToggleCameraNames}
           />
-          <LayerRow label="Zones" icon={<ZonesIcon />} checked={props.zonesVisible} onToggle={props.onToggleZones} />
+          <LayerRow label={t('layerZones')} icon={<ZonesIcon />} checked={props.zonesVisible} onToggle={props.onToggleZones} />
           <LayerRow
-            label="Constraints"
+            label={t('layerConstraints')}
             icon={<ConstraintsIcon />}
             checked={props.constraintsVisible}
             onToggle={props.onToggleConstraints}
@@ -204,9 +206,9 @@ export function ViewportLayerMenu(props: ViewportLayerMenuProps) {
           {/* Splats last of the entity layers, and Geometry after it: the two
               read as a pair, since hiding the model is how the capture behind it
               is seen (`gaussian_splats.md` §5.2, §5.3). */}
-          <LayerRow label="Splats" icon={<SplatsIcon />} checked={props.splatsVisible} onToggle={props.onToggleSplats} />
+          <LayerRow label={t('layerSplats')} icon={<SplatsIcon />} checked={props.splatsVisible} onToggle={props.onToggleSplats} />
           <LayerRow
-            label="Geometry"
+            label={t('layerGeometry')}
             icon={<GeometryIcon />}
             checked={props.geometryVisible}
             onToggle={props.onToggleGeometry}

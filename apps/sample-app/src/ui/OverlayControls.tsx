@@ -3,6 +3,7 @@
  * (Coverage / Blind spots), intensity scale, plus the resolution slider.
  * Visibility on/off lives in the viewport's top-right toolbar (§2.4), not here.
  */
+import { useTranslation } from 'react-i18next';
 import type { OverlayMode, OverlayOptions } from '../scene/coverageOverlay.ts';
 import { Slider } from './Slider.tsx';
 
@@ -16,9 +17,9 @@ export interface OverlayControlsProps {
 
 const LOW_VOXEL_SIZE_WARNING = 0.2;
 
-const MODES: { value: OverlayMode; label: string }[] = [
-  { value: 'coverage', label: 'Coverage' },
-  { value: 'blindspots', label: 'Blind spots' },
+const MODES: { value: OverlayMode; labelKey: string }[] = [
+  { value: 'coverage', labelKey: 'modeCoverage' },
+  { value: 'blindspots', labelKey: 'modeBlindSpots' },
 ];
 
 // Rainbow track for the overlay-color slider: full-saturation hsl swept 0..360°,
@@ -34,22 +35,21 @@ export function OverlayControls({
   onVoxelSizeChange,
   estimatedVoxelCount,
 }: OverlayControlsProps) {
+  const { t } = useTranslation('common');
   return (
     <div className="panel">
-      <p className="panel-title">Resolution</p>
-      <Slider label="Voxel size (m)" value={voxelSize} min={0.1} max={1.0} step={0.05} onChange={onVoxelSizeChange} />
+      <p className="panel-title">{t('resolution')}</p>
+      <Slider label={t('voxelSizeLabel')} value={voxelSize} min={0.1} max={1.0} step={0.05} onChange={onVoxelSizeChange} />
       <p className="hint">
-        ~{estimatedVoxelCount.toLocaleString()} voxels in the workspace AABB.
-        {voxelSize <= LOW_VOXEL_SIZE_WARNING && (
-          <> Fine grids can be slow on the CPU backend.</>
-        )}
+        {t('voxelCountHint', { count: estimatedVoxelCount.toLocaleString() })}
+        {voxelSize <= LOW_VOXEL_SIZE_WARNING && <> {t('fineGridSlowHint')}</>}
       </p>
 
       <p className="panel-title" style={{ marginTop: 12 }}>
-        Coverage overlay
+        {t('coverageOverlay')}
       </p>
 
-      <div className="segmented" role="radiogroup" aria-label="Visualization mode">
+      <div className="segmented" role="radiogroup" aria-label={t('visualizationMode')}>
         {MODES.map((m) => (
           <button
             key={m.value}
@@ -59,13 +59,13 @@ export function OverlayControls({
             className={`btn secondary${options.mode === m.value ? ' active' : ''}`}
             onClick={() => onOptionsChange({ mode: m.value })}
           >
-            {m.label}
+            {t(m.labelKey)}
           </button>
         ))}
       </div>
 
       <Slider
-        label="Overlay color"
+        label={t('overlayColor')}
         value={options.overlayHue}
         min={0}
         max={360}
@@ -76,7 +76,7 @@ export function OverlayControls({
       />
 
       <Slider
-        label="Intensity scale"
+        label={t('intensityScale')}
         value={options.intensityScale}
         min={0.02}
         max={2}

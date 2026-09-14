@@ -5,6 +5,7 @@
  * volume to another zone. Every edit marks the result stale (§4.2); delete is via
  * the hierarchy context menu (§4).
  */
+import { useTranslation } from 'react-i18next';
 import { eulerToQuat, quatToEuler } from '../cameras/math.ts';
 import { minVolumeSize, zoneLabel, type SamplingVolume, type Zone } from '../scene/samplingVolumes.ts';
 import { Vec3Field } from './Vec3Field.tsx';
@@ -18,6 +19,7 @@ export interface VolumePanelProps {
 }
 
 export function VolumePanel({ volume, zones, voxelSize, onChange }: VolumePanelProps) {
+  const { t } = useTranslation(['volumes', 'common']);
   if (!volume) return null;
 
   const zone = zones.find((z) => z.id === volume.zoneId);
@@ -39,14 +41,14 @@ export function VolumePanel({ volume, zones, voxelSize, onChange }: VolumePanelP
   return (
     <div className="panel">
       <p className="panel-title">
-        Volume — {volume.id}
+        {t('volumePanel.title', { id: volume.id })}
         {zone && <span className="badge zone">{zoneLabel(zone)}</span>}
       </p>
 
       <div className="panel-body">
-        <p className="hint">Zone</p>
+        <p className="hint">{t('volumePanel.zone')}</p>
         <div className="row">
-          <label htmlFor="volume-zone">Zone</label>
+          <label htmlFor="volume-zone">{t('volumePanel.zone')}</label>
           <select
             id="volume-zone"
             className="select"
@@ -63,7 +65,7 @@ export function VolumePanel({ volume, zones, voxelSize, onChange }: VolumePanelP
 
         {/* Position: free (spec §5.2.1). */}
         <Vec3Field
-          label="Position"
+          label={t('common:position')}
           digits={2}
           columns={[
             { label: 'X', value: volume.position[0], onCommit: (v) => setPosition(0, v) },
@@ -74,7 +76,7 @@ export function VolumePanel({ volume, zones, voxelSize, onChange }: VolumePanelP
 
         {/* Rotation columns axis-correct: X=pitch, Y=yaw, Z=roll (spec §5.1). */}
         <Vec3Field
-          label="Rotation"
+          label={t('common:rotation')}
           digits={2}
           columns={[
             { label: 'X', value: euler.pitch, min: -89, max: 89, onCommit: (v) => setEuler({ pitch: v }) },
@@ -85,7 +87,7 @@ export function VolumePanel({ volume, zones, voxelSize, onChange }: VolumePanelP
 
         {/* Size floored at the per-axis minimum (spec §5); setSize floors again defensively. */}
         <Vec3Field
-          label="Size"
+          label={t('volumePanel.sizeLabel')}
           digits={2}
           columns={[
             { label: 'X', value: volume.size[0], min: minSize, onCommit: (v) => setSize(0, v) },

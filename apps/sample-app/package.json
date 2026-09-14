@@ -13,8 +13,11 @@
   "dependencies": {
     "@linkervision/camera-coverage-sdk": "*",
     "@sparkjsdev/spark": "^2.1.0",
+    "i18next": "^25.10.10",
+    "i18next-browser-languagedetector": "^8.2.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-i18next": "^15.7.4",
     "three": "^0.185.0"
   },
   "devDependencies": {

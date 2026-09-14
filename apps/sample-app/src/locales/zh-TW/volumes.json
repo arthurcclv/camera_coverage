@@ -1,0 +1,29 @@
+{
+  "zonePanel": {
+    "title": "區域 — {{label}}",
+    "memberCount": "取樣範圍數",
+    "coverageTitle": "區域覆蓋率",
+    "runHint": "執行覆蓋率計算以檢視結果。",
+    "noValidVoxels": "此區域未標記任何有效體素。",
+    "overallCoverage": "整體覆蓋率",
+    "validVoxels": "有效體素數",
+    "blindSpots": "盲點數",
+    "staleWarning": "⚠ 覆蓋率資料已過期 — 請重新計算",
+    "perCamera": "各攝影機"
+  },
+  "volumePanel": {
+    "title": "取樣範圍 — {{id}}",
+    "zone": "計算空間",
+    "sizeLabel": "尺寸"
+  },
+  "samplingVolumeControls": {
+    "title": "計算空間",
+    "restrictLabel": "僅計算計算空間內的覆蓋率",
+    "generateButton": "產生計算空間",
+    "zoneLevelLabel": "空間層級",
+    "boxLevelLabel": "取樣範圍層級",
+    "markedVoxelsLabel": "已標記體素數",
+    "markedValue": "{{count}} · 佔整體 {{pct}}%",
+    "runHint": "執行覆蓋率計算"
+  }
+}

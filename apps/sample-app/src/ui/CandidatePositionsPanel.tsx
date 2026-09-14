@@ -22,6 +22,7 @@
  * cases the press will cost — Build, Extend to N, Truncate to N, or Rebuild.
  * They differ by two orders of magnitude on a real site.
  */
+import { useTranslation } from 'react-i18next';
 import { poolSummary, POOL_SIZE_MAX } from '../placement/pool.ts';
 import { buildLabel } from '../placement/mode.ts';
 import type { ConstraintGroup, CameraConstraint } from '../placement/region.ts';
@@ -51,12 +52,13 @@ export function CandidatePositionsPanel({
   error,
   onChangeGroup,
 }: CandidatePositionsPanelProps) {
+  const { t } = useTranslation(['placement', 'common']);
   const pool = session.pool;
   const building = session.running && session.progress?.phase === 'building';
 
   return (
     <div className="panel">
-      <p className="panel-title">Candidate position pool</p>
+      <p className="panel-title">{t('placement:candidatePositionsPanel.title')}</p>
 
       <div className="panel-body">
         {/* The denominator §5.2's percentages are of — stated here because with
@@ -64,8 +66,12 @@ export function CandidatePositionsPanel({
             (§3.3, §5.1). */}
         {session.target && session.target.zoneNames.length > 0 && (
           <p className="hint readout">
-            {`target ${session.target.zoneNames.length === 1 ? session.target.zoneNames[0] : `${session.target.zoneNames.length} zones`}`}
-            {session.target.total > 0 ? ` · ${session.target.total.toLocaleString()} voxels` : ''}
+            {session.target.zoneNames.length === 1
+              ? t('placement:candidatePositionsPanel.targetSingle', { name: session.target.zoneNames[0] })
+              : t('placement:candidatePositionsPanel.targetCount', { count: session.target.zoneNames.length })}
+            {session.target.total > 0
+              ? t('placement:candidatePositionsPanel.voxelsSuffix', { count: session.target.total.toLocaleString() })
+              : ''}
           </p>
         )}
 
@@ -92,7 +98,7 @@ export function CandidatePositionsPanel({
         )}
 
         <div className="row">
-          <label>Size</label>
+          <label>{t('placement:candidatePositionsPanel.sizeLabel')}</label>
           <NumberInput
             className="number-field"
             value={group.poolSize}
@@ -102,13 +108,13 @@ export function CandidatePositionsPanel({
             integer
             seed="display"
             disabled={session.running}
-            ariaLabel="Pool size"
+            ariaLabel={t('placement:candidatePositionsPanel.poolSizeAriaLabel')}
             onCommit={(poolSize) => onChangeGroup(group.id, { poolSize })}
           />
         </div>
 
         <div className="row">
-          <label>Seed</label>
+          <label>{t('placement:candidatePositionsPanel.seedLabel')}</label>
           <NumberInput
             className="number-field"
             value={group.seed}
@@ -118,7 +124,7 @@ export function CandidatePositionsPanel({
             integer
             seed="display"
             disabled={session.running}
-            ariaLabel="Seed"
+            ariaLabel={t('placement:candidatePositionsPanel.seedAriaLabel')}
             onCommit={(seed) => onChangeGroup(group.id, { seed })}
           />
         </div>
@@ -134,7 +140,7 @@ export function CandidatePositionsPanel({
           </button>
           {building && (
             <button type="button" className="btn secondary" onClick={session.cancel}>
-              Cancel
+              {t('common:cancel')}
             </button>
           )}
         </div>
@@ -144,7 +150,10 @@ export function CandidatePositionsPanel({
 
         {building && session.progress && (
           <p className="hint">
-            building {session.progress.done}/{session.progress.total}
+            {t('placement:candidatePositionsPanel.buildingProgress', {
+              done: session.progress.done,
+              total: session.progress.total,
+            })}
             {session.progress.label ? ` · ${session.progress.label}` : ''}
           </p>
         )}

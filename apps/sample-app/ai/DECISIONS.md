@@ -6,6 +6,55 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## i18n: react-i18next over hand-rolled, a global top bar over a viewport-toolbar switcher
+
+Behavior in [`../specs/spec.md`](../specs/spec.md) §18.
+
+The app's UI text ships in English and Traditional Chinese (zh-TW), the two locales an
+actual site rollout needs, not speculative future-proofing. Three choices were made
+against alternatives worth recording:
+
+- **`react-i18next` + `i18next-browser-languagedetector`, not a hand-rolled `t()`
+  context.** This app otherwise avoids dependencies for things a few lines of hooks
+  would do (no Redux/Zustand, no component library, `STACK.md`'s "Not in the stack").
+  i18n was the one place that convention was *not* followed: two locales today is a
+  closed set a hand-rolled dictionary would have handled fine, but the plural rules
+  (`_one`/`_other`), interpolation, and namespace loading are exactly the kind of
+  correctness-sensitive detail not worth re-deriving for a feature whose whole point is
+  never getting the words wrong.
+- **A new page-level top bar, not a control added to the existing viewport toolbar.**
+  The viewport's top-left toolbar (§2.4) is hidden entirely in the placement mode —
+  correct for tools that act on a selection, wrong for a language switch a user might
+  reach for from any mode. Rather than special-case one control's visibility inside
+  that toolbar, the switcher got its own shell element (`.top-bar`, `.app-shell`) that
+  sits outside every mode's show/hide rules, at the cost of a new always-on 36px strip.
+- **Namespaced dictionaries (`common`, `camera`, `scene`, `optimize`, `placement`,
+  `sections`, `volumes`), not one flat file.** Mirrors the app's own panel groupings
+  (§2.2's module map already splits this way), so a namespace's key set stays small
+  enough to review and translate as a unit, and two people converting different panels
+  touch disjoint files.
+
+**A narrower scope than "translate every string," by necessity, not convenience.** A
+small number of pure, unit-tested functions compose user-facing text from state
+(`describeSceneFileStatus` and its siblings in `scene/saveTarget.ts`, `placeTooltipKey`,
+`spaceTooltipKey`, the `scene/heatmapLegend.ts` builders — `CONVENTIONS.md` has the
+list and the rule). Each returns an i18n key instead of English, resolved by its one
+caller (`App.tsx`) rather than by changing what a `ui/*` component receives — the
+alternative, teaching every consumer to call `t()` on a value that used to be plain
+text, would have meant editing components that several people were converting
+concurrently, for a value they never actually needed to know was translatable.
+Two places were **not** converted this pass, on the same reasoning run the other way —
+the risk of the fix outweighing what it fixes: `describeReplaceWarning` and
+`summarizeSceneFile`/`describeSceneFileRow` compose their text **inside**
+`ui/SaveSceneAsDialog.tsx` / are rendered by `ui/LoadSceneDialog.tsx`, so translating them
+means editing those components' own logic, not just their caller. They're being tracked
+as a known follow-up rather than silently shipped as done.
+Numeric/unit formatting (§18.6) and SDK/browser-originated error text (`errorText.ts`,
+`AssetCopyError`/`DOMException` messages) stay English by the same
+already-spec'd exclusion — a raw `Error.message` has no key to translate.
+
+---
+
 ## The label occlusion tolerance is sized in metres of *body*, not in percent of eye distance
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §5.3,

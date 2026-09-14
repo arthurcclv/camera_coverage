@@ -22,11 +22,9 @@
  *
  * Nothing here is a coverage input (§1.1), so no edit marks the result stale.
  */
+import { useTranslation } from 'react-i18next';
 import { groupLabel, type ConstraintGroup } from '../placement/region.ts';
 import { zoneLabel, type Zone } from '../scene/samplingVolumes.ts';
-
-/** The tooltip on both flags while the list is empty (§3.1.2). */
-const EMPTY_LIST_HINT = 'Add a target zone to use these.';
 
 export interface ConstraintGroupPanelProps {
   group: ConstraintGroup | null;
@@ -63,6 +61,7 @@ export function ConstraintGroupPanel({
   onChange,
   onPlaceCameras,
 }: ConstraintGroupPanelProps) {
+  const { t } = useTranslation(['placement', 'common']);
   if (!group) return null;
 
   // A zone id naming no live zone is not rendered: the reducer prunes eagerly
@@ -77,14 +76,15 @@ export function ConstraintGroupPanel({
   // empty target set and an unsatisfiable mount test, two spellings of "empty
   // pool". So they render disabled rather than lying about what they do.
   const empty = listed.length === 0;
+  const emptyListHint = t('placement:constraintGroupPanel.emptyListHint');
 
   return (
     <div className="panel">
-      <p className="panel-title">Constraint group — {groupLabel(group)}</p>
+      <p className="panel-title">{t('placement:constraintGroupPanel.title', { name: groupLabel(group) })}</p>
 
       <div className="panel-body">
         <div className="row">
-          <label htmlFor="cg-name">Name</label>
+          <label htmlFor="cg-name">{t('common:name')}</label>
           <input
             id="cg-name"
             type="text"
@@ -96,37 +96,37 @@ export function ConstraintGroupPanel({
         </div>
 
         <div className="stat-line">
-          <span>Constraints</span>
+          <span>{t('placement:constraintGroupPanel.constraintsLabel')}</span>
           <b>{memberCount}</b>
         </div>
 
         {/* Target zones (§3.1.2) — the zones this group plans for. The two flags
             sit above the list because they say what the list is *for*, and a
             list whose meaning is read below it is read twice. */}
-        <p className="panel-title subhead">Target zones</p>
+        <p className="panel-title subhead">{t('placement:constraintGroupPanel.targetZonesTitle')}</p>
 
-        <label className="checkbox-row" title={empty ? EMPTY_LIST_HINT : undefined}>
+        <label className="checkbox-row" title={empty ? emptyListHint : undefined}>
           <input
             type="checkbox"
             checked={group.restrictScoring}
             disabled={empty}
             onChange={(e) => onChange(group.id, { restrictScoring: e.target.checked })}
           />
-          <span>Restrict scoring to zones</span>
+          <span>{t('placement:constraintGroupPanel.restrictScoringLabel')}</span>
         </label>
 
-        <label className="checkbox-row" title={empty ? EMPTY_LIST_HINT : undefined}>
+        <label className="checkbox-row" title={empty ? emptyListHint : undefined}>
           <input
             type="checkbox"
             checked={group.restrictMounts}
             disabled={empty}
             onChange={(e) => onChange(group.id, { restrictMounts: e.target.checked })}
           />
-          <span>Restrict mounts to zones</span>
+          <span>{t('placement:constraintGroupPanel.restrictMountsLabel')}</span>
         </label>
 
         <div className="row">
-          <label htmlFor="cg-add-zone">Add zone</label>
+          <label htmlFor="cg-add-zone">{t('placement:constraintGroupPanel.addZoneLabel')}</label>
           <select
             id="cg-add-zone"
             className="select"
@@ -140,7 +140,11 @@ export function ConstraintGroupPanel({
               onChange(group.id, { zoneIds: [...group.zoneIds, e.target.value] });
             }}
           >
-            <option value="">{addable.length === 0 ? 'no zones to add' : 'add a zone…'}</option>
+            <option value="">
+              {addable.length === 0
+                ? t('placement:constraintGroupPanel.noZonesToAdd')
+                : t('placement:constraintGroupPanel.addZonePrompt')}
+            </option>
             {addable.map((z) => (
               <option key={z.id} value={z.id}>
                 {zoneLabel(z)}
@@ -155,7 +159,7 @@ export function ConstraintGroupPanel({
             <button
               type="button"
               className="icon-btn"
-              aria-label={`Remove ${zoneLabel(z)} from the target zones`}
+              aria-label={t('placement:constraintGroupPanel.removeZoneAriaLabel', { name: zoneLabel(z) })}
               onClick={() =>
                 onChange(group.id, { zoneIds: group.zoneIds.filter((id) => id !== z.id) })
               }
@@ -166,9 +170,7 @@ export function ConstraintGroupPanel({
         ))}
 
         {empty && (
-          <p className="hint">
-            No target zones — this group scores against the whole marked set.
-          </p>
+          <p className="hint">{t('placement:constraintGroupPanel.noTargetZonesHint')}</p>
         )}
 
         {/* Which constraints the mount filter can actually draw on, in words
@@ -186,7 +188,7 @@ export function ConstraintGroupPanel({
           disabled={placementBlocker !== null}
           onClick={() => onPlaceCameras(group.id)}
         >
-          Place cameras
+          {t('placement:constraintGroupPanel.placeCamerasButton')}
         </button>
         {placementBlocker && <p className="hint warn">{placementBlocker}</p>}
       </div>

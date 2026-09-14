@@ -4,6 +4,7 @@
  * orientation. The readout decodes the retained run's per-voxel mask at the
  * probe's location against that run's enabled cameras.
  */
+import { Trans, useTranslation } from 'react-i18next';
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 import { probeLabel, type Probe, type ProbeVisibilityResult } from '../scene/probeVisibility.ts';
 import { Vec3Field } from './Vec3Field.tsx';
@@ -25,6 +26,8 @@ export interface ProbePanelProps {
 }
 
 export function ProbePanel({ probe, query, hasRunOnce, stale, cameraNameById, onChange, onRename, onSelectCamera }: ProbePanelProps) {
+  const { t } = useTranslation(['camera', 'common']);
+
   if (!probe) return null;
 
   const setPosition = (axis: 0 | 1 | 2, v: number) => {
@@ -35,11 +38,11 @@ export function ProbePanel({ probe, query, hasRunOnce, stale, cameraNameById, on
 
   return (
     <div className="panel">
-      <p className="panel-title">Probe — {probeLabel(probe)}</p>
+      <p className="panel-title">{t('camera:probePanel.titleWithName', { name: probeLabel(probe) })}</p>
 
       <div className="panel-body">
         <div className="row">
-          <label htmlFor="probe-name">Name</label>
+          <label htmlFor="probe-name">{t('common:name')}</label>
           <input
             id="probe-name"
             type="text"
@@ -52,7 +55,7 @@ export function ProbePanel({ probe, query, hasRunOnce, stale, cameraNameById, on
 
         {/* Position: free (spec §5.2.1). Probe edits never mark the run stale (§12.5). */}
         <Vec3Field
-          label="Position"
+          label={t('common:position')}
           digits={2}
           columns={[
             { label: 'X', value: probe.position[0], onCommit: (v) => setPosition(0, v) },
@@ -62,7 +65,7 @@ export function ProbePanel({ probe, query, hasRunOnce, stale, cameraNameById, on
         />
 
         {stale && hasRunOnce && (
-          <p className="hint warn">⚠ Coverage out of date — recompute</p>
+          <p className="hint warn">{t('camera:probePanel.staleHint')}</p>
         )}
 
         <ProbeReadout probe={probe} query={query} hasRunOnce={hasRunOnce} cameraNameById={cameraNameById} onSelectCamera={onSelectCamera} />
@@ -83,15 +86,22 @@ function ProbeReadout({
   cameraNameById: Map<string, string>;
   onSelectCamera(id: string): void;
 }) {
+  const { t } = useTranslation(['camera', 'common']);
+
   // States without usable data are never rendered as "0 of N" (spec §12.3).
-  if (!hasRunOnce) return <p className="hint">Run coverage to see visibility.</p>;
-  if (!query || query.status !== 'ok') return <p className="hint">No coverage data at this point.</p>;
+  if (!hasRunOnce) return <p className="hint">{t('camera:probePanel.runCoverageHint')}</p>;
+  if (!query || query.status !== 'ok') return <p className="hint">{t('camera:probePanel.noDataHint')}</p>;
 
   const { cameraIds, visible, seenCount } = query;
   return (
     <>
       <p className="probe-summary">
-        Seen by <b>{seenCount}</b> of <b>{cameraIds.length}</b> cameras
+        <Trans
+          t={t}
+          i18nKey="camera:probePanel.summary"
+          values={{ seen: seenCount, total: cameraIds.length }}
+          components={{ b: <b /> }}
+        />
       </p>
       <ul className="probe-vis-list">
         {cameraIds.map((id, n) => (
@@ -99,7 +109,7 @@ function ProbeReadout({
             key={id}
             className={`probe-vis-row${visible[n] ? ' visible' : ''}`}
             onClick={() => onSelectCamera(id)}
-            title="Select camera"
+            title={t('camera:probePanel.selectCameraTooltip')}
           >
             <span className="mark">{visible[n] ? '✓' : '–'}</span>
             <span className="label">{cameraNameById.get(id) ?? id}</span>

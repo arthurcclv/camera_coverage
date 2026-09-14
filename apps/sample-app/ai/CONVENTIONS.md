@@ -186,6 +186,19 @@ cannot be keyed on one.
   the target, `autoClear` off, splat group only) and owns no decision, because
   **whether** there is anything to draw is `needsSplatDepthPass` over
   `{ sparkReady, meshCount, visible }` in `splats.ts`, where it is tested.
+- **A pure function that composes user-facing text returns an i18n key (spec
+  §18.4), never English.** `describeSceneFileStatus`/`describeUnsavedWarning`/
+  `describeOverwriteConfirm`/`describeAssetCopyFailure`/`describeSaveFailure`
+  (`scene/saveTarget.ts`), `placeTooltipKey` (`scene/placement.ts`),
+  `spaceTooltipKey` (`scene/transformSpace.ts`), and the legend builders
+  (`scene/heatmapLegend.ts`) all return a `{ key, params? }` shape (or a bare
+  key string) instead of a formatted string, so their existing unit tests keep
+  asserting on the key/case that fired rather than on translated text. `App.tsx`
+  — their one caller in every one of these cases — is where the key is resolved
+  via `t()`, exactly at the point the value crosses into a prop a `ui/*`
+  component renders; the component itself never learns the value was ever
+  anything but a plain string. Follow this same split for any new pure composer
+  whose output reaches the UI.
 - **A few suites drive the real engine on the CPU backend** — `coverageRun`,
   `optimizeAcceptance`, `optimizeObjective`, `placementParity` — because some contracts
   are only meaningful against the engine's own answer. `placementParity` is the model:

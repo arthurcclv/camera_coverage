@@ -1,0 +1,127 @@
+{
+  "sceneHierarchy": {
+    "title": "階層",
+    "addEntity": "新增項目",
+    "addMenu": {
+      "camera": "相機",
+      "probe": "探測點",
+      "section": "截面",
+      "zone": "計算空間",
+      "volume": "取樣範圍",
+      "constraint": "位置限制",
+      "splat": "3D 高斯潑濺…"
+    },
+    "constraintSubmenu": {
+      "group": "群組",
+      "point": "點",
+      "polyline": "折線",
+      "plane": "平面"
+    },
+    "expandRow": "展開",
+    "collapseRow": "收合",
+    "camera": {
+      "disable": "停用相機",
+      "enable": "啟用相機",
+      "insideGeometry": "位於幾何體內"
+    },
+    "probe": {
+      "seenCount": "可見 {{count}}"
+    },
+    "section": {
+      "disable": "停用截面",
+      "enable": "啟用截面"
+    },
+    "zone": {
+      "disable": "停用區域",
+      "enable": "啟用區域",
+      "overallRate": "整體 {{rate}}%"
+    },
+    "constraintGroup": {
+      "disable": "停用群組",
+      "enable": "啟用群組"
+    },
+    "constraint": {
+      "disable": "停用限制",
+      "enable": "啟用限制",
+      "point": "點",
+      "polyline": "折線 · {{measure}} 公尺",
+      "plane": "平面 · {{measure}} 平方公尺"
+    },
+    "splat": {
+      "hide": "隱藏擷取",
+      "show": "顯示擷取"
+    },
+    "group": {
+      "cameras": "攝影機",
+      "probes": "探測點",
+      "sections": "截面",
+      "zones": "計算空間",
+      "constraints": "限制幾何",
+      "splats": "潑濺"
+    }
+  },
+  "sceneFileControls": {
+    "title": "場景",
+    "unavailableHint": "載入／儲存功能需要使用 Chromium 核心的瀏覽器(File System Access API)。",
+    "loadButton": "載入…",
+    "saveButton": "儲存",
+    "saveAsButton": "另存新檔…"
+  },
+  "loadSceneDialog": {
+    "title": "載入場景",
+    "loadButton": "載入",
+    "loadAnywayButton": "仍要載入",
+    "readingFolder": "正在讀取資料夾…",
+    "noneLoadable": "此資料夾中沒有可載入的場景檔案,請選擇其他資料夾。",
+    "listAriaLabel": "場景檔案",
+    "notReadYet": "尚未讀取 — 將於載入時驗證",
+    "currentBadge": "目前"
+  },
+  "saveSceneAsDialog": {
+    "title": "另存場景為",
+    "saveButton": "儲存",
+    "replaceButton": "取代",
+    "willBeSavedAs": "將另存為 {{name}}",
+    "checkingFolder": "正在檢查資料夾…",
+    "assetsCopied_one": "將有 1 個資源複製到此資料夾,使其保有完整的場景。",
+    "assetsCopied_other": "將有 {{count}} 個資源複製到此資料夾,使其保有完整的場景。"
+  },
+  "confirmOverwriteDialog": {
+    "title": "要覆寫場景檔案嗎?",
+    "overwriteButton": "覆寫"
+  },
+  "addSplatDialog": {
+    "title": "新增 3D 高斯潑濺",
+    "captureFilesPrefix": "擷取檔案位於",
+    "captureFilesSuffix": "將 {{extensions}} 檔案放入該資料夾即可在此新增 — 本應用程式不會寫入該資料夾。",
+    "readingFolder": "正在讀取資料夾…",
+    "noAssetDirPrefix": "此場景資料夾沒有",
+    "noAssetDirSuffix": "資料夾。請建立一個並放入擷取檔案。",
+    "noneAddablePrefix": "",
+    "noneAddableSuffix": "中沒有可新增的擷取檔案。",
+    "listAriaLabel": "擷取檔案"
+  },
+  "splatPanel": {
+    "titlePrefix": "潑濺物 — {{label}}",
+    "sourceLabel": "來源",
+    "registrationHint": "配準",
+    "scaleAriaLabel": "潑濺物縮放",
+    "flipZButton": "沿 Z 軸翻轉 180°",
+    "flipZTitle": "將擷取內容繞 Z 軸旋轉 180° — 用於修正 Z 軸朝下的重建結果",
+    "resetButton": "重設變換",
+    "resetTitle": "回復為位置 [0,0,0]、無旋轉、縮放 1"
+  },
+  "modal": {
+    "folderUnavailable": "此資料夾已無法使用,請選擇其他資料夾。"
+  },
+  "statsPanel": {
+    "title": "覆蓋率統計",
+    "voxelSize": "體素大小",
+    "overallCoverage": "整體覆蓋率",
+    "validVoxels": "有效體素",
+    "blindSpots": "盲點",
+    "elapsed": "耗時",
+    "perCamera": "各相機",
+    "emptyHint": "按下「執行覆蓋率計算」以取得結果。"
+  }
+}

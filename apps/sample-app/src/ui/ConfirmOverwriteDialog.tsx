@@ -12,6 +12,7 @@
  * request runs from (§14.5), which is why it commits straight to the caller's
  * write rather than routing through anything else first.
  */
+import { useTranslation } from 'react-i18next';
 import { Modal } from './Modal.tsx';
 
 export interface ConfirmOverwriteDialogProps {
@@ -23,19 +24,20 @@ export interface ConfirmOverwriteDialogProps {
 }
 
 export function ConfirmOverwriteDialog({ lines, busy, onConfirm, onCancel }: ConfirmOverwriteDialogProps) {
+  const { t } = useTranslation(['scene', 'common']);
   return (
     <Modal
-      title="Overwrite scene file?"
+      title={t('confirmOverwriteDialog.title')}
       stacked
       onCancel={onCancel}
       footer={
         <>
           <button type="button" className="btn secondary" onClick={onCancel}>
-            Cancel
+            {t('common:cancel')}
           </button>
           {/* Named for what it does, like the commit labels it follows (§14.7). */}
           <button type="button" className="btn" disabled={busy} onClick={onConfirm}>
-            Overwrite
+            {t('confirmOverwriteDialog.overwriteButton')}
           </button>
           {busy && <span className="spinner" />}
         </>

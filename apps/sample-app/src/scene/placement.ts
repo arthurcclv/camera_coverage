@@ -72,10 +72,16 @@ export function canPlace(selection: Selection, vertex: number | null): boolean {
   return placeTarget(selection, vertex) !== null;
 }
 
-/** Tooltip/`aria-label` for the button, naming why it is disabled when it is. */
-export function placeTooltip(selection: Selection, vertex: number | null, armed: boolean): string {
+/**
+ * The i18n key (spec §18.4, `common` namespace) for the button's tooltip/
+ * `aria-label`, naming why it is disabled when it is. Returns a key rather than
+ * formatted English so this stays testable without a React/i18next harness;
+ * the caller runs it through `t()`.
+ */
+export function placeTooltipKey(selection: Selection, vertex: number | null, armed: boolean): string {
   const target = placeTarget(selection, vertex);
-  if (!target) return 'Place on surface — select a camera, a probe, or a polyline vertex';
-  const what = target.kind === 'vertex' ? 'Place vertex on surface' : 'Place on surface';
-  return armed ? `${what} — click the geometry` : what;
+  if (!target) return 'placeTooltipDisabled';
+  const isVertex = target.kind === 'vertex';
+  if (armed) return isVertex ? 'placeTooltipVertexArmed' : 'placeTooltipEntityArmed';
+  return isVertex ? 'placeTooltipVertex' : 'placeTooltipEntity';
 }

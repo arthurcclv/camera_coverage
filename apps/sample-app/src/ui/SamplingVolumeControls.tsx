@@ -12,6 +12,7 @@
  * Which zones are enabled is controlled from the hierarchy row checkboxes (§4.1,
  * §7.3), not here.
  */
+import { useTranslation } from 'react-i18next';
 import { MAX_BOX_LEVEL, MAX_ZONE_LEVEL, MIN_ZONE_LEVEL } from '../scene/samplingVolumes.ts';
 import { Slider } from './Slider.tsx';
 
@@ -28,24 +29,25 @@ export interface SamplingVolumeControlsProps {
 }
 
 export function SamplingVolumeControls(props: SamplingVolumeControlsProps) {
+  const { t } = useTranslation('volumes');
   const { useZones, marked } = props;
   const pct = marked && marked.full > 0 ? Math.round((marked.marked / marked.full) * 100) : null;
 
   return (
     <div className="panel">
-      <p className="panel-title">Sampling zones</p>
+      <p className="panel-title">{t('samplingVolumeControls.title')}</p>
 
       <label className="checkbox-row">
         <input type="checkbox" checked={useZones} onChange={(e) => props.onUseZonesChange(e.target.checked)} />
-        <span>Restrict coverage to zones</span>
+        <span>{t('samplingVolumeControls.restrictLabel')}</span>
       </label>
 
       <button type="button" className="btn secondary block" onClick={props.onGenerate}>
-        Generate from geometry
+        {t('samplingVolumeControls.generateButton')}
       </button>
 
       <Slider
-        label="Zone level"
+        label={t('samplingVolumeControls.zoneLevelLabel')}
         value={props.zoneLevel}
         min={MIN_ZONE_LEVEL}
         max={MAX_ZONE_LEVEL}
@@ -55,7 +57,7 @@ export function SamplingVolumeControls(props: SamplingVolumeControlsProps) {
         onChange={props.onZoneLevelChange}
       />
       <Slider
-        label="Box level"
+        label={t('samplingVolumeControls.boxLevelLabel')}
         value={props.boxLevel}
         min={props.zoneLevel}
         max={MAX_BOX_LEVEL}
@@ -66,13 +68,13 @@ export function SamplingVolumeControls(props: SamplingVolumeControlsProps) {
       />
 
       <div className="stat-line spaced">
-        <span>Marked voxels</span>
+        <span>{t('samplingVolumeControls.markedVoxelsLabel')}</span>
         <b>
           {marked
             ? pct !== null
-              ? `${marked.marked.toLocaleString()} · ${pct}% of full`
+              ? t('samplingVolumeControls.markedValue', { count: marked.marked.toLocaleString(), pct })
               : marked.marked.toLocaleString()
-            : 'Run coverage'}
+            : t('samplingVolumeControls.runHint')}
         </b>
       </div>
     </div>

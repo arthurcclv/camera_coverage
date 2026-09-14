@@ -1,0 +1,127 @@
+{
+  "sceneHierarchy": {
+    "title": "Hierarchy",
+    "addEntity": "Add entity",
+    "addMenu": {
+      "camera": "Camera",
+      "probe": "Probe",
+      "section": "Section",
+      "zone": "Zone",
+      "volume": "Volume",
+      "constraint": "Constraint",
+      "splat": "3D Gaussian Splat…"
+    },
+    "constraintSubmenu": {
+      "group": "Group",
+      "point": "Point",
+      "polyline": "Polyline",
+      "plane": "Plane"
+    },
+    "expandRow": "Expand",
+    "collapseRow": "Collapse",
+    "camera": {
+      "disable": "Disable camera",
+      "enable": "Enable camera",
+      "insideGeometry": "inside geometry"
+    },
+    "probe": {
+      "seenCount": "seen {{count}}"
+    },
+    "section": {
+      "disable": "Disable section",
+      "enable": "Enable section"
+    },
+    "zone": {
+      "disable": "Disable zone",
+      "enable": "Enable zone",
+      "overallRate": "overall {{rate}}%"
+    },
+    "constraintGroup": {
+      "disable": "Disable group",
+      "enable": "Enable group"
+    },
+    "constraint": {
+      "disable": "Disable constraint",
+      "enable": "Enable constraint",
+      "point": "point",
+      "polyline": "polyline · {{measure}} m",
+      "plane": "plane · {{measure}} m²"
+    },
+    "splat": {
+      "hide": "Hide capture",
+      "show": "Show capture"
+    },
+    "group": {
+      "cameras": "Cameras",
+      "probes": "Probes",
+      "sections": "Sections",
+      "zones": "Zones",
+      "constraints": "Constraints",
+      "splats": "Splats"
+    }
+  },
+  "sceneFileControls": {
+    "title": "Scene",
+    "unavailableHint": "Load/Save need a Chromium-based browser (File System Access API).",
+    "loadButton": "Load…",
+    "saveButton": "Save",
+    "saveAsButton": "Save As…"
+  },
+  "loadSceneDialog": {
+    "title": "Load scene",
+    "loadButton": "Load",
+    "loadAnywayButton": "Load anyway",
+    "readingFolder": "Reading folder…",
+    "noneLoadable": "No scene file in this folder can be loaded. Choose another.",
+    "listAriaLabel": "Scene files",
+    "notReadYet": "not read — will validate on load",
+    "currentBadge": "current"
+  },
+  "saveSceneAsDialog": {
+    "title": "Save scene as",
+    "saveButton": "Save",
+    "replaceButton": "Replace",
+    "willBeSavedAs": "Will be saved as {{name}}",
+    "checkingFolder": "Checking folder…",
+    "assetsCopied_one": "1 asset will be copied into this folder, so it holds a complete scene.",
+    "assetsCopied_other": "{{count}} assets will be copied into this folder, so it holds a complete scene."
+  },
+  "confirmOverwriteDialog": {
+    "title": "Overwrite scene file?",
+    "overwriteButton": "Overwrite"
+  },
+  "addSplatDialog": {
+    "title": "Add 3D Gaussian Splat",
+    "captureFilesPrefix": "Capture files in",
+    "captureFilesSuffix": "Drop a {{extensions}} file in there to add it here — the app never writes to that folder.",
+    "readingFolder": "Reading folder…",
+    "noAssetDirPrefix": "This scene folder has no",
+    "noAssetDirSuffix": "folder. Create one and put a capture file in it.",
+    "noneAddablePrefix": "No capture file in",
+    "noneAddableSuffix": "can be added.",
+    "listAriaLabel": "Capture files"
+  },
+  "splatPanel": {
+    "titlePrefix": "Splat — {{label}}",
+    "sourceLabel": "Source",
+    "registrationHint": "Registration",
+    "scaleAriaLabel": "Splat scale",
+    "flipZButton": "Flip 180° Z",
+    "flipZTitle": "Rotate the capture 180° about Z — the usual fix for a Z-down reconstruction",
+    "resetButton": "Reset transform",
+    "resetTitle": "Back to position [0,0,0], no rotation, scale 1"
+  },
+  "modal": {
+    "folderUnavailable": "This folder is no longer available. Choose another."
+  },
+  "statsPanel": {
+    "title": "Coverage stats",
+    "voxelSize": "Voxel size",
+    "overallCoverage": "Overall coverage",
+    "validVoxels": "Valid voxels",
+    "blindSpots": "Blind spots",
+    "elapsed": "Elapsed",
+    "perCamera": "Per camera",
+    "emptyHint": "Press \"Run coverage\" to compute results."
+  }
+}

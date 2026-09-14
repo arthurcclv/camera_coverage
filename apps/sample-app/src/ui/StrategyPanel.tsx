@@ -17,6 +17,7 @@
  *
  * What is left is exactly the two fields a press of **Analyze** consumes.
  */
+import { useTranslation } from 'react-i18next';
 import { TRIALS_MAX } from '../placement/analyze.ts';
 import type { ConstraintGroup } from '../placement/region.ts';
 import type { PlacementSession } from '../placement/usePlacement.ts';
@@ -29,6 +30,7 @@ export interface StrategyPanelProps {
 }
 
 export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelProps) {
+  const { t } = useTranslation(['placement', 'common']);
   const set = (patch: Partial<ConstraintGroup>) => onChangeGroup(group.id, patch);
   const pool = session.pool;
   // Both halves of an analysis (§4.4) share this card's progress line and its
@@ -40,7 +42,7 @@ export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelPr
 
   return (
     <div className="panel">
-      <p className="panel-title">Strategy</p>
+      <p className="panel-title">{t('placement:strategyPanel.title')}</p>
 
       <div className="panel-body">
         {/* What the last analysis produced, directly under the title — the
@@ -49,14 +51,14 @@ export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelPr
             the fields that asked for them (§5.1). */}
         {hasResult && !session.running && (
           <p className={`hint readout${session.resultStale ? ' warn' : ''}`}>
-            {session.trialsDone} trials
-            {session.knee !== null && ` · knee ${session.knee} ${session.knee === 1 ? 'camera' : 'cameras'}`}
-            {session.resultStale && ' · stale'}
+            {t('placement:strategyPanel.trialsCount', { count: session.trialsDone })}
+            {session.knee !== null && ` · ${t('placement:strategyPanel.kneeCount', { count: session.knee })}`}
+            {session.resultStale && ` · ${t('placement:strategyPanel.staleSuffix')}`}
           </p>
         )}
 
         <Field
-          label="Max cams"
+          label={t('placement:strategyPanel.maxCamsLabel')}
           value={group.maxCount}
           min={1}
           max={64}
@@ -64,7 +66,7 @@ export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelPr
           onCommit={(maxCount) => set({ maxCount })}
         />
         <Field
-          label="Trials"
+          label={t('placement:strategyPanel.trialsLabel')}
           value={group.trials}
           min={1}
           max={TRIALS_MAX}
@@ -79,11 +81,11 @@ export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelPr
             disabled={session.running || pool === null || pool.positions.length === 0}
             onClick={() => void session.runAnalysis()}
           >
-            Analyze
+            {t('placement:strategyPanel.analyzeButton')}
           </button>
           {analyzing && (
             <button type="button" className="btn secondary" onClick={session.cancel}>
-              Cancel
+              {t('common:cancel')}
             </button>
           )}
         </div>
@@ -91,12 +93,12 @@ export function StrategyPanel({ session, group, onChangeGroup }: StrategyPanelPr
         {analyzing && session.progress && (
           <p className="hint">
             {phase === 'choosing'
-              ? `choosing ${session.progress.done}/${session.progress.total} cameras`
-              : `analyzing ${session.progress.done}/${session.progress.total} trials`}
+              ? t('placement:strategyPanel.choosingProgress', { done: session.progress.done, total: session.progress.total })
+              : t('placement:strategyPanel.analyzingProgress', { done: session.progress.done, total: session.progress.total })}
           </p>
         )}
         {!session.running && pool === null && (
-          <p className="hint">Build candidate positions first — an analysis searches a built pool.</p>
+          <p className="hint">{t('placement:strategyPanel.buildFirstHint')}</p>
         )}
       </div>
     </div>

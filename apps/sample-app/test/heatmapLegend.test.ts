@@ -45,7 +45,7 @@ test('turboColormap clamps outside [0, 1]', () => {
 
 test('coverageLegendScale: plain coverage fraction 0..1 over the Turbo gradient', () => {
   const scale = coverageLegendScale();
-  assert.equal(scale.caption, 'Coverage fraction');
+  assert.equal(scale.captionKey, 'legendCoverageFraction');
   assert.deepEqual(scale.ticks.map((t) => t.label), ['0', '0.25', '0.5', '0.75', '1']);
   assert.deepEqual(scale.ticks.map((t) => t.pos), [0, 0.25, 0.5, 0.75, 1]);
   assert.equal(scale.gradient, turboCssGradient());
@@ -55,7 +55,7 @@ test('coverageLegendScale: plain coverage fraction 0..1 over the Turbo gradient'
 
 test('overlayLegendScale: coverage mode is a transparent→full-hue ramp labeled 0..1', () => {
   const scale = overlayLegendScale(210, 'coverage');
-  assert.equal(scale.caption, 'Coverage fraction');
+  assert.equal(scale.captionKey, 'legendCoverageFraction');
   assert.deepEqual(scale.ticks.map((t) => t.label), ['0', '0.25', '0.5', '0.75', '1']);
   assert.deepEqual(scale.ticks.map((t) => t.pos), [0, 0.25, 0.5, 0.75, 1]);
   // Ramp uses the given hue, from alpha 0 (blind) to alpha 1 (full coverage).
@@ -67,7 +67,7 @@ test('overlayLegendScale: coverage mode is a transparent→full-hue ramp labeled
 
 test('overlayLegendScale: blindspots mode is a solid full-hue swatch with no numeric ticks', () => {
   const scale = overlayLegendScale(120, 'blindspots');
-  assert.equal(scale.caption, 'Blind spots');
+  assert.equal(scale.captionKey, 'legendBlindSpots');
   assert.deepEqual(scale.ticks, []);
   // Solid full-hue bar (same color at both ends), reflecting fixed full intensity.
   assert.equal(scale.gradient, 'linear-gradient(to right, hsl(120, 100%, 50%), hsl(120, 100%, 50%))');
@@ -91,7 +91,7 @@ test('sectionLegendScale: no aggregation / no run falls back to the coverage-fra
 
 test('sectionLegendScale: blind shows a 0..100% share scale regardless of camera count', () => {
   const scale = sectionLegendScale('blind', 10);
-  assert.equal(scale.caption, 'Blind-voxel share');
+  assert.equal(scale.captionKey, 'legendBlindVoxelShare');
   assert.deepEqual(scale.ticks.map((t) => t.label), ['0%', '50%', '100%']);
   assert.deepEqual(scale.ticks.map((t) => t.pos), [0, 0.5, 1]);
 });
@@ -99,7 +99,7 @@ test('sectionLegendScale: blind shows a 0..100% share scale regardless of camera
 test('sectionLegendScale: coverage aggregations show whole camera counts, 0..N', () => {
   for (const agg of ['mean', 'max', 'min'] as const) {
     const scale = sectionLegendScale(agg, 8);
-    assert.equal(scale.caption, 'Cameras seeing voxel');
+    assert.equal(scale.captionKey, 'legendCamerasSeeingVoxel');
     // N=8 → step 1 → every integer 0..8
     assert.deepEqual(scale.ticks.map((t) => t.label), ['0', '1', '2', '3', '4', '5', '6', '7', '8']);
     // Count k sits at position k/N (linear), first at 0, last at 1.
@@ -152,12 +152,12 @@ test('chooseHeatmapLegend: clipping section with a retained run shows its sectio
   const scale = chooseHeatmapLegend(makeSection('mean'), makeGrid(['a', 'b', 'c']), NO_OVERLAY);
   // Keyed to the CLIP section's aggregation + the run's camera count (N=3).
   assert.deepEqual(scale, sectionLegendScale('mean', 3));
-  assert.equal(scale?.caption, 'Cameras seeing voxel');
+  assert.equal(scale?.captionKey, 'legendCamerasSeeingVoxel');
 });
 
 test('chooseHeatmapLegend: blind clip section reads its own aggregation, not the selection', () => {
   const scale = chooseHeatmapLegend(makeSection('blind'), makeGrid(['a', 'b']), NO_OVERLAY);
-  assert.equal(scale?.caption, 'Blind-voxel share');
+  assert.equal(scale?.captionKey, 'legendBlindVoxelShare');
 });
 
 test('chooseHeatmapLegend: clipping but no retained run hides the legend (no Turbo fallback)', () => {
@@ -182,5 +182,5 @@ test('chooseHeatmapLegend: no clipping section and hidden overlay shows nothing'
 test('chooseHeatmapLegend: clip section legend wins over a visible overlay', () => {
   const overlayVisible = { visible: true, overlayHue: 210, mode: 'blindspots' as const };
   const scale = chooseHeatmapLegend(makeSection('max'), makeGrid(['a']), overlayVisible);
-  assert.equal(scale?.caption, 'Cameras seeing voxel');
+  assert.equal(scale?.captionKey, 'legendCamerasSeeingVoxel');
 });

@@ -65,6 +65,11 @@ apps/sample-app/
     worker.ts              SDK worker host entry
     engine/
       useEngine.ts         WorkerClient lifecycle + init/loadScene/compute wrappers
+    i18n/
+      index.ts             i18next + react-i18next + language-detector config; the seven namespaces (§18)
+    locales/
+      en/*.json            English dictionaries, one file per namespace (§18.4)
+      zh-TW/*.json         Traditional Chinese dictionaries, same namespaces (§18.4)
     scene/
       buildRoom.ts         room + boxes → { positions, indices } + Three.js meshes
       viewport.ts          WebGLRenderer + orbit/transform controls, render loop; four view cameras (perspective + top/front/right ortho) + bottom-left orientation-axis triad (§2.4)
@@ -130,6 +135,9 @@ apps/sample-app/
       CandidatePositionsPanel.tsx  placement mode, left card 1: pool size + Build + its progress/readout/blocker (camera_placement.md §5.1)
       StrategyPanel.tsx    placement mode, left card 2: max cams / trials / knee / seed + Analyze (camera_placement.md §5.1)
       PlacementReviewPanel.tsx  placement mode, right column: curve, slider, stats, pinned Apply/Close (camera_placement.md §5.2, §5.3)
+      TopBar.tsx           app-wide top bar, outside the placement mode's show/hide rules (§18.3)
+      SettingsMenu.tsx     the top bar's "Settings" dropdown; today holds only Language (§18.3)
+      LanguageDialog.tsx   Settings → Language: locale picker over Modal.tsx (§18.3)
 ```
 
 The app is a **three-column** flex layout (desktop only, §1):
@@ -3085,6 +3093,10 @@ must not be "fixed" into a nested object.
 - **Camera info export shipped** — the per-camera position / rotation / center-ray-hit
   sidecar on the Cameras group header, §15; its §15.4 lists that feature's own out-of-scope
   items (reading the file back, other payloads, subset exports, splats as ray targets).
+- **Internationalization (i18n) shipped** — English and Traditional Chinese (zh-TW) UI
+  strings via the Settings → Language dialog, §18; its §18.6 lists that feature's own
+  out-of-scope items (additional languages, locale-aware number/date formatting,
+  translating SDK-originated error text).
 - In-app scene *editing* — adding/removing/transforming **geometry** through the UI. The
   scene file (§14) can carry imported geometry (including GLB meshes), but authoring it
   in-app is out of scope. (Splat captures are a separate array and *are* authorable,
@@ -3208,3 +3220,98 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
 - **Hit point** — where a center ray first meets the merged scene geometry (§14.6), or
   **null** when it meets nothing. Reported per camera by the camera info export (§15); it is
   **not** a coverage quantity — no analysis reads it and no number depends on it.
+
+---
+
+## 18. Internationalization (i18n)
+
+The app's own UI text — panel labels, buttons, tooltips, headings, and the app's status/toast
+copy (e.g. save confirmations, placement-session results) — renders in one of two **locales**:
+**English** (`en`, the default) and **Traditional Chinese** (`zh-TW`). This is a UI-text
+feature only: it does not touch coverage math, the scene model, or `scene.json` (§14), and it
+is orthogonal to the auto-persistence exclusion of §16 — the persisted **locale preference**
+is an app setting, not scene state.
+
+### 18.1 Scope & supported locales
+
+- **In scope**: every hardcoded string in the `src/ui/*` components and `App.tsx`'s own
+  chrome (panel titles, field labels, button text, tooltips/`aria-label`s, hints, empty
+  states), plus the app-level status lines it composes itself (e.g. `describeSceneFileStatus`
+  output, §14.7; placement/optimize session results).
+- **Out of scope for translation**: text the app did not author — `describeError()`
+  (`errorText.ts`) formats an `unknown` thrown by an **engine** call (`useEngine.ts`,
+  `usePlacement.ts`, `useAimOptimizer.ts`) by taking `Error.message` verbatim. The SDK is not
+  itself localized, so that message stays in whatever language it was thrown in (English).
+  Camera names, scene/file names, and any other user-entered text are never translated.
+- Supported locales are a fixed, closed set (`en`, `zh-TW`) for this feature — see §18.6.
+
+### 18.2 Locale detection & persistence
+
+- On first load, the active locale is **detected from the browser** (`navigator.language`):
+  an exact or `zh-TW`-prefixed match selects `zh-TW`; anything else (including no match,
+  and any other `zh-*` variant) defaults to **English**.
+- The user may **override** the detected locale at any time (§18.3). An override is
+  **persisted** (`localStorage`) and takes precedence over browser detection on every
+  subsequent load, until changed again.
+- The document's `lang` attribute (`<html lang>`) tracks the active locale.
+- Persistence failing (storage unavailable — e.g. private browsing, quota) is non-fatal: the
+  session still runs, using browser detection only for that session (§18.5).
+
+### 18.3 Settings menu & Language dialog (UI controls)
+
+- A new **top bar** spans the full width of the app shell, above the existing three-column
+  layout (§2.2) — the one element in the shell not gated by the placement mode's show/hide
+  rules (§2.4, §2.4.2): it stays visible in every mode, including placement.
+- The top bar carries a single, plain-text **"Settings"** control at its left edge. It opens a
+  dropdown menu using the same interaction model as the View selector (§2.4: closes on an
+  outside click, **Escape**, or re-clicking the control). The menu is a general-purpose,
+  growable list of settings entries; today it holds exactly one: **Language**.
+- Choosing **Language** closes the menu and opens the **Language dialog**: a centred modal
+  over a dimmed backdrop, the same blocking-surface pattern as the scene-file dialogs
+  (§14.7) — the app's only other modals. It lists the two locales as a radio-style choice,
+  each labeled in its **own** language regardless of the locale currently active (`English`,
+  `繁體中文`), with the active locale pre-selected. Buttons: **Cancel**, **Apply**. Apply
+  commits the selection (§18.2) and closes the dialog; Cancel or **Escape** is a no-op,
+  leaving the active locale unchanged — matching §14.7's "cancelling is always the safe half."
+- Applying a new locale re-renders the UI's text in place; it is not a page reload and does
+  not touch scene state, selection, or camera/session data.
+
+### 18.4 Translation content (keys & namespaces)
+
+- Strings are organized into **namespaces by feature area** (mirroring the app's own panel
+  groupings — e.g. `common`, `camera`, `scene`, `optimize`, `placement`, `sections`,
+  `volumes`), one JSON dictionary per namespace per locale. Every key present in an `en`
+  namespace file must have a corresponding key in the matching `zh-TW` file, and vice versa
+  (enforced by a test, §18.5).
+- zh-TW strings are a **translated draft** for domain terms (camera, FOV, coverage, splat,
+  probe, section, zone, occlusion, etc.) that need review against this spec's own
+  terminology (§17) before being treated as final copy.
+
+### 18.5 Error handling
+
+| Case | Handling |
+|---|---|
+| `localStorage` unavailable or a write to it throws (persisting an override) | the override still applies for the current session; no error surfaced, nothing crashes — it simply does not survive a reload |
+| A stored locale value is missing, unrecognized, or corrupted | treated as "no override": falls back to browser detection (§18.2) |
+| `navigator.language` is unavailable or unparseable | falls back to English |
+| A key is requested that a namespace's dictionary lacks (should not occur past §18.4's parity test) | render the key's English fallback rather than a blank string or the raw key |
+
+### 18.6 Out of scope for this feature
+
+- Additional languages beyond English and zh-TW.
+- Locale-aware number/date/unit formatting — numeric values (rates, counts, coordinates,
+  percentages) keep their current formatting regardless of the active locale; only text
+  strings are translated.
+- Translating SDK-originated error text (`describeError()` output, §18.1) or any other string
+  the app itself did not author.
+- Right-to-left layout support.
+- Per-user or per-scene locale (the preference is global to the browser, §18.2, not carried
+  in `scene.json`, §14).
+- **Known follow-up, not yet translated**: the Save-as dialog's inline replace warning
+  (`describeReplaceWarning`) and the Load dialog's per-file summary
+  (`summarizeSceneFile`/`describeSceneFileRow`) still render in English. Both compose
+  their text inside a `ui/*` component's own logic (`SaveSceneAsDialog.tsx`,
+  `LoadSceneDialog.tsx`) rather than being resolved once by `App.tsx` like every other
+  status/warning line in §18.1, so translating them means editing those components'
+  logic directly — tracked as follow-up work rather than folded into this pass
+  (`ai/DECISIONS.md`).

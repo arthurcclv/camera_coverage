@@ -12,6 +12,7 @@
  * selected, so no modal confirmation ever stacks on this dialog.
  */
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { fileNamesIn, findExistingAssets } from '../scene/sceneIO.ts';
 import {
   describeReplaceWarning,
@@ -64,6 +65,7 @@ export function SaveSceneAsDialog({
   onSave,
   onCancel,
 }: SaveSceneAsDialogProps) {
+  const { t } = useTranslation(['scene', 'common']);
   const [folder, changeFolder] = usePickedFolder(initialFolder, onPickFolder);
   const [raw, setRaw] = useState(initialName);
   const [dest, setDest] = useState<Destination | null>(null);
@@ -87,7 +89,7 @@ export function SaveSceneAsDialog({
         if (live) setDest(found);
       },
       () => {
-        if (live) setProbeError(FOLDER_UNAVAILABLE);
+        if (live) setProbeError(FOLDER_UNAVAILABLE());
       },
     );
     return () => {
@@ -110,16 +112,16 @@ export function SaveSceneAsDialog({
 
   return (
     <Modal
-      title="Save scene as"
+      title={t('saveSceneAsDialog.title')}
       onCancel={onCancel}
       footer={
         <>
           <button type="button" className="btn secondary" onClick={onCancel}>
-            Cancel
+            {t('common:cancel')}
           </button>
           <button type="button" className="btn" disabled={!ready} onClick={commit}>
             {/* The label is the confirmation, which is why nothing stacks on top. */}
-            {warning != null ? 'Replace' : 'Save'}
+            {warning != null ? t('saveSceneAsDialog.replaceButton') : t('saveSceneAsDialog.saveButton')}
           </button>
           {busy && <span className="spinner" />}
         </>
@@ -129,7 +131,7 @@ export function SaveSceneAsDialog({
 
       <div className="row">
         <label htmlFor="scene-file-name">
-          Name
+          {t('common:name')}
         </label>
         <input
           id="scene-file-name"
@@ -149,14 +151,13 @@ export function SaveSceneAsDialog({
 
       {!checked.ok && <p className="hint warn">{checked.error}</p>}
       {/* `.json` is appended rather than required, so say what will be written. */}
-      {checked.ok && checked.name !== raw.trim() && <p className="hint">Will be saved as {checked.name}</p>}
-      {dest == null && probeError == null && <p className="hint">Checking folder…</p>}
+      {checked.ok && checked.name !== raw.trim() && (
+        <p className="hint">{t('saveSceneAsDialog.willBeSavedAs', { name: checked.name })}</p>
+      )}
+      {dest == null && probeError == null && <p className="hint">{t('saveSceneAsDialog.checkingFolder')}</p>}
       {warning != null && <div className="warning-banner">{warning}</div>}
       {dest?.sameFolder === false && assetSrcs.length > 0 && (
-        <p className="hint">
-          {assetSrcs.length === 1 ? '1 asset' : `${assetSrcs.length} assets`} will be copied into this folder, so it
-          holds a complete scene.
-        </p>
+        <p className="hint">{t('saveSceneAsDialog.assetsCopied', { count: assetSrcs.length })}</p>
       )}
       {probeError != null && <div className="error-banner">{probeError}</div>}
       {error != null && <div className="error-banner">{error}</div>}

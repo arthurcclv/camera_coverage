@@ -1,0 +1,51 @@
+{
+  "orientationValue": {
+    "horizontal": "Horizontal",
+    "verticalX": "Vertical X",
+    "verticalZ": "Vertical Z"
+  },
+  "aggregationValue": {
+    "mean": "Mean",
+    "max": "Max",
+    "min": "Min",
+    "blind": "Blind"
+  },
+  "sectionPanel": {
+    "title": "Section — {{label}}",
+    "orientationHint": "Orientation",
+    "orientationGroupLabel": "Section orientation",
+    "thicknessLabel": "Thickness (m)",
+    "thicknessHint": "Centered at {{center}} m; changing thickness keeps the center fixed.",
+    "footprint": {
+      "horizontalA": "Width (X) (m)",
+      "horizontalB": "Depth (Z) (m)",
+      "verticalXA": "Width (Z) (m)",
+      "verticalXB": "Height (Y) (m)",
+      "verticalZA": "Width (X) (m)",
+      "verticalZB": "Height (Y) (m)"
+    },
+    "footprintHint": "Footprint centered at ({{a}}, {{b}}) m; drag in the viewport to move it.",
+    "aggregationHint": "Aggregation",
+    "aggregationGroupLabel": "Section aggregation",
+    "clipHint": "Clip",
+    "clipButton": "Clip",
+    "revealRangeLabel": "Reveal range (m)"
+  },
+  "sectionStatsPanel": {
+    "title": "Section stats",
+    "selectHint": "Select a section to see its stats.",
+    "runHint": "Run coverage to see section stats.",
+    "orientation": "Orientation",
+    "thickness": "Thickness",
+    "footprint": "Footprint",
+    "cells": "Cells",
+    "coloredCells": "Colored cells",
+    "obstacleCells": "Obstacle cells",
+    "sectionCoverage": "Section coverage",
+    "blindCells": "Blind cells",
+    "minCoverage": "Min coverage",
+    "maxCoverage": "Max coverage",
+    "staleWarning": "⚠ Coverage out of date — recompute",
+    "perCamera": "Per camera"
+  }
+}

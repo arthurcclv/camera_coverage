@@ -5,6 +5,7 @@
  * camera/probe panel when a section is selected.
  */
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
+import { useTranslation } from 'react-i18next';
 import {
   defaultFootprintForOrientation,
   defaultRangeForOrientation,
@@ -40,28 +41,29 @@ export interface SectionPanelProps {
   onToggleClip(id: string): void;
 }
 
-const ORIENTATION_LABELS: Record<SectionOrientation, string> = {
-  horizontal: 'Horizontal',
-  'vertical-x': 'Vertical X',
-  'vertical-z': 'Vertical Z',
+const ORIENTATION_LABEL_KEYS: Record<SectionOrientation, string> = {
+  horizontal: 'orientationValue.horizontal',
+  'vertical-x': 'orientationValue.verticalX',
+  'vertical-z': 'orientationValue.verticalZ',
 };
 
-const AGGREGATION_LABELS: Record<SectionAggregation, string> = {
-  mean: 'Mean',
-  max: 'Max',
-  min: 'Min',
-  blind: 'Blind',
+const AGGREGATION_LABEL_KEYS: Record<SectionAggregation, string> = {
+  mean: 'aggregationValue.mean',
+  max: 'aggregationValue.max',
+  min: 'aggregationValue.min',
+  blind: 'aggregationValue.blind',
 };
 
 // Footprint slider labels name the actual world axis per orientation (spec §13.6),
 // so a horizontal section's two horizontal axes are never mislabeled "height".
-const FOOTPRINT_LABELS: Record<SectionOrientation, { a: string; b: string }> = {
-  horizontal: { a: 'Width (X)', b: 'Depth (Z)' },
-  'vertical-x': { a: 'Width (Z)', b: 'Height (Y)' },
-  'vertical-z': { a: 'Width (X)', b: 'Height (Y)' },
+const FOOTPRINT_LABEL_KEYS: Record<SectionOrientation, { a: string; b: string }> = {
+  horizontal: { a: 'sectionPanel.footprint.horizontalA', b: 'sectionPanel.footprint.horizontalB' },
+  'vertical-x': { a: 'sectionPanel.footprint.verticalXA', b: 'sectionPanel.footprint.verticalXB' },
+  'vertical-z': { a: 'sectionPanel.footprint.verticalZA', b: 'sectionPanel.footprint.verticalZB' },
 };
 
 export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, clipActive, onToggleClip }: SectionPanelProps) {
+  const { t } = useTranslation(['sections', 'common']);
   if (!section) return null;
 
   const setOrientation = (orientation: SectionOrientation) => {
@@ -93,7 +95,7 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
   const centerB = sectionCenterB(section);
   const width = section.maxA - section.minA;
   const height = section.maxB - section.minB;
-  const footprintLabels = FOOTPRINT_LABELS[section.orientation];
+  const footprintLabelKeys = FOOTPRINT_LABEL_KEYS[section.orientation];
 
   const setWidth = (w: number) => {
     onChange(section.id, { minA: centerA - w / 2, maxA: centerA + w / 2 });
@@ -106,11 +108,11 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
 
   return (
     <div className="panel">
-      <p className="panel-title">Section — {sectionLabel(section)}</p>
+      <p className="panel-title">{t('sectionPanel.title', { label: sectionLabel(section) })}</p>
 
       <div className="panel-body">
         <div className="row">
-          <label htmlFor="section-name">Name</label>
+          <label htmlFor="section-name">{t('common:name')}</label>
           <input
             id="section-name"
             type="text"
@@ -121,8 +123,8 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
           />
         </div>
 
-        <p className="hint">Orientation</p>
-        <div className="segmented" role="radiogroup" aria-label="Section orientation">
+        <p className="hint">{t('sectionPanel.orientationHint')}</p>
+        <div className="segmented" role="radiogroup" aria-label={t('sectionPanel.orientationGroupLabel')}>
           {SECTION_ORIENTATIONS.map((o) => (
             <button
               key={o}
@@ -132,23 +134,23 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
               className={`btn secondary${section.orientation === o ? ' active' : ''}`}
               onClick={() => setOrientation(o)}
             >
-              {ORIENTATION_LABELS[o]}
+              {t(ORIENTATION_LABEL_KEYS[o])}
             </button>
           ))}
         </div>
 
         <Slider
-          label="Thickness (m)"
+          label={t('sectionPanel.thicknessLabel')}
           value={thickness}
           min={MIN_SECTION_THICKNESS}
           max={MAX_SECTION_THICKNESS}
           step={0.1}
           onChange={setThickness}
         />
-        <p className="hint">Centered at {center.toFixed(2)} m; changing thickness keeps the center fixed.</p>
+        <p className="hint">{t('sectionPanel.thicknessHint', { center: center.toFixed(2) })}</p>
 
         <Slider
-          label={`${footprintLabels.a} (m)`}
+          label={t(footprintLabelKeys.a)}
           value={Math.min(width, widthMax)}
           min={MIN_SECTION_FOOTPRINT}
           max={widthMax}
@@ -156,19 +158,19 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
           onChange={setWidth}
         />
         <Slider
-          label={`${footprintLabels.b} (m)`}
+          label={t(footprintLabelKeys.b)}
           value={Math.min(height, heightMax)}
           min={MIN_SECTION_FOOTPRINT}
           max={heightMax}
           step={0.1}
           onChange={setHeight}
         />
-        <p className="hint">Footprint centered at ({centerA.toFixed(2)}, {centerB.toFixed(2)}) m; drag in the viewport to move it.</p>
+        <p className="hint">{t('sectionPanel.footprintHint', { a: centerA.toFixed(2), b: centerB.toFixed(2) })}</p>
 
         <p className="hint" style={{ marginTop: 10 }}>
-          Aggregation
+          {t('sectionPanel.aggregationHint')}
         </p>
-        <div className="segmented" role="radiogroup" aria-label="Section aggregation">
+        <div className="segmented" role="radiogroup" aria-label={t('sectionPanel.aggregationGroupLabel')}>
           {SECTION_AGGREGATIONS.map((a) => (
             <button
               key={a}
@@ -178,13 +180,13 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
               className={`btn secondary${section.aggregation === a ? ' active' : ''}`}
               onClick={() => onChange(section.id, { aggregation: a })}
             >
-              {AGGREGATION_LABELS[a]}
+              {t(AGGREGATION_LABEL_KEYS[a])}
             </button>
           ))}
         </div>
 
         <p className="hint" style={{ marginTop: 10 }}>
-          Clip
+          {t('sectionPanel.clipHint')}
         </p>
         <button
           type="button"
@@ -192,11 +194,11 @@ export function SectionPanel({ section, worldMin, worldMax, onChange, onRename, 
           className={`btn secondary block${clipActive ? ' active' : ''}`}
           onClick={() => onToggleClip(section.id)}
         >
-          Clip
+          {t('sectionPanel.clipButton')}
         </button>
 
         <Slider
-          label="Reveal range (m)"
+          label={t('sectionPanel.revealRangeLabel')}
           value={Math.min(section.clipRange, clipMax)}
           min={MIN_CLIP_RANGE}
           max={clipMax}

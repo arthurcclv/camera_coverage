@@ -8,6 +8,7 @@
  * Renaming writes back to `Zone.name` live (no confirm step) and is **not** a
  * coverage input — it never marks the result stale (§6.2).
  */
+import { useTranslation } from 'react-i18next';
 import { zoneLabel, type Zone, type ZoneSummary } from '../scene/samplingVolumes.ts';
 
 export interface ZonePanelProps {
@@ -23,15 +24,16 @@ export interface ZonePanelProps {
 }
 
 export function ZonePanel({ zone, memberCount, summary, hasRunOnce, stale, onRename, cameraNameById }: ZonePanelProps) {
+  const { t } = useTranslation(['volumes', 'common']);
   if (!zone) return null;
 
   return (
     <div className="panel">
-      <p className="panel-title">Zone — {zoneLabel(zone)}</p>
+      <p className="panel-title">{t('zonePanel.title', { label: zoneLabel(zone) })}</p>
 
       <div className="panel-body">
         <div className="row">
-          <label htmlFor="zone-name">Name</label>
+          <label htmlFor="zone-name">{t('common:name')}</label>
           <input
             id="zone-name"
             type="text"
@@ -43,15 +45,15 @@ export function ZonePanel({ zone, memberCount, summary, hasRunOnce, stale, onRen
         </div>
 
         <div className="stat-line">
-          <span>Volumes</span>
+          <span>{t('zonePanel.memberCount')}</span>
           <b>{memberCount}</b>
         </div>
 
-        <p className="panel-title subhead">Zone coverage</p>
+        <p className="panel-title subhead">{t('zonePanel.coverageTitle')}</p>
         {!hasRunOnce || !summary ? (
-          <p className="hint">Run coverage to see results.</p>
+          <p className="hint">{t('zonePanel.runHint')}</p>
         ) : summary.validVoxels === 0 ? (
-          <p className="hint">This zone marks no valid voxels.</p>
+          <p className="hint">{t('zonePanel.noValidVoxels')}</p>
         ) : (
           <ZoneStatsBody summary={summary} stale={stale} cameraNameById={cameraNameById} />
         )}
@@ -61,26 +63,27 @@ export function ZonePanel({ zone, memberCount, summary, hasRunOnce, stale, onRen
 }
 
 function ZoneStatsBody({ summary, stale, cameraNameById }: { summary: ZoneSummary; stale: boolean; cameraNameById: Map<string, string> }) {
+  const { t } = useTranslation('volumes');
   const blindPct = summary.validVoxels > 0 ? summary.blindVoxels / summary.validVoxels : 0;
   return (
     <>
       <div className="stat-line">
-        <span>Overall coverage</span>
+        <span>{t('zonePanel.overallCoverage')}</span>
         <b>{(summary.overallRate * 100).toFixed(1)}%</b>
       </div>
       <div className="stat-line">
-        <span>Valid voxels</span>
+        <span>{t('zonePanel.validVoxels')}</span>
         <b>{summary.validVoxels.toLocaleString()}</b>
       </div>
       <div className="stat-line">
-        <span>Blind spots</span>
+        <span>{t('zonePanel.blindSpots')}</span>
         <b>
           {summary.blindVoxels.toLocaleString()} ({(blindPct * 100).toFixed(1)}%)
         </b>
       </div>
-      {stale && <p className="hint warn">⚠ Coverage out of date — recompute</p>}
+      {stale && <p className="hint warn">{t('zonePanel.staleWarning')}</p>}
 
-      <p className="panel-title subhead">Per camera</p>
+      <p className="panel-title subhead">{t('zonePanel.perCamera')}</p>
       {summary.perCamera.map((c) => (
         <div className="stat-line" key={c.id}>
           <span>{cameraNameById.get(c.id) ?? c.id}</span>

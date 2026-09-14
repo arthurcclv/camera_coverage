@@ -16,6 +16,7 @@
  * so the scene edit stays in `App.tsx`.
  */
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { listSplatAssets } from '../scene/sceneIO.ts';
 import { moveListSelection } from '../scene/sceneFileList.ts';
 import {
@@ -35,6 +36,7 @@ export interface AddSplatDialogProps {
 }
 
 export function AddSplatDialog({ folder, onAdd, onCancel }: AddSplatDialogProps) {
+  const { t } = useTranslation(['scene', 'common']);
   const [listing, setListing] = useState<{ hasAssetDir: boolean; files: SplatAssetFile[] } | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -55,7 +57,7 @@ export function AddSplatDialog({ folder, onAdd, onCancel }: AddSplatDialogProps)
         // the other dialogs report (`spec.md` §14.8).
         setListing({ hasAssetDir: false, files: [] });
         setSelected(null);
-        setListError(FOLDER_UNAVAILABLE);
+        setListError(FOLDER_UNAVAILABLE());
       },
     );
     return () => {
@@ -94,12 +96,12 @@ export function AddSplatDialog({ folder, onAdd, onCancel }: AddSplatDialogProps)
 
   return (
     <Modal
-      title="Add 3D Gaussian Splat"
+      title={t('addSplatDialog.title')}
       onCancel={onCancel}
       footer={
         <>
           <button type="button" className="btn secondary" onClick={onCancel}>
-            Cancel
+            {t('common:cancel')}
           </button>
           <button
             type="button"
@@ -107,18 +109,17 @@ export function AddSplatDialog({ folder, onAdd, onCancel }: AddSplatDialogProps)
             disabled={selected == null}
             onClick={() => selected != null && commit(selected)}
           >
-            Add
+            {t('common:add')}
           </button>
         </>
       }
     >
       <p className="hint">
-        Capture files in <code>{folder.name}/{SPLAT_ASSET_DIR}/</code>. Drop a{' '}
-        {SPLAT_EXTENSIONS.join(' / ')} file in there to add it here — the app never writes to
-        that folder.
+        {t('addSplatDialog.captureFilesPrefix')} <code>{folder.name}/{SPLAT_ASSET_DIR}/</code>.{' '}
+        {t('addSplatDialog.captureFilesSuffix', { extensions: SPLAT_EXTENSIONS.join(' / ') })}
       </p>
 
-      {listing == null && <p className="hint">Reading folder…</p>}
+      {listing == null && <p className="hint">{t('addSplatDialog.readingFolder')}</p>}
       {listError != null && <div className="error-banner">{listError}</div>}
 
       {/* Two different dead ends, said differently: no `assets/` at all versus an
@@ -126,13 +127,14 @@ export function AddSplatDialog({ folder, onAdd, onCancel }: AddSplatDialogProps)
           creates the folder, and neither offers a commit. */}
       {listing != null && listError == null && !listing.hasAssetDir && (
         <p className="hint">
-          This scene folder has no <code>{SPLAT_ASSET_DIR}/</code> folder. Create one and put a
-          capture file in it.
+          {t('addSplatDialog.noAssetDirPrefix')} <code>{SPLAT_ASSET_DIR}/</code>{' '}
+          {t('addSplatDialog.noAssetDirSuffix')}
         </p>
       )}
       {listing != null && listError == null && listing.hasAssetDir && selectableNames.length === 0 && (
         <p className="hint">
-          No capture file in <code>{SPLAT_ASSET_DIR}/</code> can be added.
+          {t('addSplatDialog.noneAddablePrefix')} <code>{SPLAT_ASSET_DIR}/</code>{' '}
+          {t('addSplatDialog.noneAddableSuffix')}
         </p>
       )}
 
@@ -140,7 +142,7 @@ export function AddSplatDialog({ folder, onAdd, onCancel }: AddSplatDialogProps)
         <ul
           className="scene-file-list"
           role="listbox"
-          aria-label="Capture files"
+          aria-label={t('addSplatDialog.listAriaLabel')}
           tabIndex={0}
           onKeyDown={onListKeyDown}
         >

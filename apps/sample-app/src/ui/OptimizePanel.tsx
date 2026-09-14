@@ -12,6 +12,8 @@
  * being handed a number.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import type { Quat } from '@linkervision/camera-coverage-sdk';
 
 import { cameraLabel, type SceneCamera } from '../cameras/camera.ts';
@@ -41,6 +43,7 @@ export interface OptimizePanelProps {
 }
 
 export function OptimizePanel({ optimizer, camera, cameras, onHover, comparison }: OptimizePanelProps) {
+  const { t } = useTranslation(['optimize', 'common']);
   const { panorama, preview, result, running, progress, blocker } = optimizer;
   // A comparison describes a *past* apply, so it is hidden while a new session is
   // open: showing last run's outcome beside this run's proposal invites reading
@@ -49,7 +52,7 @@ export function OptimizePanel({ optimizer, camera, cameras, onHover, comparison 
 
   return (
     <div className="panel">
-      <p className="panel-title">Aim optimization</p>
+      <p className="panel-title">{t('optimize:optimizePanel.title')}</p>
       <div className="panel-body">
         {blocker && <p className="hint">{blocker}</p>}
 
@@ -59,25 +62,32 @@ export function OptimizePanel({ optimizer, camera, cameras, onHover, comparison 
             disabled={running || !camera || camera.aimLocked === true || !camera.enabled}
             onClick={() => camera && void optimizer.openFor(camera)}
           >
-            {camera ? `Optimize ${cameraLabel(camera)}` : 'Optimize aim'}
+            {camera
+              ? t('optimize:optimizePanel.optimizeCameraButton', { name: cameraLabel(camera) })
+              : t('optimize:optimizePanel.optimizeAimButton')}
           </button>
           <button className="btn secondary" disabled={running} onClick={() => void optimizer.runAll()}>
-            Optimize all aims
+            {t('optimize:optimizePanel.optimizeAllButton')}
           </button>
         </div>
 
         {/* The per-camera button reads the selection, so say why it is disabled
             rather than leaving a dead control (§5). */}
-        {!running && !panorama && !result && <p className="hint">{perCameraHint(camera)}</p>}
+        {!running && !panorama && !result && <p className="hint">{perCameraHint(camera, t)}</p>}
 
         {running && (
           <p className="hint">
             {progress
-              ? `Round ${progress.round}/3 · camera ${progress.index + 1}/${progress.total} · ${label(cameras, progress.cameraId)}`
-              : 'Capturing…'}
+              ? t('optimize:optimizePanel.roundProgress', {
+                  round: progress.round,
+                  index: progress.index + 1,
+                  total: progress.total,
+                  name: label(cameras, progress.cameraId),
+                })
+              : t('optimize:optimizePanel.capturingHint')}
             {' '}
             <button className="btn secondary" onClick={optimizer.cancel} style={{ marginLeft: 8 }}>
-              Cancel
+              {t('common:cancel')}
             </button>
           </p>
         )}
@@ -95,11 +105,11 @@ export function OptimizePanel({ optimizer, camera, cameras, onHover, comparison 
 }
 
 /** Why the per-camera button is unavailable, or what it will do. */
-function perCameraHint(camera: SceneCamera | null): string {
-  if (!camera) return 'Select a camera to optimize it on its own, or optimize the whole scene.';
-  if (!camera.enabled) return `${cameraLabel(camera)} is disabled; enable it to optimize its aim.`;
-  if (camera.aimLocked) return `${cameraLabel(camera)} has its aim locked (uncheck it in the camera panel).`;
-  return 'Optimizing one camera captures what it could see and shows a score map for every aim.';
+function perCameraHint(camera: SceneCamera | null, t: TFunction): string {
+  if (!camera) return t('optimize:optimizePanel.selectCameraHint');
+  if (!camera.enabled) return t('optimize:optimizePanel.cameraDisabledHint', { name: cameraLabel(camera) });
+  if (camera.aimLocked) return t('optimize:optimizePanel.aimLockedHint', { name: cameraLabel(camera) });
+  return t('optimize:optimizePanel.optimizeOneHint');
 }
 
 function label(cameras: readonly SceneCamera[], id: string): string {
@@ -116,6 +126,7 @@ function Preview({
   camera: SceneCamera;
   onHover(rotation: Quat | null): void;
 }) {
+  const { t } = useTranslation(['optimize', 'common']);
   const { panorama, preview, picked } = optimizer;
   const pickedEuler = picked ? quatToEuler(picked) : null;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -148,8 +159,8 @@ function Preview({
 
     const img = ctx.createImageData(HEAT_W, HEAT_H);
     for (let i = 0; i < scores.length; i++) {
-      const t = max > 0 ? scores[i] / max : 0;
-      const [r, g, b] = ramp(t);
+      const frac = max > 0 ? scores[i] / max : 0;
+      const [r, g, b] = ramp(frac);
       img.data[i * 4] = r;
       img.data[i * 4 + 1] = g;
       img.data[i * 4 + 2] = b;
@@ -190,23 +201,21 @@ function Preview({
           optimizer.pick(eulerToQuat({ yaw, pitch, roll: lens.roll }));
         }}
       />
-      <p className="hint">
-        Yaw −180…180° left to right, pitch +89…−89° top to bottom. Click to pick an aim.
-      </p>
+      <p className="hint">{t('optimize:optimizePanel.yawPitchHint')}</p>
 
       <dl className="aim-stats">
-        <dt>Current</dt>
+        <dt>{t('optimize:optimizePanel.currentLabel')}</dt>
         <dd>
           {fmtAngle(preview!.current.yaw)} / {fmtAngle(preview!.current.pitch)} · {preview!.current.score.toFixed(0)}
         </dd>
-        <dt>Proposed</dt>
+        <dt>{t('optimize:optimizePanel.proposedLabel')}</dt>
         <dd>
           {fmtAngle(preview!.best.yaw)} / {fmtAngle(preview!.best.pitch)} · {preview!.best.score.toFixed(0)}
-          {preview!.moved ? <span className="badge stale" style={{ marginLeft: 8 }}>{fmtGain(preview!.gain)}</span> : null}
+          {preview!.moved ? <span className="badge stale" style={{ marginLeft: 8 }}>{fmtGain(preview!.gain, t)}</span> : null}
         </dd>
         {picked && (
           <>
-            <dt>Picked</dt>
+            <dt>{t('optimize:optimizePanel.pickedLabel')}</dt>
             <dd>
               {fmtAngle(pickedEuler!.yaw)} / {fmtAngle(pickedEuler!.pitch)} ·{' '}
               {optimizer.scoreAt(picked)?.current.score.toFixed(0) ?? '—'}
@@ -215,14 +224,14 @@ function Preview({
                 style={{ marginLeft: 8, padding: '1px 6px', fontSize: 11 }}
                 onClick={() => optimizer.pick(null)}
               >
-                clear
+                {t('optimize:optimizePanel.clearButton')}
               </button>
             </dd>
           </>
         )}
         {hover && (
           <>
-            <dt>Hovered</dt>
+            <dt>{t('optimize:optimizePanel.hoveredLabel')}</dt>
             <dd>
               {fmtAngle(hover.yaw)} / {fmtAngle(hover.pitch)} · {hover.score.toFixed(0)}
             </dd>
@@ -231,19 +240,16 @@ function Preview({
       </dl>
 
       {!preview!.moved && !picked && (
-        <p className="hint">
-          No improvement found — the camera is already near its best aim. Click the map to
-          aim it somewhere else anyway.
-        </p>
+        <p className="hint">{t('optimize:optimizePanel.noImprovementHint')}</p>
       )}
 
       <div className="row" style={{ gap: 8 }}>
         {/* Gated on what Apply actually writes, not on a derived count (§6.2). */}
         <button className="btn" disabled={!optimizer.hasProposals} onClick={optimizer.applyAll}>
-          Apply
+          {t('common:apply')}
         </button>
         <button className="btn secondary" onClick={optimizer.discard}>
-          Discard
+          {t('optimize:optimizePanel.discardButton')}
         </button>
       </div>
     </>
@@ -251,18 +257,23 @@ function Preview({
 }
 
 function Summary({ optimizer, cameras }: { optimizer: AimOptimizer; cameras: readonly SceneCamera[] }) {
+  const { t } = useTranslation(['optimize', 'common']);
   const result = optimizer.result!;
   const moved = result.proposals.filter((p) => p.moved);
   return (
     <>
       <p className="hint">
-        {result.rounds} round{result.rounds === 1 ? '' : 's'} · {moved.length} of {result.proposals.length} cameras
-        re-aimed · Φ +{result.deltaPhi.toFixed(0)}
+        {t('optimize:optimizePanel.summaryHint', {
+          count: result.rounds,
+          rounds: result.rounds,
+          moved: moved.length,
+          total: result.proposals.length,
+          delta: result.deltaPhi.toFixed(0),
+        })}
       </p>
       {moved.length === 0 ? (
         <p className="hint">
-          No camera improved by more than {(MIN_GAIN * 100).toFixed(0)}% over the counted
-          set. Select a camera to see its score map and aim it by hand.
+          {t('optimize:optimizePanel.noCameraImprovedHint', { percent: (MIN_GAIN * 100).toFixed(0) })}
         </p>
       ) : (
         <table className="aim-summary">
@@ -276,7 +287,7 @@ function Summary({ optimizer, cameras }: { optimizer: AimOptimizer; cameras: rea
                 <td>
                   {fmtAngle(p.current.pitch)} → {fmtAngle(p.best.pitch)}
                 </td>
-                <td>{fmtGain(p.gain)}</td>
+                <td>{fmtGain(p.gain, t)}</td>
               </tr>
             ))}
           </tbody>
@@ -286,10 +297,10 @@ function Summary({ optimizer, cameras }: { optimizer: AimOptimizer; cameras: rea
         {/* Gated on the session's accepted rotations, not on the row count: the
             two used to disagree whenever the loop converged (§6.2). */}
         <button className="btn" disabled={!optimizer.hasProposals} onClick={optimizer.applyAll}>
-          Apply all
+          {t('optimize:optimizePanel.applyAllButton')}
         </button>
         <button className="btn secondary" onClick={optimizer.discard}>
-          Discard
+          {t('optimize:optimizePanel.discardButton')}
         </button>
       </div>
     </>
@@ -305,23 +316,22 @@ function Summary({ optimizer, cameras }: { optimizer: AimOptimizer; cameras: rea
  * user has to act on and a list of wins would bury it.
  */
 function Comparison({ comparison }: { comparison: OptimizeComparison }) {
+  const { t } = useTranslation('optimize');
   const { union, zones, regressedCount } = comparison;
   return (
     <>
-      <p className="panel-title subhead">Last optimization — measured</p>
+      <p className="panel-title subhead">{t('optimizePanel.lastOptimizationTitle')}</p>
       {regressedCount > 0 ? (
         <div className="warning-banner">
-          {regressedCount} zone{regressedCount === 1 ? '' : 's'} lost coverage. Maximizing
-          unique coverage can trade one zone for another; lock or re-aim the cameras that
-          cover them.
+          {t('optimizePanel.regressedWarning', { count: regressedCount })}
         </div>
       ) : null}
       <table className="aim-summary aim-compare">
         <thead>
           <tr>
-            <th>Zone</th>
-            <th>Coverage</th>
-            <th>Blind</th>
+            <th>{t('optimizePanel.zoneHeader')}</th>
+            <th>{t('optimizePanel.coverageHeader')}</th>
+            <th>{t('optimizePanel.blindHeader')}</th>
           </tr>
         </thead>
         <tbody>
@@ -331,7 +341,7 @@ function Comparison({ comparison }: { comparison: OptimizeComparison }) {
           ))}
         </tbody>
       </table>
-      {zones.length === 0 && <p className="hint">No sampling zones — the row above is the whole valid volume.</p>}
+      {zones.length === 0 && <p className="hint">{t('optimizePanel.noZonesHint')}</p>}
     </>
   );
 }
@@ -365,8 +375,8 @@ function fmtAngle(deg: number): string {
   return `${deg.toFixed(1)}°`;
 }
 
-function fmtGain(gain: number): string {
-  return Number.isFinite(gain) ? `+${(gain * 100).toFixed(0)}%` : 'new';
+function fmtGain(gain: number, t: TFunction): string {
+  return Number.isFinite(gain) ? `+${(gain * 100).toFixed(0)}%` : t('optimize:optimizePanel.newGainLabel');
 }
 
 /**

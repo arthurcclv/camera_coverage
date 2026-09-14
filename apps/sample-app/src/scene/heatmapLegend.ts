@@ -76,11 +76,24 @@ export interface LegendTick {
   pos: number;
 }
 
-export interface LegendScale {
-  caption: string;
+/**
+ * A legend's caption, ticks, and gradient, with the caption still an i18n key
+ * (spec §18.4, `common` namespace) rather than display text — this module is
+ * pure/engine-free and does not resolve `t()`. `App.tsx` is the only caller,
+ * and turns one into the resolved `LegendScale` `HeatmapLegend.tsx` renders.
+ */
+export interface LegendScaleTemplate {
+  captionKey: string;
   ticks: LegendTick[];
   /** CSS `background` for the colorbar — the fixed Turbo gradient for section /
    * coverage-fraction scales, or the overlay's hue-intensity ramp (§9.2). */
+  gradient: string;
+}
+
+/** A `LegendScaleTemplate` with its caption resolved to display text (spec §18.4). */
+export interface LegendScale {
+  caption: string;
+  ticks: LegendTick[];
   gradient: string;
 }
 
@@ -99,9 +112,9 @@ const FRACTION_TICKS = [0, 0.25, 0.5, 0.75, 1];
  * (ticks `0/0.25/0.5/0.75/1`), caption "Coverage fraction". Used when no section
  * drives the legend, and as the fallback of `sectionLegendScale` before a run.
  */
-export function coverageLegendScale(): LegendScale {
+export function coverageLegendScale(): LegendScaleTemplate {
   return {
-    caption: 'Coverage fraction',
+    captionKey: 'legendCoverageFraction',
     ticks: FRACTION_TICKS.map((f) => ({ label: String(f), pos: f })),
     gradient: turboCssGradient(),
   };
@@ -117,17 +130,17 @@ export function coverageLegendScale(): LegendScale {
  *  - `blindspots` — blind voxels draw at fixed full intensity: a solid full-hue
  *    swatch, no numeric scale.
  */
-export function overlayLegendScale(overlayHue: number, mode: OverlayMode): LegendScale {
+export function overlayLegendScale(overlayHue: number, mode: OverlayMode): LegendScaleTemplate {
   const solid = `hsl(${overlayHue}, 100%, 50%)`;
   if (mode === 'blindspots') {
     return {
-      caption: 'Blind spots',
+      captionKey: 'legendBlindSpots',
       ticks: [],
       gradient: `linear-gradient(to right, ${solid}, ${solid})`,
     };
   }
   return {
-    caption: 'Coverage fraction',
+    captionKey: 'legendCoverageFraction',
     ticks: FRACTION_TICKS.map((f) => ({ label: String(f), pos: f })),
     gradient: `linear-gradient(to right, hsla(${overlayHue}, 100%, 50%, 0), hsla(${overlayHue}, 100%, 50%, 1))`,
   };
@@ -142,11 +155,11 @@ export function overlayLegendScale(overlayHue: number, mode: OverlayMode): Legen
 export function sectionLegendScale(
   aggregation: SectionAggregation | null,
   cameraCount: number | null,
-): LegendScale {
+): LegendScaleTemplate {
   if (aggregation != null && cameraCount != null && cameraCount > 0) {
     if (aggregation === 'blind') {
       return {
-        caption: 'Blind-voxel share',
+        captionKey: 'legendBlindVoxelShare',
         ticks: [0, 0.5, 1].map((f) => ({ label: `${Math.round(f * 100)}%`, pos: f })),
         gradient: turboCssGradient(),
       };
@@ -164,7 +177,7 @@ export function sectionLegendScale(
       counts.push(n);
     }
     return {
-      caption: 'Cameras seeing voxel',
+      captionKey: 'legendCamerasSeeingVoxel',
       ticks: counts.map((k) => ({ label: String(k), pos: k / n })),
       gradient: turboCssGradient(),
     };
@@ -198,7 +211,7 @@ export function chooseHeatmapLegend(
   clipSection: Section | null,
   clipGrid: SectionCellGrid | null,
   overlay: OverlayLegendState,
-): LegendScale | null {
+): LegendScaleTemplate | null {
   if (clipSection != null) {
     return clipGrid != null
       ? sectionLegendScale(clipSection.aggregation, clipGrid.cameraIds.length)

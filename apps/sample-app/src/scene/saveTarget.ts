@@ -167,6 +167,18 @@ export interface LastSave {
 }
 
 /**
+ * An i18n message (spec §18.4, `common` namespace): a key plus its
+ * interpolation params, resolved to display text by the caller's `t()`. Kept
+ * as data rather than a formatted string so these composers stay unit-testable
+ * without a React/i18next harness — `App.tsx` is the only caller that turns one
+ * into text.
+ */
+export interface Message {
+  key: string;
+  params?: Record<string, string | number>;
+}
+
+/**
  * The Scene panel's status line (§14.7). A silent Save closes no dialog, so a
  * successful write says so for `SAVED_STATUS_MS`; otherwise the line names the
  * file Save would write to.
@@ -179,14 +191,18 @@ export interface LastSave {
 export function describeSceneFileStatus(
   target: SaveTarget<{ name: string }> | null,
   lastSave: LastSave | null,
-): string {
-  if (target == null) return 'No file chosen — Save will ask where to write.';
-  if (lastSave == null) return `${target.folder.name}/${target.name}`;
+): Message {
+  if (target == null) return { key: 'noFileChosen' };
+  if (lastSave == null) return { key: 'idleTarget', params: { folder: target.folder.name, name: target.name } };
   // The folder only changes on a cross-folder Save As…, which is also the only
   // save that copies — so the copy count is what earns the longer line.
-  if (lastSave.assetsCopied === 0) return `Saved ${target.name}`;
-  const assets = count(lastSave.assetsCopied, 'asset');
-  return `Saved to ${target.folder.name}/${target.name} — ${assets} copied`;
+  if (lastSave.assetsCopied === 0) return { key: 'savedNoAssets', params: { name: target.name } };
+  return {
+    // `count` (not `assetsCopied`) is the param name i18next's pluralization
+    // keys off of — see common.json's `savedWithAssets_one`/`_other`.
+    key: 'savedWithAssets',
+    params: { folder: target.folder.name, name: target.name, count: lastSave.assetsCopied },
+  };
 }
 
 /** What a picked destination already holds that this save would replace (§14.5). */
@@ -245,12 +261,14 @@ export function resolveWriteAction(clashes: DestinationClashes): WriteAction {
 export function describeOverwriteConfirm(
   target: SaveTarget<{ name: string }>,
   clashes: DestinationClashes,
-): string[] {
-  const lines = [`${target.folder.name}/${target.name} already exists. Saving replaces it.`];
+): Message[] {
+  const lines: Message[] = [
+    { key: 'overwriteConfirmLine', params: { folder: target.folder.name, name: target.name } },
+  ];
   // Partitive, like the inline warning: the count leads and the noun stays
   // plural, so "1 of this scene's assets" needs no singular branch.
   if (clashes.assetClashes > 0) {
-    lines.push(`Also replaces ${clashes.assetClashes} of this scene's assets in that folder.`);
+    lines.push({ key: 'overwriteConfirmAssetsLine', params: { assetClashes: clashes.assetClashes } });
   }
   return lines;
 }
@@ -260,21 +278,27 @@ export function describeOverwriteConfirm(
  * came from a file, so it is clear *which* work is at stake; anonymous for a
  * scene built from the boot state, which has no name yet.
  */
-export function describeUnsavedWarning(name: string | null): string {
-  const subject = name == null ? 'This scene has' : `"${name}" has`;
-  return `${subject} unsaved changes — loading discards them.`;
+export function describeUnsavedWarning(name: string | null): Message {
+  return name == null ? { key: 'unsavedAnonymous' } : { key: 'unsavedNamed', params: { name } };
 }
 
 /**
  * A referenced asset that couldn't be copied to the destination (§14.8). The
  * save is abandoned before the scene file is written, so the destination is left
  * visibly incomplete rather than holding a scene file that can't import.
+ *
+ * `reason` is not itself translated — it comes from the File System Access API
+ * or a raw `Error.message` (`sceneIO.ts`'s `copyFailureReason`), the same
+ * SDK/browser-originated-text exclusion as spec §18.1.
  */
-export function describeAssetCopyFailure(src: string, reason: string): string {
-  return `Couldn't copy "${src}": ${reason}. Nothing was saved.`;
+export function describeAssetCopyFailure(src: string, reason: string): Message {
+  return { key: 'assetCopyFailure', params: { src, reason } };
 }
 
-/** Failure to write the target file, pointing at the way out (§14.8). */
-export function describeSaveFailure(name: string, reason: string): string {
-  return `Couldn't save "${name}": ${reason}. Use Save As… to choose another folder.`;
+/**
+ * Failure to write the target file, pointing at the way out (§14.8). `reason`
+ * is not itself translated — see `describeAssetCopyFailure`.
+ */
+export function describeSaveFailure(name: string, reason: string): Message {
+  return { key: 'saveFailure', params: { name, reason } };
 }

@@ -28,25 +28,12 @@
  * measured rate is the one misreading this feature can cause.
  */
 import { useEffect } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { groupLabel, type ConstraintGroup } from '../placement/region.ts';
 import { planLabel, type PlacementPlan } from '../placement/assign.ts';
 import { CURVE_PLOT, countAtFraction, curveRange, curveX, curveY } from '../placement/curvePlot.ts';
 import type { PlacementSession } from '../placement/usePlacement.ts';
 import { Slider } from './Slider.tsx';
-
-/**
- * The tolerance row's hover text and accessible name (§5.2).
- *
- * `pp` is not a unit every user knows, and the field is a policy rather than a
- * measurement, so the row says what it does in words. Stated in percentage
- * points rather than `%` because the drop is absolute in the rate the curve's
- * axis is ticked in — `top − epsilon·markedTotal/100` (§4.5) — not a fraction
- * of `top`; the two agree at a 94% ceiling and diverge at a low one.
- */
-const SPACING_HINT = 'The distance between the two closest cameras in this layout.';
-
-const KNEE_HINT =
-  'How far below the best score found still counts as good enough, in percentage points of the reachable rate. Raise it to accept fewer cameras.';
 
 export interface PlacementReviewPanelProps {
   session: PlacementSession;
@@ -81,6 +68,7 @@ export function PlacementReviewPanel({
   onKeepOpen,
   onApply,
 }: PlacementReviewPanelProps) {
+  const { t } = useTranslation(['placement', 'common']);
   const pool = session.pool;
   const curve = session.curve;
   const hasCurve = curve.some((b) => b !== null);
@@ -113,13 +101,17 @@ export function PlacementReviewPanel({
   // Two names in full, a count past that: the axis has to stay one line.
   const names = session.target?.zoneNames ?? [];
   const targetLabel =
-    names.length === 0 ? null : names.length <= 2 ? names.join(', ') : `${names.length} zones`;
+    names.length === 0
+      ? null
+      : names.length <= 2
+        ? names.join(', ')
+        : t('placement:placementReviewPanel.zonesCount', { count: names.length });
 
   return (
     <div className="panel placement-review">
       <p className="panel-title">
         {groupLabel(group)}
-        {session.resultStale && <span className="badge stale">stale</span>}
+        {session.resultStale && <span className="badge stale">{t('placement:placementReviewPanel.staleBadge')}</span>}
       </p>
 
       <div className="panel-body">
@@ -131,8 +123,8 @@ export function PlacementReviewPanel({
                 that on purpose — so the axis says what it is a percentage *of*. */}
             <p className="panel-title subhead">
               {targetLabel === null
-                ? 'Reachable by camera count'
-                : `Reachable by camera count — ${targetLabel}`}
+                ? t('placement:placementReviewPanel.reachableByCountTitle')
+                : t('placement:placementReviewPanel.reachableByCountTitleWithTarget', { target: targetLabel })}
             </p>
             <ReachableCurve
               curve={curve}
@@ -147,7 +139,7 @@ export function PlacementReviewPanel({
                 that suggests one. A bare range beside a slider-plus-field would
                 read as two different kinds of control (§5.2). */}
             <Slider
-              label="Count"
+              label={t('placement:placementReviewPanel.countLabel')}
               value={selected}
               min={1}
               max={curve.length}
@@ -157,74 +149,84 @@ export function PlacementReviewPanel({
               onChange={session.setSelected}
             />
             <Slider
-              label="Knee (pp)"
+              label={t('placement:placementReviewPanel.kneeLabel')}
               value={group.epsilon}
               min={0}
               max={20}
               step={0.1}
               digits={1}
-              title={KNEE_HINT}
+              title={t('placement:placementReviewPanel.kneeHint')}
               onChange={(epsilon) => onChangeGroup(group.id, { epsilon })}
             />
             {/* Marked, not withdrawn: the layout is still a real layout over a
                 real pool, so the stats, the preview and Apply all stay live. */}
             {session.resultStale && (
-              <p className="hint warn">Strategy changed — Analyze again.</p>
+              <p className="hint warn">{t('placement:placementReviewPanel.strategyChangedHint')}</p>
             )}
             <div className="stat-line">
-              <span>Cameras</span>
+              <span>{t('placement:placementReviewPanel.camerasLabel')}</span>
               <b>{selected}</b>
             </div>
             <div className="stat-line">
-              <span>{targetLabel === null ? 'Reachable' : `Reachable — ${targetLabel}`}</span>
+              <span>
+                {targetLabel === null
+                  ? t('placement:placementReviewPanel.reachableLabel')
+                  : t('placement:placementReviewPanel.reachableWithTargetLabel', { target: targetLabel })}
+              </span>
               <b>{pct(layout?.score ?? 0, pool.markedTotal)}</b>
             </div>
             {/* The objective's second key, on screen (§1.2, §5.2): a key that
                 decides which layout is shown while being invisible is one a
                 user cannot argue with — and past the knee it is the number
                 still moving while the score is not. */}
-            <div className="stat-line" title={SPACING_HINT}>
-              <span>Spacing</span>
+            <div className="stat-line" title={t('placement:placementReviewPanel.spacingHint')}>
+              <span>{t('placement:placementReviewPanel.spacingLabel')}</span>
               <b>{metres(layout?.separation)}</b>
             </div>
             <div className="stat-line">
-              <span>Pool ceiling</span>
+              <span>{t('placement:placementReviewPanel.poolCeilingLabel')}</span>
               <b>{pct(pool.poolCeiling, pool.markedTotal)}</b>
             </div>
             <div className="stat-line">
-              <span>Apply moves</span>
+              <span>{t('placement:placementReviewPanel.applyMovesLabel')}</span>
               <b>
                 {plan.moves.length > 0
-                  ? `${plan.moves.length} · ${plan.totalDistance.toFixed(1)} m total`
+                  ? t('placement:placementReviewPanel.applyMovesValue', {
+                      count: plan.moves.length,
+                      distance: plan.totalDistance.toFixed(1),
+                    })
                   : '—'}
               </b>
             </div>
             <p className="hint">
-              An upper bound, not a coverage prediction: it assumes each camera could look
-              everywhere at once. Place, then <b>Optimize all aims</b>, then read the stats
-              panel.
+              <Trans t={t} i18nKey="placement:placementReviewPanel.upperBoundHint" components={{ b: <b /> }} />
             </p>
             {plan.disables.length > 0 && (
               // Stated, not warned about: the cameras keep everything but their
               // `enabled` flag, and the hierarchy's eye toggle brings any of
               // them back (§5.3.1).
               <p className="hint">
-                {plan.disables.length} bound {plan.disables.length === 1 ? 'camera' : 'cameras'} the
-                layout does not need will be <b>disabled</b>, not deleted — each keeps its name and
-                position, and can be switched back on from the hierarchy.
+                <Trans
+                  t={t}
+                  i18nKey="placement:placementReviewPanel.boundCamerasHint"
+                  count={plan.disables.length}
+                  components={{ b: <b /> }}
+                />
               </p>
             )}
             {overBudget && (
               <p className="hint warn">
-                Placing {layout?.count} cameras would exceed the {maxCameras}-camera limit; the
-                scene uses {cameraCount}.
+                {t('placement:placementReviewPanel.overBudgetHint', {
+                  count: layout?.count,
+                  max: maxCameras,
+                  used: cameraCount,
+                })}
               </p>
             )}
           </>
         ) : (
           <p className="hint">
-            Build candidate positions, then Analyze. The curve reports what a layout could
-            <b> reach</b> — an aim-free upper bound, not measured coverage.
+            <Trans t={t} i18nKey="placement:placementReviewPanel.buildThenAnalyzeHint" components={{ b: <b /> }} />
           </p>
         )}
       </div>
@@ -248,7 +250,7 @@ export function PlacementReviewPanel({
           disabled={session.running}
           onClick={onRequestClose}
         >
-          Close
+          {t('common:close')}
         </button>
 
         {confirming && (
@@ -256,18 +258,18 @@ export function PlacementReviewPanel({
             className="placement-confirm"
             role="dialog"
             aria-modal="true"
-            aria-label="Discard the built pool?"
+            aria-label={t('placement:placementReviewPanel.discardPoolTitle')}
           >
-            <p className="panel-title">Discard the built pool?</p>
+            <p className="panel-title">{t('placement:placementReviewPanel.discardPoolTitle')}</p>
             <p className="hint">
-              {pool?.positions.length ?? 0} positions · rebuilding needs another full pass.
+              {t('placement:placementReviewPanel.discardPoolBody', { count: pool?.positions.length ?? 0 })}
             </p>
             <div className="row">
               <button type="button" className="btn secondary" onClick={onKeepOpen}>
-                Keep open
+                {t('placement:placementReviewPanel.keepOpenButton')}
               </button>
               <button type="button" className="btn" onClick={onConfirmClose}>
-                Discard
+                {t('placement:placementReviewPanel.discardButton')}
               </button>
             </div>
           </div>
@@ -315,6 +317,7 @@ function ReachableCurve({
   stale: boolean;
   onSelect(count: number): void;
 }) {
+  const { t } = useTranslation('placement');
   const { w, h, axisW, padRight, padBottom, padTop } = CURVE_PLOT;
   const n = curve.length;
   if (n === 0 || markedTotal <= 0) return null;
@@ -335,7 +338,7 @@ function ReachableCurve({
       className={`placement-curve${stale ? ' stale' : ''}`}
       viewBox={`0 0 ${w} ${h}`}
       role="img"
-      aria-label="Reachable voxels by camera count"
+      aria-label={t('placementReviewPanel.curveAriaLabel')}
       onClick={(e) => {
         // The plot starts after the axis gutter, so a click maps from there —
         // `countAtFraction` is the inverse of the `curveX` the polyline is drawn

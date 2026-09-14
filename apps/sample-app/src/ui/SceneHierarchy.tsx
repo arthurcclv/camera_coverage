@@ -24,6 +24,7 @@
  * `scene/reorder.ts`, which is where the tests are.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { SceneCamera } from '../cameras/camera.ts';
 import type { Probe } from '../scene/probeVisibility.ts';
@@ -437,6 +438,7 @@ function placeOutward(
 }
 
 export function SceneHierarchy(props: SceneHierarchyProps) {
+  const { t } = useTranslation(['scene', 'common']);
   const { cameras, probes, sections, zones, volumes, selection, collapsedIds } = props;
   const { constraintGroups, constraints, splats } = props;
   const nodes = useMemo(
@@ -548,13 +550,13 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
   return (
     <div className="scene-hierarchy">
       <div className="panel-title scene-header">
-        <span>Hierarchy</span>
+        <span>{t('sceneHierarchy.title')}</span>
         <div className="add-menu-anchor">
           <button
             type="button"
             className="btn secondary icon-btn add-btn"
-            title="Add entity"
-            aria-label="Add entity"
+            title={t('sceneHierarchy.addEntity')}
+            aria-label={t('sceneHierarchy.addEntity')}
             aria-haspopup="menu"
             aria-expanded={addMenuOpen}
             ref={addButtonRef}
@@ -577,19 +579,19 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
               }
             >
               <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddCamera(); }}>
-                Camera
+                {t('sceneHierarchy.addMenu.camera')}
               </li>
               <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddProbe(); }}>
-                Probe
+                {t('sceneHierarchy.addMenu.probe')}
               </li>
               <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddSection(); }}>
-                Section
+                {t('sceneHierarchy.addMenu.section')}
               </li>
               <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddZone(); }}>
-                Zone
+                {t('sceneHierarchy.addMenu.zone')}
               </li>
               <li role="menuitem" onPointerEnter={closeSubmenu} onClick={() => { setAddMenu(null); props.onAddVolume(); }}>
-                Volume
+                {t('sceneHierarchy.addMenu.volume')}
               </li>
               {/* The one nested row (spec §5.5): it opens the four constraint entries
                   and never adds anything itself. All four stay enabled with no group
@@ -607,7 +609,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
                   openSubmenu();
                 }}
               >
-                Constraint
+                {t('sceneHierarchy.addMenu.constraint')}
                 <span className="submenu-caret" aria-hidden="true">
                   ▸
                 </span>
@@ -626,16 +628,16 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
                     onClick={(e) => e.stopPropagation()}
                   >
                     <li role="menuitem" onClick={() => { closeMenus(); props.onAddConstraintGroup(); }}>
-                      Group
+                      {t('sceneHierarchy.constraintSubmenu.group')}
                     </li>
                     <li role="menuitem" onClick={() => { closeMenus(); props.onAddConstraint('point'); }}>
-                      Point
+                      {t('sceneHierarchy.constraintSubmenu.point')}
                     </li>
                     <li role="menuitem" onClick={() => { closeMenus(); props.onAddConstraint('polyline'); }}>
-                      Polyline
+                      {t('sceneHierarchy.constraintSubmenu.polyline')}
                     </li>
                     <li role="menuitem" onClick={() => { closeMenus(); props.onAddConstraint('plane'); }}>
-                      Plane
+                      {t('sceneHierarchy.constraintSubmenu.plane')}
                     </li>
                   </ul>
                 )}
@@ -655,7 +657,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
                   props.onAddSplat();
                 }}
               >
-                3D Gaussian Splat…
+                {t('sceneHierarchy.addMenu.splat')}
               </li>
             </ul>
           )}
@@ -716,7 +718,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
                   duplicateHandlers(props)[target.kind](target.id);
                 }}
               >
-                Duplicate
+                {t('common:duplicate')}
               </li>
               <li
                 role="menuitem"
@@ -727,7 +729,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
                   deleteHandlers(props)[target.kind](target.id);
                 }}
               >
-                Delete
+                {t('common:delete')}
               </li>
             </>
           ) : (
@@ -779,6 +781,7 @@ interface TreeRowProps {
 
 /** Generic shell: indentation, caret, selection highlight, click routing. */
 function TreeRow(props: TreeRowProps) {
+  const { t } = useTranslation('scene');
   const { row, selected } = props;
   const { node, depth, hasChildren, collapsed } = row;
   const isGroup = node.kind === 'group';
@@ -844,7 +847,7 @@ function TreeRow(props: TreeRowProps) {
       {hasChildren ? (
         // A real button so expand/collapse is keyboard-reachable and labeled —
         // the row's own click selects (zones) or is the group header (§4.1).
-        <button type="button" className="tree-caret" aria-label={collapsed ? 'Expand' : 'Collapse'} onClick={handleCaretClick}>
+        <button type="button" className="tree-caret" aria-label={collapsed ? t('sceneHierarchy.expandRow') : t('sceneHierarchy.collapseRow')} onClick={handleCaretClick}>
           {collapsed ? '▸' : '▾'}
         </button>
       ) : (
@@ -907,10 +910,26 @@ function TreeRow(props: TreeRowProps) {
   );
 }
 
+/**
+ * i18n key (spec §18.4) per fixed group kind — `node.label` itself stays
+ * English (`scene/sceneTree.ts`, untranslated by design like every other pure
+ * module this app doesn't route through `t()`), so the header is keyed off
+ * `groupKind` (a closed enum) rather than the label text.
+ */
+const GROUP_LABEL_KEY: Record<GroupKind, string> = {
+  cameras: 'sceneHierarchy.group.cameras',
+  probes: 'sceneHierarchy.group.probes',
+  sections: 'sceneHierarchy.group.sections',
+  zones: 'sceneHierarchy.group.zones',
+  constraints: 'sceneHierarchy.group.constraints',
+  splats: 'sceneHierarchy.group.splats',
+};
+
 function GroupRowContent({ node }: { node: Extract<SceneNode, { kind: 'group' }> }) {
+  const { t } = useTranslation('scene');
   return (
     <>
-      <span className="label">{node.label}</span>
+      <span className="label">{t(GROUP_LABEL_KEY[node.groupKind])}</span>
       <span className="count">{node.childIds.length}</span>
     </>
   );
@@ -925,19 +944,20 @@ interface CameraRowContentProps {
 }
 
 function CameraRowContent({ node, rate, flagged, enabled, onToggleEnabled }: CameraRowContentProps) {
+  const { t } = useTranslation('scene');
   return (
     <>
       <input
         type="checkbox"
         className="tree-row-toggle"
         checked={enabled}
-        title={enabled ? 'Disable camera' : 'Enable camera'}
+        title={enabled ? t('sceneHierarchy.camera.disable') : t('sceneHierarchy.camera.enable')}
         onClick={(e) => e.stopPropagation()}
         onChange={() => onToggleEnabled('camera', node.cameraId)}
       />
       <span className="dot" style={{ background: dotColor(rate, flagged) }} />
       <span className="label">{node.label}</span>
-      {flagged && <span className="badge flagged">inside geometry</span>}
+      {flagged && <span className="badge flagged">{t('sceneHierarchy.camera.insideGeometry')}</span>}
       {enabled && rate !== undefined && <span className="rate">{(rate * 100).toFixed(1)}%</span>}
     </>
   );
@@ -950,11 +970,12 @@ function ProbeRowContent({
   node: Extract<SceneNode, { kind: 'probe' }>;
   seenCount: number | null;
 }) {
+  const { t } = useTranslation('scene');
   return (
     <>
       <span className="dot probe-dot" />
       <span className="label">{node.label}</span>
-      {seenCount !== null && <span className="rate">seen {seenCount}</span>}
+      {seenCount !== null && <span className="rate">{t('sceneHierarchy.probe.seenCount', { count: seenCount })}</span>}
     </>
   );
 }
@@ -970,6 +991,7 @@ function SectionRowContent({
   cellGrid: SectionCellGrid | null;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
+  const { t } = useTranslation('scene');
   if (!section) return null;
   const badge =
     cellGrid !== null
@@ -981,7 +1003,7 @@ function SectionRowContent({
         type="checkbox"
         className="tree-row-toggle"
         checked={section.enabled}
-        title={section.enabled ? 'Disable section' : 'Enable section'}
+        title={section.enabled ? t('sceneHierarchy.section.disable') : t('sceneHierarchy.section.enable')}
         onClick={(e) => e.stopPropagation()}
         onChange={() => onToggleEnabled('section', node.sectionId)}
       />
@@ -1003,14 +1025,15 @@ function ZoneRowContent({
   enabled: boolean;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
+  const { t } = useTranslation('scene');
   return (
     <>
       <input
         type="checkbox"
         className="tree-row-toggle"
         checked={enabled}
-        title={enabled ? 'Disable zone' : 'Enable zone'}
-        aria-label={enabled ? 'Disable zone' : 'Enable zone'}
+        title={enabled ? t('sceneHierarchy.zone.disable') : t('sceneHierarchy.zone.enable')}
+        aria-label={enabled ? t('sceneHierarchy.zone.disable') : t('sceneHierarchy.zone.enable')}
         onClick={(e) => e.stopPropagation()}
         onChange={() => onToggleEnabled('zone', node.zoneId)}
       />
@@ -1018,7 +1041,9 @@ function ZoneRowContent({
       <span className="label">{node.label}</span>
       <span className="count">{node.childIds.length}</span>
       {summary && summary.validVoxels > 0 && (
-        <span className="rate">overall {(summary.overallRate * 100).toFixed(0)}%</span>
+        <span className="rate">
+          {t('sceneHierarchy.zone.overallRate', { rate: (summary.overallRate * 100).toFixed(0) })}
+        </span>
       )}
     </>
   );
@@ -1065,14 +1090,15 @@ function ConstraintGroupRowContent({
   enabled: boolean;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
+  const { t } = useTranslation('scene');
   return (
     <>
       <input
         type="checkbox"
         className="tree-row-toggle"
         checked={enabled}
-        title={enabled ? 'Disable group' : 'Enable group'}
-        aria-label={enabled ? 'Disable group' : 'Enable group'}
+        title={enabled ? t('sceneHierarchy.constraintGroup.disable') : t('sceneHierarchy.constraintGroup.enable')}
+        aria-label={enabled ? t('sceneHierarchy.constraintGroup.disable') : t('sceneHierarchy.constraintGroup.enable')}
         onClick={(e) => e.stopPropagation()}
         onChange={() => onToggleEnabled('constraintGroup', node.groupId)}
       />
@@ -1099,22 +1125,23 @@ function ConstraintRowContent({
   enabled: boolean;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
+  const { t } = useTranslation('scene');
   if (!constraint) return null;
   const measure = primitiveMeasure(constraint);
   const detail =
     constraint.kind === 'point'
-      ? 'point'
+      ? t('sceneHierarchy.constraint.point')
       : constraint.kind === 'polyline'
-        ? `polyline · ${measure.toFixed(1)} m`
-        : `plane · ${measure.toFixed(0)} m²`;
+        ? t('sceneHierarchy.constraint.polyline', { measure: measure.toFixed(1) })
+        : t('sceneHierarchy.constraint.plane', { measure: measure.toFixed(0) });
   return (
     <>
       <input
         type="checkbox"
         className="tree-row-toggle"
         checked={enabled}
-        title={enabled ? 'Disable constraint' : 'Enable constraint'}
-        aria-label={enabled ? 'Disable constraint' : 'Enable constraint'}
+        title={enabled ? t('sceneHierarchy.constraint.disable') : t('sceneHierarchy.constraint.enable')}
+        aria-label={enabled ? t('sceneHierarchy.constraint.disable') : t('sceneHierarchy.constraint.enable')}
         onClick={(e) => e.stopPropagation()}
         onChange={() => onToggleEnabled('constraint', node.constraintId)}
       />
@@ -1146,6 +1173,7 @@ function SplatRowContent({
   loadState: SplatLoadState | undefined;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
+  const { t } = useTranslation('scene');
   const badge = splatBadge(loadState);
   const failed = loadState?.status === 'error';
   return (
@@ -1154,8 +1182,8 @@ function SplatRowContent({
         type="checkbox"
         className="tree-row-toggle"
         checked={enabled}
-        title={enabled ? 'Hide capture' : 'Show capture'}
-        aria-label={enabled ? 'Hide capture' : 'Show capture'}
+        title={enabled ? t('sceneHierarchy.splat.hide') : t('sceneHierarchy.splat.show')}
+        aria-label={enabled ? t('sceneHierarchy.splat.hide') : t('sceneHierarchy.splat.show')}
         onClick={(e) => e.stopPropagation()}
         onChange={() => onToggleEnabled('splat', node.splatId)}
       />

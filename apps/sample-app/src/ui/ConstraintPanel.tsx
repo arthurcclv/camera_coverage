@@ -13,6 +13,7 @@
  * `distance` is a **tolerance, not a standoff** (§1.1): at 0 the region is the
  * primitive itself, which is how a fixed bracket or a bare wall surface is said.
  */
+import { useTranslation } from 'react-i18next';
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 import { insertMidpoint } from '../scene/polylineDraw.ts';
 import { Slider } from './Slider.tsx';
@@ -45,7 +46,17 @@ export interface ConstraintPanelProps {
   onExtend(id: string, vertex: number): void;
 }
 
-const KIND_LABEL = { point: 'Point', polyline: 'Polyline', plane: 'Plane' } as const;
+const KIND_LABEL_KEY = {
+  point: 'constraintPanel.kindLabelPoint',
+  polyline: 'constraintPanel.kindLabelPolyline',
+  plane: 'constraintPanel.kindLabelPlane',
+} as const;
+
+const KIND_NAME_KEY = {
+  point: 'constraintPanel.kindNamePoint',
+  polyline: 'constraintPanel.kindNamePolyline',
+  plane: 'constraintPanel.kindNamePlane',
+} as const;
 
 export function ConstraintPanel({
   constraint,
@@ -59,20 +70,24 @@ export function ConstraintPanel({
   onDeleteVertex,
   onExtend,
 }: ConstraintPanelProps) {
+  const { t } = useTranslation(['placement', 'common']);
   if (!constraint) return null;
   const c = constraint;
   const group = groups.find((g) => g.id === c.groupId) ?? null;
   const measure = primitiveMeasure(c);
+  const kindLabel = t(`placement:${KIND_LABEL_KEY[c.kind]}`);
+  const kindName = t(`placement:${KIND_NAME_KEY[c.kind]}`);
+  const pinNoun = c.kind === 'plane' ? t('placement:constraintPanel.surfaceNoun') : kindName;
 
   return (
     <div className="panel">
       <p className="panel-title">
-        {KIND_LABEL[c.kind]} constraint — {constraintLabel(c)}
+        {t('placement:constraintPanel.title', { kind: kindLabel, name: constraintLabel(c) })}
       </p>
 
       <div className="panel-body">
         <div className="row">
-          <label htmlFor="con-name">Name</label>
+          <label htmlFor="con-name">{t('common:name')}</label>
           <input
             id="con-name"
             type="text"
@@ -84,7 +99,7 @@ export function ConstraintPanel({
         </div>
 
         <div className="row">
-          <label htmlFor="con-group">Group</label>
+          <label htmlFor="con-group">{t('placement:constraintPanel.groupLabel')}</label>
           <select
             id="con-group"
             className="text-input"
@@ -100,7 +115,7 @@ export function ConstraintPanel({
         </div>
 
         <Slider
-          label="Tolerance (m)"
+          label={t('placement:constraintPanel.toleranceLabel')}
           value={c.distance}
           min={0}
           max={10}
@@ -109,12 +124,17 @@ export function ConstraintPanel({
           onChange={(distance) => onChange(c.id, { distance })}
         />
         <p className="hint">
-          A camera may be mounted anywhere within this distance of the {KIND_LABEL[c.kind].toLowerCase()}.
-          0 pins it to the {c.kind === 'plane' ? 'surface' : c.kind}.
+          {t('placement:constraintPanel.toleranceHint', { kind: kindName, pin: pinNoun })}
         </p>
 
         <div className="stat-line">
-          <span>{c.kind === 'plane' ? 'Area' : c.kind === 'polyline' ? 'Length' : 'Weight'}</span>
+          <span>
+            {c.kind === 'plane'
+              ? t('placement:constraintPanel.areaLabel')
+              : c.kind === 'polyline'
+                ? t('placement:constraintPanel.lengthLabel')
+                : t('placement:constraintPanel.weightLabel')}
+          </span>
           <b>
             {c.kind === 'plane'
               ? `${measure.toFixed(0)} m²`
@@ -123,11 +143,11 @@ export function ConstraintPanel({
                 : '1'}
           </b>
         </div>
-        <p className="hint">The pool splits by this weight, so a longer rail gets more samples.</p>
+        <p className="hint">{t('placement:constraintPanel.weightHint')}</p>
 
         {c.kind === 'point' && (
           <Vec3Field
-            label="Position"
+            label={t('common:position')}
             columns={[
               { label: 'X', value: c.position[0], onCommit: (v) => onChange(c.id, { position: [v, c.position[1], c.position[2]] }) },
               { label: 'Y', value: c.position[1], onCommit: (v) => onChange(c.id, { position: [c.position[0], v, c.position[2]] }) },
@@ -139,7 +159,7 @@ export function ConstraintPanel({
         {c.kind === 'plane' && (
           <>
             <Vec3Field
-              label="Center"
+              label={t('placement:constraintPanel.centerLabel')}
               columns={[
                 { label: 'X', value: c.position[0], onCommit: (v) => onChange(c.id, { position: [v, c.position[1], c.position[2]] }) },
                 { label: 'Y', value: c.position[1], onCommit: (v) => onChange(c.id, { position: [c.position[0], v, c.position[2]] }) },
@@ -147,7 +167,7 @@ export function ConstraintPanel({
               ]}
             />
             <div className="row">
-              <label className="vec-group-label">Size</label>
+              <label className="vec-group-label">{t('placement:constraintPanel.sizeLabel')}</label>
               <div className="vec-fields">
                 <label className="vec-field">
                   <span className="vec-axis">U</span>
@@ -156,7 +176,7 @@ export function ConstraintPanel({
                     min={MIN_PLANE_SIZE}
                     digits={2}
                     seed="display"
-                    ariaLabel="Size U"
+                    ariaLabel={t('placement:constraintPanel.sizeUAriaLabel')}
                     onCommit={(v) => onChange(c.id, { size: [v, c.size[1]] })}
                   />
                 </label>
@@ -167,16 +187,13 @@ export function ConstraintPanel({
                     min={MIN_PLANE_SIZE}
                     digits={2}
                     seed="display"
-                    ariaLabel="Size V"
+                    ariaLabel={t('placement:constraintPanel.sizeVAriaLabel')}
                     onCommit={(v) => onChange(c.id, { size: [c.size[0], v] })}
                   />
                 </label>
               </div>
             </div>
-            <p className="hint">
-              The rectangle spans its local X and Z; its normal is local Y. Rotate it with the
-              viewport gizmo.
-            </p>
+            <p className="hint">{t('placement:constraintPanel.rectangleHint')}</p>
           </>
         )}
 
@@ -221,6 +238,7 @@ function PolylineVertex({
   onDeleteVertex(id: string, vertex: number): void;
   onExtend(id: string, vertex: number): void;
 }) {
+  const { t } = useTranslation('placement');
   const p = c.points[vertex];
   if (!p) return null;
   const insert = insertMidpoint(c.points, vertex);
@@ -230,28 +248,26 @@ function PolylineVertex({
     <>
       <div className="vertex-head">
         <p className="panel-title subhead">
-          Vertex {vertex + 1} <span className="vertex-count">of {c.points.length}</span>
+          {t('constraintPanel.vertexLabel', { n: vertex + 1 })}{' '}
+          <span className="vertex-count">{t('constraintPanel.vertexOf', { count: c.points.length })}</span>
         </p>
         <button
           type="button"
           className={`btn secondary${extending ? ' active' : ''}`}
           title={
             extending
-              ? 'Click the geometry to add vertices — Enter or a double-click to finish'
+              ? t('constraintPanel.extendActiveHint')
               : vertex === 0
-                ? 'Extend — click the geometry to add vertices before the first one'
-                : 'Extend — click the geometry to add vertices past the last one'
+                ? t('constraintPanel.extendFirstHint')
+                : t('constraintPanel.extendLastHint')
           }
           aria-pressed={extending}
           onClick={() => onExtend(c.id, vertex)}
         >
-          Extend
+          {t('constraintPanel.extendButton')}
         </button>
       </div>
-      <p className="hint">
-        Click a vertex handle in the viewport to select it, or drag it there. A loop repeats
-        its first vertex as the last.
-      </p>
+      <p className="hint">{t('constraintPanel.vertexSelectHint')}</p>
       <div className="vertex-row">
         <Vec3Field
           label={`v${vertex + 1}`}
@@ -267,10 +283,10 @@ function PolylineVertex({
             className="btn secondary icon-btn"
             title={
               insert
-                ? 'Insert a vertex midway to the next one'
-                : 'The last vertex has no next one — use Extend to add past the end'
+                ? t('constraintPanel.insertVertexHint')
+                : t('constraintPanel.insertVertexDisabledHint')
             }
-            aria-label="Insert a vertex"
+            aria-label={t('constraintPanel.insertVertexAriaLabel')}
             disabled={insert === null}
             onClick={() => insert && onInsertVertex(c.id, insert.at, insert.position)}
           >
@@ -279,8 +295,8 @@ function PolylineVertex({
           <button
             type="button"
             className="btn secondary icon-btn"
-            title={canDelete ? 'Delete this vertex' : 'A polyline needs at least 2 vertices'}
-            aria-label="Delete this vertex"
+            title={canDelete ? t('constraintPanel.deleteVertexHint') : t('constraintPanel.deleteVertexDisabledHint')}
+            aria-label={t('constraintPanel.deleteVertexAriaLabel')}
             disabled={!canDelete}
             onClick={() => onDeleteVertex(c.id, vertex)}
           >

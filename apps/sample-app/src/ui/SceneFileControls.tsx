@@ -9,6 +9,8 @@
  * closes no dialog, so the destination and the acknowledgement both have to be
  * visible here. Text comes from `scene/saveTarget.ts` (pure, tested).
  */
+import { useTranslation } from 'react-i18next';
+
 export interface SceneFileControlsProps {
   fileSystemAccessAvailable: boolean;
   busy: boolean;
@@ -29,26 +31,27 @@ export function SceneFileControls({
   onSave,
   onSaveAs,
 }: SceneFileControlsProps) {
+  const { t } = useTranslation('scene');
   if (!fileSystemAccessAvailable) {
     return (
       <div className="panel">
-        <p className="panel-title">Scene</p>
-        <div className="hint">Load/Save need a Chromium-based browser (File System Access API).</div>
+        <p className="panel-title">{t('sceneFileControls.title')}</p>
+        <div className="hint">{t('sceneFileControls.unavailableHint')}</div>
       </div>
     );
   }
   return (
     <div className="panel">
-      <p className="panel-title">Scene</p>
+      <p className="panel-title">{t('sceneFileControls.title')}</p>
       <div className="status-line">
         <button className="btn secondary" disabled={busy} onClick={onLoad}>
-          Load…
+          {t('sceneFileControls.loadButton')}
         </button>
         <button className="btn secondary" disabled={busy} onClick={onSave}>
-          Save
+          {t('sceneFileControls.saveButton')}
         </button>
         <button className="btn secondary" disabled={busy} onClick={onSaveAs}>
-          Save As…
+          {t('sceneFileControls.saveAsButton')}
         </button>
         {busy && <span className="spinner" />}
       </div>

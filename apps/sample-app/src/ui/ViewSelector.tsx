@@ -18,7 +18,17 @@
  * Selected view, which has no framing of its own to reset (§2.4.1).
  */
 import { useEffect, useRef, useState } from 'react';
-import { VIEW_IDS, VIEW_LABELS, type ViewId } from '../scene/viewCameras.ts';
+import { useTranslation } from 'react-i18next';
+import { VIEW_IDS, type ViewId } from '../scene/viewCameras.ts';
+
+/** i18n key per view (spec §18.4), replacing `VIEW_LABELS`'s hardcoded strings. */
+const VIEW_LABEL_KEYS: Record<ViewId, string> = {
+  perspective: 'viewPerspective',
+  top: 'viewTop',
+  front: 'viewFront',
+  right: 'viewRight',
+  camera: 'viewSelected',
+};
 
 export interface ViewSelectorProps {
   activeView: ViewId;
@@ -55,6 +65,7 @@ function ChevronIcon() {
 }
 
 export function ViewSelector({ activeView, onSelect, disabledViews, onResetView }: ViewSelectorProps) {
+  const { t } = useTranslation('common');
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
 
@@ -78,8 +89,7 @@ export function ViewSelector({ activeView, onSelect, disabledViews, onResetView 
   // The Selected view is derived wholly from the selected camera (spec §2.4.1),
   // so there is no framing to reset. Same dimmed-plus-tooltip treatment the
   // Selected *row* gets when no camera is selected.
-  const resetDisabledReason =
-    activeView === 'camera' ? 'The Selected view has no framing of its own to reset' : undefined;
+  const resetDisabledReason = activeView === 'camera' ? t('resetViewDisabledReason') : undefined;
 
   return (
     <div className="view-toolbar-group">
@@ -87,17 +97,17 @@ export function ViewSelector({ activeView, onSelect, disabledViews, onResetView 
         <button
           type="button"
           className={`btn secondary view-menu-btn${open ? ' active' : ''}`}
-          title="View"
-          aria-label={`View: ${VIEW_LABELS[activeView]}`}
+          title={t('view')}
+          aria-label={`${t('view')}: ${t(VIEW_LABEL_KEYS[activeView])}`}
           aria-haspopup="menu"
           aria-expanded={open}
           onClick={() => setOpen((o) => !o)}
         >
-          <span className="view-menu-label">{VIEW_LABELS[activeView]}</span>
+          <span className="view-menu-label">{t(VIEW_LABEL_KEYS[activeView])}</span>
           <ChevronIcon />
         </button>
         {open && (
-          <ul className="menu view-menu" role="menu" aria-label="View">
+          <ul className="menu view-menu" role="menu" aria-label={t('view')}>
             {VIEW_IDS.map((view) => {
               const disabledReason = disabledViews?.get(view);
               return (
@@ -115,7 +125,7 @@ export function ViewSelector({ activeView, onSelect, disabledViews, onResetView 
                   }}
                 >
                   <span className="view-menu-check">{view === activeView ? '✓' : ''}</span>
-                  {VIEW_LABELS[view]}
+                  {t(VIEW_LABEL_KEYS[view])}
                 </li>
               );
             })}
@@ -125,8 +135,8 @@ export function ViewSelector({ activeView, onSelect, disabledViews, onResetView 
       <button
         type="button"
         className="btn secondary view-reset-btn"
-        title={resetDisabledReason ?? 'Reset view — frame the scene'}
-        aria-label="Reset view"
+        title={resetDisabledReason ?? t('resetView')}
+        aria-label={t('resetViewLabel')}
         disabled={!!resetDisabledReason}
         onClick={onResetView}
       >

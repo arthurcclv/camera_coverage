@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_TRANSFORM_SPACE,
   spaceIconKind,
-  spaceTooltip,
+  spaceTooltipKey,
   threeSpace,
   toggleSpace,
 } from '../src/scene/transformSpace.ts';
@@ -28,9 +28,7 @@ test('spaceIconKind reflects the current space', () => {
   assert.equal(spaceIconKind('global'), 'globe');
 });
 
-test('spaceTooltip names the current space and the click action', () => {
-  assert.match(spaceTooltip('local'), /^Local space/);
-  assert.match(spaceTooltip('local'), /global/);
-  assert.match(spaceTooltip('global'), /^Global space/);
-  assert.match(spaceTooltip('global'), /local/);
+test('spaceTooltipKey names the current space and the click action (spec §18.4)', () => {
+  assert.equal(spaceTooltipKey('local'), 'spaceTooltipLocal');
+  assert.equal(spaceTooltipKey('global'), 'spaceTooltipGlobal');
 });

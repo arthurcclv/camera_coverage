@@ -13,7 +13,8 @@ html, body, #root {
   margin: 0;
 }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang TC',
+    'Microsoft JhengHei', sans-serif;
   color: #e6e8eb;
   background: #14161a;
 }
@@ -64,9 +65,30 @@ body {
   }
 }
 
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* The app-wide top bar (spec §18.3): the one element not gated by the
+   placement mode's show/hide rules — it sits above `.app` rather than inside it. */
+.top-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: #191b20;
+}
+
 .app {
   display: flex;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   width: 100vw;
   overflow: hidden;
 }
@@ -881,6 +903,64 @@ button.tree-caret:focus-visible {
 }
 .view-menu-row.disabled:hover {
   background: none;
+}
+
+/* Top bar Settings dropdown (spec §18.3): same interaction/visual model as the
+   View selector above, but the trigger itself is plain text — no button shape
+   or icon — an explicit exception to the icon-toolbar convention (VISUAL_DESIGN.md). */
+.settings-menu-anchor {
+  position: relative;
+}
+.settings-menu-btn {
+  background: none;
+  border: none;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #e6e8eb;
+  cursor: pointer;
+}
+.settings-menu-btn:hover,
+.settings-menu-btn.active {
+  background: var(--border-subtle);
+}
+.settings-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 140px;
+}
+
+/* Language dialog (spec §18.3): the same radio-row chrome as the View selector's
+   menu, laid out as the modal's body instead of a popover. */
+.language-dialog-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.language-dialog-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.language-dialog-row:hover {
+  background: #2c66c9;
+  color: #fff;
+}
+.language-dialog-row.selected {
+  color: #fff;
+}
+.language-dialog-check {
+  display: inline-flex;
+  justify-content: center;
+  width: 12px;
+  color: #4d9dff;
+  font-weight: 700;
 }
 
 /* Probe rows + panel (spec §5.5, §12.3). */

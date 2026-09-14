@@ -1,0 +1,24 @@
+{
+  "cameraPanel": {
+    "title": "攝影機",
+    "titleWithName": "攝影機 — {{name}}",
+    "insideGeometryBadge": "位於幾何體內",
+    "emptyHint": "從清單中選取攝影機，或在視埠中點選其控制點。",
+    "fovLabel": "視角（垂直）",
+    "rangeLabel": "可視範圍",
+    "lockAimLabel": "鎖定旋轉（不納入最佳化）",
+    "constraintLabel": "位置限制",
+    "unboundOption": "（未指定）",
+    "constraintClampedHint": "位置會被限制在此限制幾何的區域內。",
+    "repositionTooltip": "移動到此限制幾何中得分最高的位置",
+    "repositionButton": "在限制幾何上重新定位"
+  },
+  "probePanel": {
+    "titleWithName": "探測點 — {{name}}",
+    "staleHint": "⚠ 覆蓋範圍已過期，請重新計算",
+    "runCoverageHint": "執行覆蓋計算以檢視可見性。",
+    "noDataHint": "此處尚無覆蓋資料。",
+    "summary": "在 <b>{{total}}</b> 台攝影機中，有 <b>{{seen}}</b> 台可見",
+    "selectCameraTooltip": "選取攝影機"
+  }
+}

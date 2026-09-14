@@ -145,29 +145,35 @@ test('counts are singular at one and shown at zero (spec §14.4)', () => {
 
 // --- Status line (spec §14.7) ---
 
-test('status composes folder and file, since two folders can both hold a scene.json (spec §14.7)', () => {
-  assert.equal(describeSceneFileStatus({ folder: siteA, name: 'night-shift.json' }, null), 'site-a/night-shift.json');
+test('status composes folder and file, since two folders can both hold a scene.json (spec §14.7, §18.4)', () => {
+  assert.deepEqual(describeSceneFileStatus({ folder: siteA, name: 'night-shift.json' }, null), {
+    key: 'idleTarget',
+    params: { folder: 'site-a', name: 'night-shift.json' },
+  });
 });
 
-test('status acknowledges a silent save by name, the folder being unchanged (spec §14.7)', () => {
-  assert.equal(describeSceneFileStatus({ folder: siteA, name: 'night-shift.json' }, { assetsCopied: 0 }), 'Saved night-shift.json');
+test('status acknowledges a silent save by name, the folder being unchanged (spec §14.7, §18.4)', () => {
+  assert.deepEqual(describeSceneFileStatus({ folder: siteA, name: 'night-shift.json' }, { assetsCopied: 0 }), {
+    key: 'savedNoAssets',
+    params: { name: 'night-shift.json' },
+  });
 });
 
-test('a save that copied assets names the whole destination (spec §14.5, §14.7)', () => {
-  assert.equal(
-    describeSceneFileStatus({ folder: siteB, name: 'a.json' }, { assetsCopied: 1 }),
-    'Saved to site-b/a.json — 1 asset copied',
-  );
-  assert.equal(
-    describeSceneFileStatus({ folder: siteB, name: 'a.json' }, { assetsCopied: 3 }),
-    'Saved to site-b/a.json — 3 assets copied',
-  );
+test('a save that copied assets names the whole destination (spec §14.5, §14.7, §18.4)', () => {
+  assert.deepEqual(describeSceneFileStatus({ folder: siteB, name: 'a.json' }, { assetsCopied: 1 }), {
+    key: 'savedWithAssets',
+    params: { folder: 'site-b', name: 'a.json', count: 1 },
+  });
+  assert.deepEqual(describeSceneFileStatus({ folder: siteB, name: 'a.json' }, { assetsCopied: 3 }), {
+    key: 'savedWithAssets',
+    params: { folder: 'site-b', name: 'a.json', count: 3 },
+  });
 });
 
-test('status says where Save will ask when there is no target (spec §14.1, §14.7)', () => {
-  assert.equal(describeSceneFileStatus(null, null), 'No file chosen — Save will ask where to write.');
+test('status says where Save will ask when there is no target (spec §14.1, §14.7, §18.4)', () => {
+  assert.deepEqual(describeSceneFileStatus(null, null), { key: 'noFileChosen' });
   // No target means nothing was saved; a stale "saved" can't resurrect a name.
-  assert.equal(describeSceneFileStatus(null, { assetsCopied: 2 }), 'No file chosen — Save will ask where to write.');
+  assert.deepEqual(describeSceneFileStatus(null, { assetsCopied: 2 }), { key: 'noFileChosen' });
 });
 
 // --- Replace warning (spec §14.5) ---
@@ -194,15 +200,12 @@ test('an untouched destination is not worth a warning, so the button stays Save 
 
 // --- Unsaved-changes guard (spec §14.4) ---
 
-test('the unsaved warning names the work at stake (spec §14.4)', () => {
-  assert.equal(
-    describeUnsavedWarning('night-shift.json'),
-    '"night-shift.json" has unsaved changes — loading discards them.',
-  );
+test('the unsaved warning names the work at stake (spec §14.4, §18.4)', () => {
+  assert.deepEqual(describeUnsavedWarning('night-shift.json'), { key: 'unsavedNamed', params: { name: 'night-shift.json' } });
 });
 
-test('a scene with no file yet is warned about anonymously (spec §14.1, §14.4)', () => {
-  assert.equal(describeUnsavedWarning(null), 'This scene has unsaved changes — loading discards them.');
+test('a scene with no file yet is warned about anonymously (spec §14.1, §14.4, §18.4)', () => {
+  assert.deepEqual(describeUnsavedWarning(null), { key: 'unsavedAnonymous' });
 });
 
 // --- Overwrite routing: one rule for both write paths (spec §14.5) ---
@@ -220,20 +223,20 @@ test('clashing assets alone never raise the confirmation (spec §14.5)', () => {
   assert.deepEqual(resolveWriteAction({ fileExists: true, assetClashes: 3 }), { kind: 'confirm' });
 });
 
-test('the confirmation names folder and file, since two folders can hold a scene.json (spec §14.5)', () => {
+test('the confirmation names folder and file, since two folders can hold a scene.json (spec §14.5, §18.4)', () => {
   assert.deepEqual(describeOverwriteConfirm({ folder: siteA, name: 'scene.json' }, { fileExists: true, assetClashes: 0 }), [
-    'site-a/scene.json already exists. Saving replaces it.',
+    { key: 'overwriteConfirmLine', params: { folder: 'site-a', name: 'scene.json' } },
   ]);
 });
 
-test('the confirmation adds the asset count only for a cross-folder save (spec §14.5)', () => {
+test('the confirmation adds the asset count only for a cross-folder save (spec §14.5, §18.4)', () => {
   assert.deepEqual(describeOverwriteConfirm({ folder: siteB, name: 'a.json' }, { fileExists: true, assetClashes: 2 }), [
-    'site-b/a.json already exists. Saving replaces it.',
-    "Also replaces 2 of this scene's assets in that folder.",
+    { key: 'overwriteConfirmLine', params: { folder: 'site-b', name: 'a.json' } },
+    { key: 'overwriteConfirmAssetsLine', params: { assetClashes: 2 } },
   ]);
   // Partitive, so one asset needs no singular branch.
   const one = describeOverwriteConfirm({ folder: siteB, name: 'a.json' }, { fileExists: true, assetClashes: 1 });
-  assert.equal(one[1], "Also replaces 1 of this scene's assets in that folder.");
+  assert.deepEqual(one[1], { key: 'overwriteConfirmAssetsLine', params: { assetClashes: 1 } });
 });
 
 // --- Asset copy planning (spec §14.5) ---
@@ -268,18 +271,18 @@ test('nested asset paths are planned verbatim, for the destination to recreate (
 
 // --- Failure text (spec §14.8) ---
 
-test('a failed asset copy names the asset and says nothing was saved (spec §14.8)', () => {
-  assert.equal(
-    describeAssetCopyFailure('assets/rack.glb', 'not found in the source folder'),
-    'Couldn\'t copy "assets/rack.glb": not found in the source folder. Nothing was saved.',
-  );
+test('a failed asset copy names the asset and says nothing was saved (spec §14.8, §18.4)', () => {
+  assert.deepEqual(describeAssetCopyFailure('assets/rack.glb', 'not found in the source folder'), {
+    key: 'assetCopyFailure',
+    params: { src: 'assets/rack.glb', reason: 'not found in the source folder' },
+  });
 });
 
-test('a save failure names the file and points at Save As… (spec §14.8)', () => {
-  assert.equal(
-    describeSaveFailure('night-shift.json', 'permission denied'),
-    'Couldn\'t save "night-shift.json": permission denied. Use Save As… to choose another folder.',
-  );
+test('a save failure names the file and points at Save As… (spec §14.8, §18.4)', () => {
+  assert.deepEqual(describeSaveFailure('night-shift.json', 'permission denied'), {
+    key: 'saveFailure',
+    params: { name: 'night-shift.json', reason: 'permission denied' },
+  });
 });
 
 // --- splat captures in the asset copy plan (`gaussian_splats.md` §8) --------

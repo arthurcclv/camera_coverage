@@ -1,0 +1,51 @@
+{
+  "orientationValue": {
+    "horizontal": "水平",
+    "verticalX": "垂直 X",
+    "verticalZ": "垂直 Z"
+  },
+  "aggregationValue": {
+    "mean": "平均",
+    "max": "最大",
+    "min": "最小",
+    "blind": "盲區"
+  },
+  "sectionPanel": {
+    "title": "截面 — {{label}}",
+    "orientationHint": "方向",
+    "orientationGroupLabel": "截面方向",
+    "thicknessLabel": "厚度 (m)",
+    "thicknessHint": "以 {{center}} m 為中心；調整厚度時中心點保持不變。",
+    "footprint": {
+      "horizontalA": "寬度 (X) (m)",
+      "horizontalB": "深度 (Z) (m)",
+      "verticalXA": "寬度 (Z) (m)",
+      "verticalXB": "高度 (Y) (m)",
+      "verticalZA": "寬度 (X) (m)",
+      "verticalZB": "高度 (Y) (m)"
+    },
+    "footprintHint": "範圍中心為 ({{a}}, {{b}}) m；可在視埠中拖曳以移動。",
+    "aggregationHint": "疊加方式",
+    "aggregationGroupLabel": "截面累加方式",
+    "clipHint": "裁剪",
+    "clipButton": "裁剪",
+    "revealRangeLabel": "顯示範圍 (m)"
+  },
+  "sectionStatsPanel": {
+    "title": "截面統計",
+    "selectHint": "選取一個截面以檢視其統計資料。",
+    "runHint": "執行覆蓋率計算以檢視截面統計資料。",
+    "orientation": "方向",
+    "thickness": "厚度",
+    "footprint": "範圍",
+    "cells": "格數",
+    "coloredCells": "有效格數",
+    "obstacleCells": "障礙格數",
+    "sectionCoverage": "截面覆蓋率",
+    "blindCells": "盲點格數",
+    "minCoverage": "最低覆蓋率",
+    "maxCoverage": "最高覆蓋率",
+    "staleWarning": "⚠ 覆蓋率資料已過期 — 請重新計算",
+    "perCamera": "各攝影機"
+  }
+}

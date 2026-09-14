@@ -1,0 +1,24 @@
+{
+  "cameraPanel": {
+    "title": "Camera",
+    "titleWithName": "Camera — {{name}}",
+    "insideGeometryBadge": "inside geometry",
+    "emptyHint": "Select a camera from the list or click its gizmo in the viewport.",
+    "fovLabel": "FOV (vert.)",
+    "rangeLabel": "Range (far)",
+    "lockAimLabel": "Lock aim (exclude from optimization)",
+    "constraintLabel": "Constraint",
+    "unboundOption": "(unbound)",
+    "constraintClampedHint": "Position is clamped to this constraint's region.",
+    "repositionTooltip": "Move to the best-scoring position on this constraint",
+    "repositionButton": "Reposition on constraint"
+  },
+  "probePanel": {
+    "titleWithName": "Probe — {{name}}",
+    "staleHint": "⚠ Coverage out of date — recompute",
+    "runCoverageHint": "Run coverage to see visibility.",
+    "noDataHint": "No coverage data at this point.",
+    "summary": "Seen by <b>{{seen}}</b> of <b>{{total}}</b> cameras",
+    "selectCameraTooltip": "Select camera"
+  }
+}

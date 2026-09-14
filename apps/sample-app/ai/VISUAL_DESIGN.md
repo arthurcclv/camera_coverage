@@ -152,7 +152,10 @@ this rig, check the asset's metalness before touching the lights.
 ## Typography
 
 - **Font:** system stack — `-apple-system, BlinkMacSystemFont, 'Segoe UI',
-  Roboto, sans-serif`. No web fonts.
+  Roboto, 'PingFang TC', 'Microsoft JhengHei', sans-serif`. No web fonts. The
+  two CJK names (spec §18) are explicit rather than left to the browser's own
+  sans-serif fallback, so zh-TW text gets a specific Traditional Chinese face on
+  both macOS and Windows.
 - **Scale:** 11 px (chips, hints, badges, counts) · 12 px (default UI text,
   labels, rows, stats) · 13 px (buttons) · 15 px (add-menu "+"). The viewport is
   the focus, so body copy stays small and dense.
@@ -182,11 +185,14 @@ this rig, check the asset's metalness before touching the lights.
   remains the full-width form for a button that is alone in its column.
 - **Radius:** `4px` (inputs, menu items, small chips) · `6px` (buttons, rows,
   banners, menus) · `8px` (panel cards) · `999px` (pill badges).
-- **Layout:** three columns in a full-viewport flex row — left inspector `340px`
-  (hierarchy tree grows, object-detail panel below with a draggable `8px`
-  `row-resize` divider), center viewport (`flex: 1`, `min-width: 0`) with absolute
-  top-left and top-right icon toolbars, right sidebar `340px`. Side columns
-  scroll; the app shell never scrolls (`overflow: hidden`).
+- **Layout:** a full-viewport flex **column** (`.app-shell`) — the top bar
+  (spec §18.3, `36px`, fixed) above a flex **row** (`.app`, `flex: 1`) of three
+  columns: left inspector `340px` (hierarchy tree grows, object-detail panel
+  below with a draggable `8px` `row-resize` divider), center viewport (`flex:
+  1`, `min-width: 0`) with absolute top-left and top-right icon toolbars, right
+  sidebar `340px`. Side columns scroll; neither the shell nor `.app` scrolls
+  (`overflow: hidden`) — only the top bar sits outside the placement mode's
+  show/hide rules (§2.4), staying visible in every mode.
 - **Target-zone list** (`ConstraintGroupPanel`, `camera_placement.md` §3.1.2): a
   `subhead` title, the two `.checkbox-row` flags, then a `.row` holding a `.select`
   that lists only the **unlisted** zones — so it reads as an *action* ("add a
@@ -473,6 +479,28 @@ this rig, check the asset's metalness before touching the lights.
     string as a `title` (the folder line's treatment). The name is a flex row of an
     ellipsizing label plus the badge, so a long name eats into the label and leaves the
     mark — clipping the badge would drop the one thing the row is asserting.
+
+- **Top bar** (`.top-bar`, spec §18.3): a `36px` full-width strip above `.app`,
+  `#191b20` with a `--border-subtle` bottom rule — the one element outside the
+  placement mode's show/hide rules, so it (and the Settings menu on it) stays
+  reachable in every mode. Holds a single plain-**text** "Settings" trigger, an
+  explicit exception to this app's icon-only toolbar convention: everything
+  else in `.top-bar`/`.viewport-toolbar` is an icon + tooltip, but a page-level
+  bar earns a legible label rather than a bare gear glyph.
+  - **Settings menu** (`.settings-menu-anchor` + `.settings-menu`): the same
+    popover chrome and interaction model as the View selector's `.view-menu`
+    (closes on outside click, Escape, or re-clicking the trigger) — a
+    general-purpose, growable list; today exactly one row, **Language**.
+  - **Language dialog** (`ui/LanguageDialog.tsx`): reuses `.modal` wholesale — a
+    fifth use alongside the four scene-file dialogs, still gated by the same
+    "genuinely blocking" rule (§14.7's Modal entry): picking a locale re-renders
+    the whole UI's text, which is exactly the kind of global, all-at-once change
+    a dialog (not a popover) should gate. Its body is a `.language-dialog-list`
+    of radio rows (`.language-dialog-row`, a `✓` check column identical to
+    `.view-menu-check`'s), each labeled in its **own** language (`English`,
+    `繁體中文`) regardless of the locale currently active. Footer is **Cancel**
+    / **Apply** — select-then-confirm, not apply-on-click, so a language switch
+    (which re-renders every panel at once) is never one misclick away.
 
 - **Score heatmap** (`.aim-heatmap`): a 2:1 canvas of yaw × pitch, 2° per pixel,
   `image-rendering: pixelated` and a crosshair cursor. Pixelated on purpose — smoothing

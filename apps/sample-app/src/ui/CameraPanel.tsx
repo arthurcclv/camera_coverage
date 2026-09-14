@@ -4,6 +4,7 @@
  * re-derived from it on every render rather than kept as separate local
  * state, so it never drifts.
  */
+import { useTranslation } from 'react-i18next';
 import { constraintLabel, type CameraConstraint } from '../placement/region.ts';
 import type { CameraConfig } from '@linkervision/camera-coverage-sdk';
 import { cameraLabel, type SceneCamera } from '../cameras/camera.ts';
@@ -43,12 +44,14 @@ export function CameraPanel({
   onReposition,
   repositionBlocker,
 }: CameraPanelProps) {
+  const { t } = useTranslation(['camera', 'common']);
+
   if (!camera) {
     return (
       <div className="panel">
-        <p className="panel-title">Camera</p>
+        <p className="panel-title">{t('camera:cameraPanel.title')}</p>
         <div className="panel-body">
-          <p className="hint">Select a camera from the list or click its gizmo in the viewport.</p>
+          <p className="hint">{t('camera:cameraPanel.emptyHint')}</p>
         </div>
       </div>
     );
@@ -67,13 +70,17 @@ export function CameraPanel({
   return (
     <div className="panel">
       <p className="panel-title">
-        Camera — {cameraLabel(camera)}
-        {flagged && <span className="badge flagged" style={{ marginLeft: 8 }}>inside geometry</span>}
+        {t('camera:cameraPanel.titleWithName', { name: cameraLabel(camera) })}
+        {flagged && (
+          <span className="badge flagged" style={{ marginLeft: 8 }}>
+            {t('camera:cameraPanel.insideGeometryBadge')}
+          </span>
+        )}
       </p>
 
       <div className="panel-body">
         <div className="row">
-          <label htmlFor="camera-name">Name</label>
+          <label htmlFor="camera-name">{t('common:name')}</label>
           <input
             id="camera-name"
             type="text"
@@ -86,7 +93,7 @@ export function CameraPanel({
 
         {/* Position: free (former slider bounds were arbitrary UI extents), spec §5.2.1. */}
         <Vec3Field
-          label="Position"
+          label={t('common:position')}
           digits={2}
           columns={[
             { label: 'X', value: camera.position[0], onCommit: (v) => setPosition(0, v) },
@@ -98,7 +105,7 @@ export function CameraPanel({
         {/* Rotation columns are axis-correct: X=pitch, Y=yaw, Z=roll (spec §5.1). Pitch
             is clamped ±89°; yaw/roll are free. */}
         <Vec3Field
-          label="Rotation"
+          label={t('common:rotation')}
           digits={2}
           columns={[
             { label: 'X', value: euler.pitch, min: -89, max: 89, onCommit: (v) => setEuler({ pitch: v }) },
@@ -107,8 +114,8 @@ export function CameraPanel({
           ]}
         />
 
-        <Slider label="FOV (vert.)" value={camera.fov} min={10} max={150} step={1} digits={2} onChange={(v) => set({ fov: v })} />
-        <Slider label="Range (far)" value={camera.far ?? 50} min={0.5} max={100} step={0.1} onChange={(v) => set({ far: v })} />
+        <Slider label={t('camera:cameraPanel.fovLabel')} value={camera.fov} min={10} max={150} step={1} digits={2} onChange={(v) => set({ fov: v })} />
+        <Slider label={t('camera:cameraPanel.rangeLabel')} value={camera.far ?? 50} min={0.5} max={100} step={0.1} onChange={(v) => set({ far: v })} />
 
         {/* The aim lock is app-only and changes nothing the engine computes, so
             it never marks the result stale (`aim_optimization.md` §4.5). */}
@@ -118,7 +125,7 @@ export function CameraPanel({
             checked={camera.aimLocked === true}
             onChange={() => onToggleAimLock(camera.id)}
           />
-          Lock aim (exclude from optimization)
+          {t('camera:cameraPanel.lockAimLabel')}
         </label>
 
         {/* The binding is provenance *and* a clamp: while it is set, every write
@@ -126,14 +133,14 @@ export function CameraPanel({
             so a reviewed layout cannot drift off its rail (`camera_placement.md`
             §6.3). */}
         <div className="row">
-          <label htmlFor="cam-constraint">Constraint</label>
+          <label htmlFor="cam-constraint">{t('camera:cameraPanel.constraintLabel')}</label>
           <select
             id="cam-constraint"
             className="text-input"
             value={camera.constraintId ?? ''}
             onChange={(e) => onBind(camera.id, e.target.value === '' ? null : e.target.value)}
           >
-            <option value="">(unbound)</option>
+            <option value="">{t('camera:cameraPanel.unboundOption')}</option>
             {constraints.map((c) => (
               <option key={c.id} value={c.id}>
                 {constraintLabel(c)}
@@ -143,15 +150,15 @@ export function CameraPanel({
         </div>
         {camera.constraintId !== undefined && (
           <>
-            <p className="hint">Position is clamped to this constraint's region.</p>
+            <p className="hint">{t('camera:cameraPanel.constraintClampedHint')}</p>
             <button
               type="button"
               className="btn secondary"
               disabled={onReposition === null}
-              title={repositionBlocker ?? 'Move to the best-scoring position on this constraint'}
+              title={repositionBlocker ?? t('camera:cameraPanel.repositionTooltip')}
               onClick={() => onReposition?.()}
             >
-              Reposition on constraint
+              {t('camera:cameraPanel.repositionButton')}
             </button>
           </>
         )}

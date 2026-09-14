@@ -1,0 +1,29 @@
+{
+  "zonePanel": {
+    "title": "Zone — {{label}}",
+    "memberCount": "Volumes",
+    "coverageTitle": "Zone coverage",
+    "runHint": "Run coverage to see results.",
+    "noValidVoxels": "This zone marks no valid voxels.",
+    "overallCoverage": "Overall coverage",
+    "validVoxels": "Valid voxels",
+    "blindSpots": "Blind spots",
+    "staleWarning": "⚠ Coverage out of date — recompute",
+    "perCamera": "Per camera"
+  },
+  "volumePanel": {
+    "title": "Volume — {{id}}",
+    "zone": "Zone",
+    "sizeLabel": "Size"
+  },
+  "samplingVolumeControls": {
+    "title": "Sampling zones",
+    "restrictLabel": "Restrict coverage to zones",
+    "generateButton": "Generate from geometry",
+    "zoneLevelLabel": "Zone level",
+    "boxLevelLabel": "Box level",
+    "markedVoxelsLabel": "Marked voxels",
+    "markedValue": "{{count}} · {{pct}}% of full",
+    "runHint": "Run coverage"
+  }
+}

@@ -198,6 +198,23 @@ default" — see DECISIONS.md).
 - `engine/useEngine.ts` — `WorkerClient` lifecycle + init/load/setCameras/compute
   wrappers with CPU fallback.
 
+**Internationalization (`i18n/`, spec §18)**
+- `i18n/index.ts` — i18next + react-i18next + `i18next-browser-languagedetector`
+  config: the seven namespaced dictionaries (`common`, `camera`, `scene`,
+  `optimize`, `placement`, `sections`, `volumes`) imported eagerly from
+  `locales/{en,zh-TW}/*.json`, detection order (`localStorage` then
+  `navigator`), and the `<html lang>` sync. Every `ui/*` component reads its own
+  namespace via `useTranslation()`; a handful of pure, unit-tested functions
+  outside `ui/` (`scene/saveTarget.ts`'s status/warning composers,
+  `scene/placement.ts`'s `placeTooltipKey`, `scene/transformSpace.ts`'s
+  `spaceTooltipKey`, `scene/heatmapLegend.ts`'s legend builders) return an i18n
+  key (+ params) instead of English text, resolved to display text by their
+  sole caller, `App.tsx`, so they stay testable without a React/i18next
+  harness.
+- `ui/TopBar.tsx` / `ui/SettingsMenu.tsx` / `ui/LanguageDialog.tsx` — the app-wide
+  top bar (spec §18.3), its "Settings" dropdown, and the Language selection
+  modal (reusing `Modal.tsx`).
+
 **Scene (`scene/`, imperative Three.js + pure math)**
 - `sceneView/` — the imperative Three.js bridge (spec §2–§13). `sceneView.ts` is
   the `SceneView` class: it constructs and owns the viewport + all gizmo sets +

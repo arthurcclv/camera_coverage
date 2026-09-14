@@ -31,7 +31,12 @@ export function spaceIconKind(space: TransformSpace): 'box' | 'globe' {
   return space === 'local' ? 'box' : 'globe';
 }
 
-/** Tooltip naming the current space and the action a click performs. */
-export function spaceTooltip(space: TransformSpace): string {
-  return space === 'local' ? 'Local space — click for global' : 'Global space — click for local';
+/**
+ * The i18n key (spec §18.4, `common` namespace) for the tooltip naming the
+ * current space and the action a click performs. Returns a key rather than
+ * formatted English so this stays testable without a React/i18next harness;
+ * the caller runs it through `t()`.
+ */
+export function spaceTooltipKey(space: TransformSpace): string {
+  return space === 'local' ? 'spaceTooltipLocal' : 'spaceTooltipGlobal';
 }

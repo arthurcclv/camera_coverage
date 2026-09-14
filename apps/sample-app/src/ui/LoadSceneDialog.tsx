@@ -13,6 +13,7 @@
  * the commit is the caller's, so the all-or-nothing import stays in `App.tsx`.
  */
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { listSceneFiles } from '../scene/sceneIO.ts';
 import { moveListSelection, nextListSelection, type SceneFileEntry } from '../scene/sceneFileList.ts';
 import type { SaveTarget } from '../scene/saveTarget.ts';
@@ -47,6 +48,7 @@ export function LoadSceneDialog({
   onLoad,
   onCancel,
 }: LoadSceneDialogProps) {
+  const { t } = useTranslation('scene');
   const [folder, changeFolder] = usePickedFolder(initialFolder, onPickFolder);
   const [entries, setEntries] = useState<SceneFileEntry[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -77,7 +79,7 @@ export function LoadSceneDialog({
         setCurrentHere(null);
         setEntries([]);
         setSelected(null);
-        setListError(FOLDER_UNAVAILABLE);
+        setListError(FOLDER_UNAVAILABLE());
       },
     );
     return () => {
@@ -107,12 +109,12 @@ export function LoadSceneDialog({
 
   return (
     <Modal
-      title="Load scene"
+      title={t('loadSceneDialog.title')}
       onCancel={onCancel}
       footer={
         <>
           <button type="button" className="btn secondary" onClick={onCancel}>
-            Cancel
+            {t('common:cancel')}
           </button>
           <button
             type="button"
@@ -120,7 +122,7 @@ export function LoadSceneDialog({
             disabled={busy || selected == null}
             onClick={() => selected != null && commit(selected)}
           >
-            {unsavedWarning != null ? 'Load anyway' : 'Load'}
+            {unsavedWarning != null ? t('loadSceneDialog.loadAnywayButton') : t('loadSceneDialog.loadButton')}
           </button>
           {busy && <span className="spinner" />}
         </>
@@ -130,20 +132,20 @@ export function LoadSceneDialog({
 
       {unsavedWarning != null && <div className="warning-banner">{unsavedWarning}</div>}
 
-      {entries == null && <p className="hint">Reading folder…</p>}
+      {entries == null && <p className="hint">{t('loadSceneDialog.readingFolder')}</p>}
       {listError != null && <div className="error-banner">{listError}</div>}
       {/* Nothing loadable — whether the folder is empty of `*.json` or holds only
           files that failed to parse — is the same dead end, and says so (§14.8).
           The invalid rows are still listed below, with their reasons. */}
       {entries != null && listError == null && loadableNames.length === 0 && (
-        <p className="hint">No scene file in this folder can be loaded. Choose another.</p>
+        <p className="hint">{t('loadSceneDialog.noneLoadable')}</p>
       )}
 
       {entries != null && entries.length > 0 && (
         <ul
           className="scene-file-list"
           role="listbox"
-          aria-label="Scene files"
+          aria-label={t('loadSceneDialog.listAriaLabel')}
           tabIndex={0}
           onKeyDown={onListKeyDown}
         >
@@ -178,8 +180,9 @@ function SceneFileRow({
   onSelect(): void;
   onCommit(): void;
 }) {
+  const { t } = useTranslation('scene');
   const invalid = entry.error != null;
-  const summary = entry.error ?? entry.summary ?? 'not read — will validate on load';
+  const summary = entry.error ?? entry.summary ?? t('loadSceneDialog.notReadYet');
   return (
     <li
       className={`scene-file-row${selected ? ' selected' : ''}${invalid ? ' invalid' : ''}`}
@@ -194,7 +197,7 @@ function SceneFileRow({
       <span className="scene-file-name" title={entry.name}>
         <span className="scene-file-label">{entry.name}</span>
         {/* Which file a plain Save would write to — the one the scene came from. */}
-        {isCurrent && <span className="badge">current</span>}
+        {isCurrent && <span className="badge">{t('loadSceneDialog.currentBadge')}</span>}
       </span>
       {/* A file past the parse cap has neither summary nor error: it validates on
           selection instead (§14.4). A schema error can be long, so it hovers too. */}
