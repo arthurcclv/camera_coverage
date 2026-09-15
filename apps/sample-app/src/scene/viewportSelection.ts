@@ -31,7 +31,15 @@ export type Selection = {
     | 'constraintGroup'
     | 'constraint'
     /** A 3D Gaussian Splat capture (`gaussian_splats.md` §6.1). */
-    | 'splat';
+    | 'splat'
+    /**
+     * One geometry object — room, box or mesh (`geometry_assets.md` §6.1).
+     * Selected **from its hierarchy row only**: a viewport click on geometry
+     * still counts as a miss and deselects, because the room's floor and walls
+     * fill most of the viewport and making them pickable would leave the
+     * deselect gesture almost no empty space to land on (§6.6).
+     */
+    | 'geometry';
   id: string;
 } | null;
 

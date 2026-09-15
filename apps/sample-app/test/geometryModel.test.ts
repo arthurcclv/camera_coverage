@@ -2,12 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {
+  basename,
   boxTris,
+  centerOfTris,
   computeAabb,
   computeWorkspaceBounds,
+  geometryLabel,
+  geometryLabels,
+  identityTransform,
+  isMeshFileName,
   mergeTris,
+  pivotOffset,
   roomTris,
   transformTriMesh,
+  type GeometryObject,
+  type TriMesh,
 } from '../src/scene/geometryModel.ts';
 import { ROOM_HALF_X, ROOM_HALF_Z, ROOM_HEIGHT, WALL_THICKNESS } from '../src/scene/buildRoom.ts';
 
@@ -103,6 +112,88 @@ test('computeWorkspaceBounds reproduces the default room+obstacles workspace AAB
   assertVec3Close(worldMax, [10.8, 6.5, 10.8]);
 });
 
-test('computeAabb throws on an empty mesh', () => {
-  assert.throws(() => computeAabb({ positions: new Float32Array(0), indices: new Uint32Array(0) }));
+test('computeAabb reports no bounds for an empty mesh (`geometry_assets.md` §5.3)', () => {
+  // Reachable now that geometry is authored in the app: deleting or unticking
+  // the last object leaves nothing to bound. A legal scene — cameras aimed at a
+  // capture need no triangles — so it reports null rather than throwing, and the
+  // Run gate is what refuses to measure against nothing.
+  assert.equal(computeAabb({ positions: new Float32Array(0), indices: new Uint32Array(0) }), null);
+});
+
+// --- labels (`geometry_assets.md` §2.4) ---------------------------------------
+
+function obj(kind: 'room' | 'box' | 'mesh', id: string, name = '', src = 'assets/rack.obj'): GeometryObject {
+  const base = { id, name, enabled: true, ...identityTransform() };
+  if (kind === 'room') return { ...base, kind, halfX: 1, halfZ: 1, height: 1, thickness: 0.1 };
+  if (kind === 'box') return { ...base, kind, min: [0, 0, 0], max: [1, 1, 1] };
+  return { ...base, kind, src };
+}
+
+test('a mesh row falls back to its file basename, never an ordinal (§2.4)', () => {
+  // The splat rule, for the splat reason: an asset-backed object's identity is
+  // its file, so two unnamed rows on two files stay distinguishable.
+  assert.equal(geometryLabel(obj('mesh', 'geom-1', '', 'assets/site/rack.obj'), 1), 'rack.obj');
+  assert.equal(geometryLabel(obj('mesh', 'geom-2', '  ', 'assets/shelf.glb'), 2), 'shelf.glb');
+});
+
+test('a named object shows its own name, whatever its kind (§2.4)', () => {
+  assert.equal(geometryLabel(obj('mesh', 'geom-1', ' Rack row A '), 1), 'Rack row A');
+  assert.equal(geometryLabel(obj('box', 'geom-2', 'Pallet'), 2), 'Pallet');
+});
+
+test('a primitive falls back to an ordinal within its own kind (§2.4)', () => {
+  // `Geometry 4` would say nothing about what the row is; the kinds are visually
+  // distinct, so they number separately.
+  const labels = geometryLabels([
+    obj('room', 'geom-1'),
+    obj('box', 'geom-2'),
+    obj('box', 'geom-3'),
+    obj('mesh', 'geom-4', '', 'assets/rack.obj'),
+    obj('box', 'geom-5'),
+  ]);
+  assert.deepEqual(labels, ['Room 1', 'Box 1', 'Box 2', 'rack.obj', 'Box 3']);
+});
+
+test('basename handles nested and bare srcs alike', () => {
+  assert.equal(basename('assets/site/level-1/rack.obj'), 'rack.obj');
+  assert.equal(basename('rack.obj'), 'rack.obj');
+});
+
+test('isMeshFileName accepts the four formats, case-insensitively, and nothing else (§3.1)', () => {
+  for (const name of ['a.glb', 'a.gltf', 'a.ply', 'a.obj', 'A.GLB', 'a.OBJ']) {
+    assert.equal(isMeshFileName(name), true, name);
+  }
+  // A dependency is reached through the file that references it, never picked
+  // directly (§3.1) — and a bare extension is a file called ".obj", not a model.
+  for (const name of ['a.mtl', 'a.bin', 'a.png', 'a.spz', 'scene.json', '.obj']) {
+    assert.equal(isMeshFileName(name), false, name);
+  }
+});
+
+test('transformTriMesh composes a non-uniform scale with a rotation (§7)', () => {
+  // Geometry is the one entity that can carry a non-uniform scale, so the order
+  // (scale in the object's own frame, then rotate) has to be pinned.
+  const tri: TriMesh = { positions: new Float32Array([1, 0, 0]), indices: new Uint32Array([0]) };
+  // 90° about Y maps +X to −Z.
+  const q: [number, number, number, number] = [0, Math.SQRT1_2, 0, Math.SQRT1_2];
+  const out = transformTriMesh(tri, [0, 0, 0], q, [3, 1, 1]);
+  assert.ok(Math.abs(out.positions[0]) < 1e-6);
+  assert.ok(Math.abs(out.positions[1]) < 1e-6);
+  assert.ok(Math.abs(out.positions[2] + 3) < 1e-6);
+});
+
+test('centerOfTris is the AABB midpoint, and the origin for nothing (§7)', () => {
+  assert.deepEqual(centerOfTris([boxTris([0, 0, 0], [2, 4, 6])]), [1, 2, 3]);
+  assert.deepEqual(centerOfTris([]), [0, 0, 0]);
+});
+
+test('pivotOffset carries the centre through the object scale and rotation (§7)', () => {
+  // Identity: the offset is the centre itself.
+  assert.deepEqual(pivotOffset([1, 2, 3], [0, 0, 0, 1], [1, 1, 1]), [1, 2, 3]);
+  // Scale applies in the object's own frame, before the rotation.
+  assert.deepEqual(pivotOffset([1, 2, 3], [0, 0, 0, 1], [2, 1, 0.5]), [2, 2, 1.5]);
+  // 90° about Y maps +X to −Z.
+  const rotated = pivotOffset([1, 0, 0], [0, Math.SQRT1_2, 0, Math.SQRT1_2], [1, 1, 1]);
+  assert.ok(Math.abs(rotated[0]) < 1e-6);
+  assert.ok(Math.abs(rotated[2] + 1) < 1e-6);
 });

@@ -41,4 +41,11 @@ export type TransformChange =
    * edited in its panel, because the per-axis scale gizmo would shear the
    * capture's Gaussians (§2.1).
    */
-  | { kind: 'splat'; id: string; position: Vec3; rotation: Quat };
+  | { kind: 'splat'; id: string; position: Vec3; rotation: Quat }
+  /**
+   * One geometry object moved, rotated or scaled by its gizmo
+   * (`geometry_assets.md` §7). **Scale is per-axis** and carried here: a triangle
+   * mesh takes a non-uniform scale correctly, so geometry — unlike a splat — is
+   * a scale-capable selection.
+   */
+  | { kind: 'geometry'; id: string; position: Vec3; rotation: Quat; scale: Vec3 };

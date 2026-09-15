@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { duplicateConstraint, duplicateConstraintGroup, duplicateSplat } from '../src/scene/entityDuplication.ts';
+import type { GeometryObject } from '../src/scene/geometryModel.ts';
+import { duplicateConstraint, duplicateConstraintGroup, duplicateGeometry, duplicateSplat } from '../src/scene/entityDuplication.ts';
 import type { CameraConstraint, ConstraintGroup } from '../src/placement/region.ts';
 import type { Quat, Vec3 } from '@linkervision/camera-coverage-sdk';
 
@@ -239,4 +240,20 @@ test('duplicateSplat deep-copies the transform arrays and rejects an unknown id'
   assert.notEqual(copy.position, original.position);
   assert.notEqual(copy.rotation, original.rotation);
   assert.equal(duplicateSplat([original], 'splat-9'), null);
+});
+
+test('duplicateGeometry copies every property with a fresh id, sharing nothing (`geometry_assets.md` §6.4)', () => {
+  const objects: GeometryObject[] = [
+    { kind: 'mesh', id: 'geom-1', name: '', enabled: false, src: 'assets/rack.obj', position: [1, 2, 3], rotation: [0, 0, 0, 1], scale: [2, 1, 1] },
+  ];
+  const copy = duplicateGeometry(objects, 'geom-1')!;
+  assert.equal(copy.id, 'geom-2');
+  assert.equal(copy.kind === 'mesh' && copy.src, 'assets/rack.obj');
+  // The copy inherits the original's enabled state, like a camera's.
+  assert.equal(copy.enabled, false);
+  // Coincides with the original — no offset, like every other kind.
+  assert.deepEqual(copy.position, [1, 2, 3]);
+  assert.notEqual(copy.position, objects[0].position);
+  assert.notEqual(copy.scale, objects[0].scale);
+  assert.equal(duplicateGeometry(objects, 'nope'), null);
 });

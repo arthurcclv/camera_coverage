@@ -6,6 +6,64 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Geometry is an editable entity: one array, a `mesh` kind, a lazy build, and a bumped format
+
+Behavior in [`../specs/geometry_assets.md`](../specs/geometry_assets.md); the
+consistency edits it required are listed in its §12.
+
+Geometry used to be the one thing in the scene with no hierarchy row: `spec.md` §14.9
+said outright that it "is not selectable/editable", and the list was authored by
+hand-editing JSON. Making it editable forced a run of decisions worth recording,
+several of them against alternatives that looked cheaper:
+
+- **One `geometry` array, not a second editable one beside it.** A splat earned its own
+  array because it is inert; a mesh breaks neither invariant that bought the splat its
+  separation (it contributes triangles, and §14.9's editability rule is what this
+  feature deletes). Two arrays whose members behave identically would be a split by
+  provenance, which is the kind that rots.
+- **One `mesh` kind with an extension-keyed loader, not a kind per format.**
+  `'gltf' | 'ply' | 'obj'` would be three branches doing the same thing, and a file's
+  `kind` could then contradict its own `src` extension — a state nothing can resolve.
+  Legacy `kind: "gltf"` reads as `mesh`, so there is one name for asset-backed geometry
+  at any moment.
+- **`formatVersion` 4, and this bump is not additive.** Every earlier addition (`name`,
+  `clipRange`, camera `enabled`, section footprints, `splats`) could be *ignored* by an
+  older reader, which is why splats deliberately stayed at 3. `kind: "mesh"` cannot be
+  ignored — a v3 reader rejects an unknown geometry kind — so a file carrying one would
+  abort on an older build with a schema error instead of a version error. The bump is
+  the honest signal. v1–v3 files back-fill ids by array position.
+- **The row checkbox means membership, not visibility.** Unticking a geometry object
+  removes its triangles *and* its bounds and marks the result stale — the only checkbox
+  in the app that changes a number. It is how "what does coverage look like without this
+  rack?" is asked in an app with no undo. The eye-menu **Geometry** row still means
+  drawing only; the two words are kept apart by where they live (viewport vs hierarchy),
+  which is already true for cameras.
+- **The collision mesh and the engine are lazy; the render group is not.**
+  `sceneMesh` is a memoized getter and `init`/`loadScene` wait for the next run, because
+  re-voxelizing per gizmo frame is unusable on a site model. The engine's eager load is
+  keyed on a swap epoch (mount/import/reset), not on the build.
+- **A transform-only edit reuses the scene graph.** This one was found by shipping the
+  obvious version first: `objectChange` fires per frame, so rebuilding there disposed
+  the very node the gizmo was dragging and the drag died on its first pixel.
+  `rebuildWithTransforms` re-bakes the cached per-object local triangles and returns a
+  build with a **new identity but the same group and nodes** — new identity so the next
+  run still re-inits, same graph so the drag survives.
+- **Geometry is not viewport-pickable.** Selecting it by clicking would be the
+  discoverable choice, but the room's floor and walls fill most of the viewport, so
+  "click empty space to deselect" would have almost no empty space left. Row-only
+  selection keeps a gesture that works for every other kind.
+- **A disabled object stays hidden even while selected**, taking the splat exception
+  rather than the selected-disabled tier: it is genuinely not in the scene, and dimming
+  it would mean writing `opacity` onto materials that a future parse cache shares
+  between every row on one asset. Its gizmo still attaches, so it can be moved and
+  re-ticked.
+- **An empty geometry list is legal and blocks the run.** A scene of cameras aimed at a
+  splat capture needs no triangles; what it cannot do is produce a coverage number.
+  `computeAabb` reports null instead of throwing, `runBlocker` says why, and the standing
+  result is cleared rather than left describing a scene that is gone.
+
+---
+
 ## i18n: react-i18next over hand-rolled, a global top bar over a viewport-toolbar switcher
 
 Behavior in [`../specs/spec.md`](../specs/spec.md) §18.

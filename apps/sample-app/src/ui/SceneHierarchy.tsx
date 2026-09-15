@@ -31,6 +31,7 @@ import type { Probe } from '../scene/probeVisibility.ts';
 import { averageDisplayValue, type Section, type SectionCellGrid } from '../scene/sectionHeatmap.ts';
 import type { SamplingVolume, Zone, ZoneSummary } from '../scene/samplingVolumes.ts';
 import { splatBadge, type SplatLoadState, type SplatObject } from '../scene/splats.ts';
+import type { GeometryObject } from '../scene/geometryModel.ts';
 import type { Selection } from '../scene/viewportSelection.ts';
 import {
   primitiveMeasure,
@@ -75,6 +76,13 @@ export interface SceneHierarchyProps extends EntityMenuHandlers, GroupMenuHandle
   constraints: CameraConstraint[];
   /** 3D Gaussian Splat captures (`gaussian_splats.md` §2.2). */
   splats: SplatObject[];
+  /**
+   * The scene's geometry — room, boxes and imported meshes alike
+   * (`geometry_assets.md` §2.3). Every object gets a row: the tree is the
+   * authoritative list of what is in the scene, and geometry is what every
+   * coverage number is measured against.
+   */
+  geometry: GeometryObject[];
   /**
    * Per-splat load state (`gaussian_splats.md` §6.2) — derived side state held
    * beside the scene, like the retained per-run probe/section data, never part
@@ -123,7 +131,7 @@ export interface SceneHierarchyProps extends EntityMenuHandlers, GroupMenuHandle
 }
 
 /** Kinds whose row carries an enabled checkbox (spec §5.5, `camera_placement.md` §7). */
-type ToggleableKind = 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat';
+type ToggleableKind = 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat' | 'geometry';
 
 /**
  * What a right-click opened the context menu on (spec §5.5): an **entity row**,
@@ -193,6 +201,8 @@ function reorderableTarget(node: SceneNode): { kind: ReorderableKind; entityId: 
       return { kind: 'constraint', entityId: node.constraintId };
     case 'splat':
       return { kind: 'splat', entityId: node.splatId };
+    case 'geometry':
+      return { kind: 'geometry', entityId: node.geometryId };
     default:
       return null;
   }
@@ -440,10 +450,10 @@ function placeOutward(
 export function SceneHierarchy(props: SceneHierarchyProps) {
   const { t } = useTranslation(['scene', 'common']);
   const { cameras, probes, sections, zones, volumes, selection, collapsedIds } = props;
-  const { constraintGroups, constraints, splats } = props;
+  const { constraintGroups, constraints, splats, geometry } = props;
   const nodes = useMemo(
-    () => buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats),
-    [cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats],
+    () => buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats, geometry),
+    [cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats, geometry],
   );
   const rows = useMemo(() => flattenVisible(nodes, collapsedIds), [nodes, collapsedIds]);
   const rateById = useMemo(
@@ -456,6 +466,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
     [props.constraints],
   );
   const splatById = useMemo(() => new Map(splats.map((s) => [s.id, s])), [splats]);
+  const geometryById = useMemo(() => new Map(geometry.map((o) => [o.id, o])), [geometry]);
 
   /**
    * Which entities are ticked, per kind (spec §5.4, §7.3) — one exhaustive
@@ -472,8 +483,11 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
       constraintGroup: (id) => constraintGroups.find((g) => g.id === id)?.enabled ?? true,
       constraint: (id) => constraintById.get(id)?.enabled ?? true,
       splat: (id) => splatById.get(id)?.enabled ?? true,
+      // A geometry object's checkbox is membership, not visibility
+      // (`geometry_assets.md` §5.1) — the row dims the same way regardless.
+      geometry: (id) => geometryById.get(id)?.enabled ?? true,
     }),
-    [cameras, sections, zones, constraintGroups, constraintById, splatById],
+    [cameras, sections, zones, constraintGroups, constraintById, splatById, geometryById],
   );
 
   const selectedNodeId = nodeIdForSelection(selection);
@@ -681,6 +695,7 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             sections={sections}
             volumeById={volumeById}
             constraintById={constraintById}
+            geometryById={geometryById}
             splatLoadStates={props.splatLoadStates}
             onSelect={props.onSelect}
             onToggleEnabled={props.onToggleEnabled}
@@ -773,6 +788,7 @@ interface TreeRowProps {
   volumeById: Map<string, SamplingVolume>;
   constraintById: Map<string, CameraConstraint>;
   splatLoadStates: ReadonlyMap<string, SplatLoadState>;
+  geometryById: Map<string, GeometryObject>;
   onSelect(selection: Selection): void;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
   onToggleCollapse(nodeId: string): void;
@@ -906,6 +922,14 @@ function TreeRow(props: TreeRowProps) {
           onToggleEnabled={props.onToggleEnabled}
         />
       )}
+      {node.kind === 'geometry' && (
+        <GeometryRowContent
+          node={node}
+          object={props.geometryById.get(node.geometryId)}
+          enabled={enabled}
+          onToggleEnabled={props.onToggleEnabled}
+        />
+      )}
     </li>
   );
 }
@@ -922,6 +946,7 @@ const GROUP_LABEL_KEY: Record<GroupKind, string> = {
   sections: 'sceneHierarchy.group.sections',
   zones: 'sceneHierarchy.group.zones',
   constraints: 'sceneHierarchy.group.constraints',
+  geometry: 'sceneHierarchy.group.geometry',
   splats: 'sceneHierarchy.group.splats',
 };
 
@@ -1190,6 +1215,46 @@ function SplatRowContent({
       <span className="dot splat-dot" />
       <span className="label">{node.label}</span>
       {badge && <span className={failed ? 'rate splat-error' : 'rate'}>{badge}</span>}
+    </>
+  );
+}
+
+/**
+ * A geometry row (`geometry_assets.md` §6.2): its enabled checkbox and the
+ * object's kind as a badge.
+ *
+ * The checkbox is **not** a draw toggle — unticking takes the object out of the
+ * scene, triangles and bounds included (§5.1) — which is why its tooltip says
+ * "exclude from the scene" rather than "hide". Mesh rows gain a load-state badge
+ * in stage 2 (§4.2); today the badge names the kind, which is what distinguishes
+ * an imported rack from the room it stands in.
+ */
+function GeometryRowContent({
+  node,
+  object,
+  enabled,
+  onToggleEnabled,
+}: {
+  node: Extract<SceneNode, { kind: 'geometry' }>;
+  object: GeometryObject | undefined;
+  enabled: boolean;
+  onToggleEnabled(kind: ToggleableKind, id: string): void;
+}) {
+  const { t } = useTranslation('scene');
+  return (
+    <>
+      <input
+        type="checkbox"
+        className="tree-row-toggle"
+        checked={enabled}
+        title={enabled ? t('sceneHierarchy.geometry.exclude') : t('sceneHierarchy.geometry.include')}
+        aria-label={enabled ? t('sceneHierarchy.geometry.exclude') : t('sceneHierarchy.geometry.include')}
+        onClick={(e) => e.stopPropagation()}
+        onChange={() => onToggleEnabled('geometry', node.geometryId)}
+      />
+      <span className="dot geometry-dot" />
+      <span className="label">{node.label}</span>
+      {object && <span className="rate">{t(`sceneHierarchy.geometry.kind.${object.kind}`)}</span>}
     </>
   );
 }

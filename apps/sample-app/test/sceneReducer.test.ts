@@ -12,6 +12,7 @@ import type { Section } from '../src/scene/sectionHeatmap.ts';
 import type { SamplingVolume, Zone } from '../src/scene/samplingVolumes.ts';
 import type { SplatObject } from '../src/scene/splats.ts';
 import type { Scene } from '../src/scene/sceneModel.ts';
+import { identityTransform, type GeometryObject } from '../src/scene/geometryModel.ts';
 
 const cam = (id: string): SceneCamera => ({ id, name: '', enabled: true, position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60, aspect: 16 / 9, near: 0.1, far: 30 });
 const probe = (id: string): Probe => ({ id, name: '', position: [0, 0, 0] });
@@ -20,6 +21,9 @@ const volume = (id: string, zoneId: string): SamplingVolume => ({ id, zoneId, po
 const splat = (id: string, src = 'assets/site.spz', overrides: Partial<SplatObject> = {}): SplatObject => ({
   id, name: '', src, enabled: true, position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1, ...overrides,
 });
+const geom = (id: string, overrides: Partial<GeometryObject> = {}): GeometryObject => ({
+  kind: 'box', id, name: '', enabled: true, min: [0, 0, 0], max: [1, 1, 1], ...identityTransform(), ...overrides,
+} as GeometryObject);
 const section = (id: string): Section => ({
   id, orientation: 'horizontal', min: 0, max: 2, minA: 0, maxA: 4, minB: 0, maxB: 6,
   aggregation: 'mean', enabled: true, clipRange: 1, name: '',
@@ -866,4 +870,98 @@ test('a replaced scene takes its splats and drops the old ones (spec §14.4)', (
     },
   });
   assert.deepEqual(s.splats.map((x) => x.id), ['splat-7']);
+});
+
+// --- geometry (`geometry_assets.md` §1.1, §6) --------------------------------
+//
+// The mirror image of the splat suite below: a splat action must mark *neither*
+// flag, and a geometry action must mark `stale` — geometry is what every
+// coverage number is measured against.
+
+test('adding geometry selects it and marks the result stale (§3.2)', () => {
+  const s = run(base({ geometry: [geom('geom-1')] }), { type: 'addGeometry', src: 'assets/rack.obj' });
+  assert.equal(s.geometry.length, 2);
+  const added = s.geometry[1];
+  assert.equal(added.kind === 'mesh' && added.src, 'assets/rack.obj');
+  assert.equal(added.id, 'geom-2');
+  assert.equal(added.enabled, true);
+  assert.deepEqual(added.position, [0, 0, 0]);
+  assert.deepEqual(s.selection, { kind: 'geometry', id: 'geom-2' });
+  assert.equal(s.stale, true);
+});
+
+test('deleting geometry clears a matching selection and marks stale (§6.3)', () => {
+  const start = base({ geometry: [geom('geom-1'), geom('geom-2')], selection: { kind: 'geometry', id: 'geom-2' } });
+  const s = run(start, { type: 'deleteEntity', kind: 'geometry', id: 'geom-2' });
+  assert.deepEqual(s.geometry.map((o) => o.id), ['geom-1']);
+  assert.equal(s.selection, null);
+  assert.equal(s.stale, true);
+});
+
+test('deleting the last geometry object is allowed — the empty scene is legal (§5.3)', () => {
+  // The Run gate refuses the measurement; the reducer does not refuse the edit.
+  const s = run(base({ geometry: [geom('geom-1')] }), { type: 'deleteEntity', kind: 'geometry', id: 'geom-1' });
+  assert.deepEqual(s.geometry, []);
+});
+
+test('duplicating geometry copies it verbatim with a fresh id and no offset (§6.4)', () => {
+  const original = geom('geom-1', { name: 'Rack', position: [2, 0, 3], scale: [2, 1, 1] });
+  const s = run(base({ geometry: [original] }), { type: 'duplicateEntity', kind: 'geometry', id: 'geom-1' });
+  const copy = s.geometry[1];
+  assert.equal(copy.id, 'geom-2');
+  assert.equal(copy.name, 'Rack');
+  assert.deepEqual(copy.position, [2, 0, 3]);
+  assert.deepEqual(copy.scale, [2, 1, 1]);
+  // Copied out, not shared: dragging one row's gizmo must not move the other's.
+  assert.notEqual(copy.position, original.position);
+  assert.deepEqual(s.selection, { kind: 'geometry', id: 'geom-2' });
+  assert.equal(s.stale, true);
+});
+
+test('a geometry transform marks stale and writes position, rotation and per-axis scale (§7)', () => {
+  const s = run(base({ geometry: [geom('geom-1')] }), {
+    type: 'transformApplied',
+    change: { kind: 'geometry', id: 'geom-1', position: [1, 2, 3], rotation: [0, 0, 0, 1], scale: [1, 2, 3] },
+  });
+  assert.deepEqual(s.geometry[0].position, [1, 2, 3]);
+  assert.deepEqual(s.geometry[0].scale, [1, 2, 3]);
+  assert.equal(s.stale, true);
+});
+
+test('unticking a geometry object marks stale — the one checkbox that changes a number (§5.1)', () => {
+  const s = run(base({ geometry: [geom('geom-1')] }), { type: 'toggleEnabled', kind: 'geometry', id: 'geom-1' });
+  assert.equal(s.geometry[0].enabled, false);
+  assert.equal(s.stale, true);
+});
+
+test('renaming or reordering geometry marks nothing — both are presentation (§6.5)', () => {
+  const start = base({ geometry: [geom('geom-1'), geom('geom-2')] });
+  const renamed = run(start, { type: 'renameEntity', kind: 'geometry', id: 'geom-1', name: 'Rack row A' });
+  assert.equal(renamed.geometry[0].name, 'Rack row A');
+  assert.equal(renamed.stale, false);
+
+  const reordered = run(start, { type: 'reorderEntity', kind: 'geometry', id: 'geom-2', beforeId: 'geom-1' });
+  assert.deepEqual(reordered.geometry.map((o) => o.id), ['geom-2', 'geom-1']);
+  assert.equal(reordered.stale, false);
+  assert.equal(reordered.samplingDirty, false);
+});
+
+test('no geometry action dirties the sampled region set (§1.1)', () => {
+  // Geometry changes what is *visible*, never which voxels are counted — that is
+  // the zone tool's job, and conflating them would force a needless re-setSampling.
+  const s = run(
+    base({ geometry: [geom('geom-1')] }),
+    { type: 'addGeometry', src: 'assets/rack.obj' },
+    { type: 'toggleEnabled', kind: 'geometry', id: 'geom-1' },
+    { type: 'deleteEntity', kind: 'geometry', id: 'geom-1' },
+  );
+  assert.equal(s.samplingDirty, false);
+});
+
+test('a geometry edit before the first run does not latch stale', () => {
+  // `stale` only means "the displayed result is out of date", and there is none.
+  const s = run(base({ geometry: [geom('geom-1')], hasRunOnce: false }), {
+    type: 'toggleEnabled', kind: 'geometry', id: 'geom-1',
+  });
+  assert.equal(s.stale, false);
 });

@@ -11,12 +11,15 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {
   buildStaticGeometrySync,
+  positionFromNode,
+  rebuildWithTransforms,
   clipBandPlanes,
   forceDoubleSided,
   setGeometryClippingPlanes,
   swapGeometry,
 } from '../src/scene/sceneGeometryBuild.ts';
 import { defaultGeometry } from '../src/scene/buildRoom.ts';
+import { identityTransform, type GeometryObject } from '../src/scene/geometryModel.ts';
 
 /** Every mesh material's `side` under a root, flattened across material arrays. */
 function allSides(root: THREE.Object3D): number[] {
@@ -192,4 +195,139 @@ test('a swapped-in build does not inherit the outgoing build\'s clip', () => {
   const planes = clipBandPlanes(BAND);
   setGeometryClippingPlanes(second, planes);
   for (const p of allClippingPlanes(second.group)) assert.deepEqual(p, planes);
+});
+
+// --- editable geometry (`geometry_assets.md` §4.1, §4.3, §5.1, §5.3) ---------
+
+function box(id: string, enabled = true, position: [number, number, number] = [0, 0, 0]): GeometryObject {
+  return { kind: 'box', id, name: '', enabled, min: [0, 0, 0], max: [1, 1, 1], ...identityTransform(), position };
+}
+
+test('a disabled object contributes no triangles and no bounds, and is not drawn (§5.1)', () => {
+  // The checkbox is membership, not visibility: an unticked rack must stop
+  // blocking cameras, which is the whole point of asking "what if it weren't
+  // here?".
+  const build = buildStaticGeometrySync([box('geom-1'), box('geom-2', false, [50, 0, 0])]);
+  // The disabled box sits at x=50; neither the bounds nor the mesh may reach it.
+  assert.ok(build.worldMax[0] < 10);
+  const xs = Array.from(build.sceneMesh.positions).filter((_, i) => i % 3 === 0);
+  assert.ok(Math.max(...xs) < 10);
+  // It keeps an invisible node, so its gizmo still attaches and it can be moved
+  // into place before being switched back on.
+  const node = build.objectNodes.get('geom-2');
+  assert.ok(node);
+  assert.equal(node.visible, false);
+  assert.equal(build.objectNodes.get('geom-1')!.visible, true);
+});
+
+test('each object gets one render node, pivoted on its geometric centre (§4.1, §7)', () => {
+  // The node is what TransformControls attaches to, so the transform rides on it
+  // rather than being baked into the vertices — and it sits at the object's
+  // **centre**, not its frame origin, or the gizmo for a default box (local
+  // min/max at position [0,0,0]) would appear at the world origin.
+  const build = buildStaticGeometrySync([box('geom-1', true, [2, 0, 3])]);
+  const node = build.objectNodes.get('geom-1');
+  assert.ok(node);
+  // The unit box spans 0..1 on each axis, so its centre is +0.5 from the origin.
+  assert.deepEqual([node.position.x, node.position.y, node.position.z], [2.5, 0.5, 3.5]);
+  // …and the object's own position comes back out of it unchanged.
+  assert.deepEqual(positionFromNode(node), [2, 0, 3]);
+  assert.equal(node.parent, build.group);
+});
+
+test('the pivot offset round-trips under rotation and non-uniform scale (§7)', () => {
+  // The two directions share `pivotOffset`, so a rotated, squashed object still
+  // reports the position the panel shows.
+  const rotated: GeometryObject = {
+    ...box('geom-1', true, [1, 2, 3]),
+    rotation: [0, Math.SQRT1_2, 0, Math.SQRT1_2],
+    scale: [3, 1, 2],
+  };
+  const build = buildStaticGeometrySync([rotated]);
+  const node = build.objectNodes.get('geom-1')!;
+  const back = positionFromNode(node);
+  for (let i = 0; i < 3; i++) assert.ok(Math.abs(back[i] - rotated.position[i]) < 1e-6, `axis ${i}`);
+});
+
+test('the collision mesh still bakes the transform into world space (spec §14.6)', () => {
+  const build = buildStaticGeometrySync([box('geom-1', true, [10, 0, 0])]);
+  const xs = Array.from(build.sceneMesh.positions).filter((_, i) => i % 3 === 0);
+  assert.ok(Math.min(...xs) >= 10);
+});
+
+test('the merged mesh is computed on first read and memoized (§4.3)', () => {
+  // A geometry edit rebuilds the render group immediately but must not re-merge
+  // every triangle in the scene — that wait is what keeps a gizmo drag smooth on
+  // a site model.
+  const build = buildStaticGeometrySync([box('geom-1')]);
+  assert.equal(build.sceneMesh, build.sceneMesh);
+});
+
+test('an empty geometry list builds an empty, finite workspace (§5.3)', () => {
+  // Legal: a layout of cameras aimed at a splat capture needs no triangles. The
+  // fallback box exists only so the viewport has something to frame; `runBlocker`
+  // is what refuses to measure against it.
+  const build = buildStaticGeometrySync([]);
+  assert.equal(build.isEmpty, true);
+  assert.equal(build.sceneMesh.positions.length, 0);
+  assert.equal(build.worldMin.every(Number.isFinite), true);
+  assert.equal(build.worldMax.every(Number.isFinite), true);
+  const disabledOnly = buildStaticGeometrySync([box('geom-1', false)]);
+  assert.equal(disabledOnly.isEmpty, true);
+});
+
+test('the default scene is not empty, and every object has a node', () => {
+  const geometry = defaultGeometry();
+  const build = buildStaticGeometrySync(geometry);
+  assert.equal(build.isEmpty, false);
+  assert.deepEqual([...build.objectNodes.keys()], geometry.map((o) => o.id));
+});
+
+test('a transform-only edit reuses the scene graph and re-bakes the collision mesh (§4.3)', () => {
+  // `objectChange` fires per frame during a gizmo drag, so a rebuild that
+  // replaced the nodes would dispose the very node under the gizmo and the drag
+  // would die on its first pixel. The build identity is still new, so the engine
+  // re-inits at the next run.
+  const before = buildStaticGeometrySync([box('geom-1'), box('geom-2')]);
+  const node = before.objectNodes.get('geom-1')!;
+  const moved = rebuildWithTransforms(before, [box('geom-1', true, [10, 0, 0]), box('geom-2')])!;
+
+  assert.ok(moved);
+  assert.notEqual(moved, before); // new identity → the next run re-inits
+  assert.equal(moved.group, before.group); // same scene graph → the drag survives
+  assert.equal(moved.objectNodes.get('geom-1'), node);
+  assert.deepEqual(positionFromNode(node), [10, 0, 0]);
+  // The collision mesh follows the transform, not the node.
+  const xs = Array.from(moved.sceneMesh.positions).filter((_, i) => i % 3 === 0);
+  assert.ok(Math.max(...xs) >= 10);
+  assert.ok(moved.worldMax[0] >= 10);
+});
+
+test('swapGeometry leaves a reused scene graph alone (§4.3)', () => {
+  const scene = new THREE.Group();
+  const before = buildStaticGeometrySync([box('geom-1')]);
+  swapGeometry(scene, null, before);
+  const moved = rebuildWithTransforms(before, [box('geom-1', true, [1, 0, 0])])!;
+  swapGeometry(scene, before, moved);
+  // Still attached, still alive: nothing was detached and nothing disposed.
+  assert.equal(scene.children.includes(moved.group), true);
+  assert.equal(scene.children.length, 1);
+});
+
+test('a structural change refuses the reuse path and asks for a full rebuild (§4.3)', () => {
+  const before = buildStaticGeometrySync([box('geom-1')]);
+  assert.equal(rebuildWithTransforms(before, []), null); // deleted
+  assert.equal(rebuildWithTransforms(before, [box('geom-1'), box('geom-2')]), null); // added
+  assert.equal(rebuildWithTransforms(before, [box('geom-2')]), null); // different object
+});
+
+test('toggling the checkbox takes the full rebuild path, not the reuse one (§5.1)', () => {
+  // Unticking changes what is in the scene, and re-ticking a mesh has to re-read
+  // an asset the disabled build never loaded — so it is structural, not a
+  // transform.
+  const before = buildStaticGeometrySync([box('geom-1')]);
+  assert.equal(rebuildWithTransforms(before, [box('geom-1', false)]), null);
+  const off = buildStaticGeometrySync([box('geom-1', false)]);
+  assert.equal(off.isEmpty, true);
+  assert.equal(off.objectNodes.get('geom-1')!.visible, false);
 });

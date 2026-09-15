@@ -16,7 +16,6 @@
   "languageDialogTitle": "語言",
   "languageNameEn": "English",
   "languageNameZhTW": "繁體中文",
-
   "transformMove": "移動",
   "transformRotate": "旋轉",
   "transformScale": "縮放",
@@ -24,10 +23,8 @@
   "exportingCameraRays": "正在計算攝影機視線…",
   "selectedViewDisabledReason": "請選取一台攝影機以使用此檢視",
   "addSplatBlocker": "請先載入或儲存場景。",
-
   "unionLabelZones": "所有已啟用的區域",
   "unionLabelWorkspace": "整個工作區",
-
   "view": "視角",
   "resetView": "重設視角 — 框住場景",
   "resetViewLabel": "重設視角",
@@ -37,7 +34,6 @@
   "viewFront": "前視圖",
   "viewRight": "右視圖",
   "viewSelected": "選取攝影機",
-
   "layerVisibility": "圖層可見性",
   "layerCoverage": "覆蓋範圍",
   "layerSections": "截面",
@@ -47,22 +43,18 @@
   "layerConstraints": "位置限制",
   "layerSplats": "潑濺",
   "layerGeometry": "幾何體",
-
   "spaceTooltipLocal": "本機座標 — 點選以切換為全域",
   "spaceTooltipGlobal": "全域座標 — 點選以切換為本機",
-
   "placeTooltipDisabled": "貼合表面 — 請選取攝影機、探測點或折線頂點",
   "placeTooltipEntity": "貼合表面",
   "placeTooltipEntityArmed": "貼合表面 — 點選幾何體",
   "placeTooltipVertex": "將頂點貼合表面",
   "placeTooltipVertexArmed": "將頂點貼合表面 — 點選幾何體",
-
   "running": "執行中…",
   "initializing": "初始化中…",
   "runCoverage": "計算覆蓋率",
   "autoRun": "自動執行",
   "recomputeInputsChanged": "需重新計算 — 輸入已變更",
-
   "resolution": "解析度",
   "voxelSizeLabel": "體素大小（公尺）",
   "voxelCountHint": "工作區 AABB 內約有 {{count}} 個體素。",
@@ -73,7 +65,6 @@
   "modeBlindSpots": "盲點",
   "overlayColor": "疊層顏色",
   "intensityScale": "強度比例",
-
   "noFileChosen": "尚未選擇檔案 — 儲存時將詢問寫入位置。",
   "idleTarget": "{{folder}}/{{name}}",
   "savedNoAssets": "已儲存 {{name}}",
@@ -85,9 +76,11 @@
   "overwriteConfirmAssetsLine": "同時將取代此場景在該資料夾中的 {{assetClashes}} 項資源。",
   "assetCopyFailure": "無法複製「{{src}}」：{{reason}}。未儲存任何內容。",
   "saveFailure": "無法儲存「{{name}}」：{{reason}}。請使用「另存新檔」選擇其他資料夾。",
-
   "legendCoverageFraction": "覆蓋率",
   "legendBlindSpots": "盲點",
   "legendBlindVoxelShare": "盲體素比例",
-  "legendCamerasSeeingVoxel": "可見攝影機數"
+  "legendCamerasSeeingVoxel": "可見攝影機數",
+  "runBlocker": {
+    "noGeometry": "沒有可量測的幾何物件 — 請先勾選或新增幾何列。"
+  }
 }

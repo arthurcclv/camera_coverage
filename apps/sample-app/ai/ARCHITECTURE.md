@@ -59,6 +59,27 @@ gizmo sets: App reaches it only through the `SceneViewState` snapshot.
    SceneView's internal parts, not App's.
 3. **SDK engine** — runs inside a Web Worker, reached through a thin hook.
 
+## The two geometry builds
+
+`room: GeometryBuild` is a **side effect of the reducer's `geometry` array**, rebuilt
+by an effect that watches it, and it is deliberately two things on two schedules
+(`geometry_assets.md` §4.1, §4.3):
+
+- the **render group** — one `THREE.Object3D` per object, each carrying its own
+  object's transform (so `TransformControls` can drag it) — rebuilt immediately, because
+  the viewport has to follow a drag and Place on surface raycasts those very meshes;
+- the **collision mesh and workspace AABB** — `sceneMesh` is a memoized getter, merged
+  on first read, and the engine is re-initialized at the **next run**, not on the edit.
+  A geometry edit only sets `stale`.
+
+Two consequences are load-bearing. A **transform-only** change takes
+`rebuildWithTransforms`, which re-bakes the cached per-object local triangles and hands
+back a build with a **new identity but the same scene graph** — new identity so
+`handleRun` re-inits, same graph because `objectChange` fires per frame and a rebuild
+there would dispose the node under the gizmo mid-drag. And the engine's eager load is
+keyed on a **swap epoch** (mount, import, reset) rather than on `room`, so an edit never
+re-voxelizes the workspace on its own.
+
 ## Talking to the SDK
 
 - **`worker.ts`** hosts the engine:
@@ -119,7 +140,7 @@ gizmo sets: App reaches it only through the `SceneViewState` snapshot.
 
 ## State management
 
-State is split in two. The **editable scene document** — cameras, probes,
+State is split in two. The **editable scene document** — **geometry**, cameras, probes,
 sections, `clipSectionId`, zones, volumes, `useZones`, plus `selection`,
 `collapsedIds`, and the `stale`/`hasRunOnce`/`samplingDirty` machine — lives in a
 single pure reducer, `scene/sceneReducer.ts`, reached via `useReducer` in
@@ -129,8 +150,14 @@ rules for which edit marks the result stale (and which also dirties the sampled
 region set) live in that one tested transition, not in effects (spec §8.1). See
 DECISIONS.md.
 
-Everything else stays in `App.tsx` `useState`: `geometryObjects` (the scene-file
-source of truth, spec §14.1) + `room` (its built `GeometryBuild`), overlay
+**Geometry joined the reducer** when it became editable (`geometry_assets.md` §2.1).
+It used to be App state, because nothing edited it; now its adds, deletes,
+duplications, transforms and toggles are transitions like any other, and the rule that
+a geometry edit marks the result stale — while a rename or reorder does not — lives
+with the rest of the stale machine.
+
+Everything else stays in `App.tsx` `useState`: `room` (the built `GeometryBuild`
+behind the reducer's geometry list — see **The two geometry builds** above), overlay
 options, `voxelSize` (debounced 250 ms), summary, `autoRun`, transform
 mode/space, gizmo visibility, `sectionsVisible` (viewport master toggle), probe
 queries, `masksVersion`, `viewportReady`, scene-file `sceneError`/`sceneIOBusy`/
@@ -232,6 +259,14 @@ default" — see DECISIONS.md).
   (`floorVolumeSize`, `sectionBoundsFromCenters`), plus `types.ts`
   (`SceneViewState`, `TransformChange`). The gizmo/overlay/viewport modules below
   are its internal parts — App never touches them directly.
+- `runGate.ts` — `runBlocker(geometry)`: the single pure reason a run is refused
+  (`geometry_assets.md` §5.3, §5.4). Read by the Run button, the auto-run poll and
+  `handleRun`, so all three agree and the reason is sayable to the user. Tested in
+  `test/runGate.test.ts`.
+- `sceneView/transformMode.ts` — `resolveMode(mode, selection)`: which gizmo mode a
+  selection actually gets (spec §2.4). Pulled out of `sceneView.ts` so the rule is
+  testable without a WebGL context; geometry and volumes are the scale-capable kinds.
+  Tested in `test/sceneView/transformMode.test.ts`.
 - `splats.ts` — the `SplatObject` entity and every **pure decision** around it
   (`gaussian_splats.md` §2, §5.4, §6.2, §7): `splatLabel` (the one entity kind
   whose blank-name fallback is its *filename*, not an ordinal), the accepted
@@ -962,7 +997,7 @@ the two sessions are mutually exclusive rather than each reserving its own.
 ## Selection model
 
 A single unified selection: `Selection = { kind: 'camera' | 'probe' | 'section' |
-'zone' | 'volume' | 'constraintGroup' | 'constraint' | 'splat', id } | null`
+'zone' | 'volume' | 'constraintGroup' | 'constraint' | 'splat' | 'geometry', id } | null`
 (`scene/viewportSelection.ts`). Every kind highlights its hierarchy row, via
 `sceneTree.ts`'s `nodeIdForSelection`. A viewport click
 picks the nearest hit across cameras, probes, and **volumes** (`SceneView`
@@ -983,10 +1018,17 @@ the volume-only **scale** mode (translate/rotate/scale), and selecting a **zone*
 attaches no gizmo (it's a container, absent from the attach registry), and
 selecting a **splat** attaches the gizmo to its anchor in the *splat* scene —
 Move/Rotate only, since a per-axis scale drag would shear the capture's
-Gaussians, and its scale is one uniform number in `SplatPanel` instead. A
-disabled splat is the one exception to "selection wins" (spec §2.4.3): it stays
-hidden while selected, though its gizmo still attaches, because re-drawing a
-capture the user just hid by clicking its row would read as a broken checkbox. Which zones
+Gaussians, and its scale is one uniform number in `SplatPanel` instead. Selecting a **geometry object** attaches the gizmo to that object's render node in the
+current build — the node *is* the object, so there is no gizmo set for it — and geometry
+is the second **scale-capable** selection, per-axis, because a triangle mesh takes a
+non-uniform scale correctly. Geometry is selected **from its hierarchy row only**: a
+viewport click on it still misses and deselects, since the room's floor and walls fill
+most of the viewport and picking them would leave the deselect gesture nowhere to land
+(`geometry_assets.md` §6.6). A
+disabled splat — and a disabled **geometry object** — is the exception to "selection
+wins" (spec §2.4.3): it stays
+hidden while selected, though its gizmo still attaches, because re-drawing something the
+user just hid by clicking its row would read as a broken checkbox. Which zones
 are **enabled** (contribute to the visualized marked set) is decoupled from
 selection — driven by a per-zone **enabled checkbox** in the hierarchy row
 (independent per zone, like cameras/sections), not by selecting a zone.

@@ -1533,6 +1533,16 @@ button.tree-caret:focus-visible {
   flex: 0 0 auto;
 }
 
+/* --- Geometry rows (geometry_assets.md §6.2) -------------------------------- */
+
+/* Slate, deliberately the quietest dot in the tree: geometry is the surface
+   everything else is measured against, not a thing being planned, and a site can
+   carry dozens of rows. The analysis hues (teal, violet) and the splat's amber
+   all have to stay legible against it. */
+.tree-row .dot.geometry-dot {
+  background: #8b93a1;
+}
+
 /* --- 3D Gaussian Splats (gaussian_splats.md §5.2, §6.2, §7) ---------------- */
 
 /* Splat rows: amber swatch — its own hue again, so a capture is never mistaken

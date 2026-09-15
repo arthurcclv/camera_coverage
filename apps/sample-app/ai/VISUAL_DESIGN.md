@@ -334,7 +334,10 @@ this rig, check the asset's metalness before touching the lights.
   0.45), `.group` (lighter, 500). Probe dots are rotated squares (`.probe-dot`),
   section dots are green squares (`.section-dot`), zone/volume dots are teal
   (`.zone-dot` round, `.volume-dot` square), constraint dots violet
-  (`.constraint-dot`), and **splat dots amber** (`.splat-dot`, `#d0a88b`) — its
+  (`.constraint-dot`), **geometry dots slate** (`.geometry-dot`, `#8b93a1`) — the
+  quietest dot in the tree, because geometry is the surface everything else is
+  measured *against*, and a real site carries dozens of rows — and **splat dots
+  amber** (`.splat-dot`, `#d0a88b`) — its
   own hue for the same reason violet is the constraint family's: teal and violet
   are analysis inputs, amber is the one entity kind that cannot change a number
   (`gaussian_splats.md` §1.1). Splat rows carry the same
@@ -342,6 +345,11 @@ this rig, check the asset's metalness before touching the lights.
   right-aligned **load-state badge** in the `.rate` slot — `41%` / `loading…`
   while reading, `4.2M splats` once decoded, and `⚠ missing from assets/` /
   `⚠ could not be decoded` / `⚠ no WebGL context` in `.rate.splat-error` amber.
+  Geometry rows carry the same `.tree-row-toggle` checkbox, but it means something
+  else and the tooltip says so — *"Exclude from the scene — it stops blocking
+  cameras"* — because unticking removes the object from the collision mesh and the
+  workspace, not just from the screen (`geometry_assets.md` §5.1). Their `.rate`
+  slot names the kind (`room` / `box` / `mesh`).
   The neutral states reuse `.rate`'s tabular numerals, so `41%` → `4.2M splats`
   does not jitter the row. Zone rows carry a leading
   `.tree-row-toggle` **enabled checkbox** (checked = the zone contributes to the
@@ -562,6 +570,13 @@ every other hierarchy row — a name, a checkbox, a right-aligned badge — but 
 the only kind that cannot change a coverage number
 (`gaussian_splats.md` §1.1). Warm against the analysis palette's cool teals and
 violets is the first place that distinction is legible.
+
+**Slate is geometry's hue**, and its job is to recede. Geometry rows are the most
+numerous rows a real scene has and the least often acted on; the analysis hues have to
+read *against* them. The `GeometryPanel` follows the `SplatPanel` layout exactly — name,
+read-only source, then the transform fields — with one difference worth knowing: every
+field in it marks the coverage result stale, so it is the panel where an edit is never
+free (`geometry_assets.md` §7).
 
 **Violet is the constraint family's own hue**, chosen so a constraint is never mistaken
 for a sampling volume (teal) in the hierarchy or the viewport. The two look alike — a

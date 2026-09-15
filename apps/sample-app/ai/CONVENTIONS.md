@@ -44,6 +44,17 @@ message, belonging to no single layer.
 - **Accessibility:** semantic roles are used — `tree`/`treeitem`/`group`, `menu`,
   `radiogroup`, `separator`, `dialog`/`aria-modal`, `listbox`/`option`, and
   `aria-expanded`/`aria-selected`/`aria-disabled`.
+- **A rule three call sites must agree on is a pure function, not a condition.**
+  `runBlocker(geometry)` (`scene/runGate.ts`) is read by the Run button, the auto-run
+  poll and `handleRun`; `resolveMode(mode, selection)`
+  (`scene/sceneView/transformMode.ts`) was pulled out of the imperative bridge for the
+  same reason. Both return a value the UI translates — never a sentence
+  (`geometry_assets.md` §5.3).
+- **State whose *identity* is a signal must change identity when it changes.**
+  `rebuildWithTransforms` returns a new `GeometryBuild` that shares the previous one's
+  group and nodes: new identity because `handleRun` compares the build it last loaded
+  against the current one, shared graph because a gizmo drag emits per frame and
+  rebuilding the nodes would dispose the one being dragged (`geometry_assets.md` §4.3).
 - **A dialog may own its own I/O; a commit may not.** The **file-referencing
   dialogs** (`LoadSceneDialog`, `SaveSceneAsDialog`, `AddSplatDialog`) are the
   exception to the presentational-components rule: each runs its own folder reads

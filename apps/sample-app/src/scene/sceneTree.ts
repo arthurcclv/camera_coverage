@@ -33,6 +33,7 @@ import {
   type ConstraintGroup,
 } from '../placement/region.ts';
 import { splatLabel, type SplatObject } from './splats.ts';
+import { geometryLabels, type GeometryObject } from './geometryModel.ts';
 import type { Selection } from './viewportSelection.ts';
 
 /**
@@ -43,7 +44,7 @@ import type { Selection } from './viewportSelection.ts';
  * lets the group-header context menu declare its items per group and fail to
  * compile when a group is added without one (spec §15.1, `ui/groupMenu.ts`).
  */
-export type GroupKind = 'cameras' | 'probes' | 'sections' | 'zones' | 'constraints' | 'splats';
+export type GroupKind = 'cameras' | 'probes' | 'sections' | 'zones' | 'constraints' | 'geometry' | 'splats';
 
 export type SceneNode =
   | { kind: 'group'; groupKind: GroupKind; id: string; label: string; childIds: string[] }
@@ -60,6 +61,7 @@ export type SceneNode =
       childIds: string[];
     }
   | { kind: 'constraint'; id: string; label: string; constraintId: string }
+  | { kind: 'geometry'; id: string; label: string; geometryId: string }
   | { kind: 'splat'; id: string; label: string; splatId: string };
 
 const CAMERA_GROUP_ID = 'group:cameras';
@@ -67,6 +69,7 @@ const PROBE_GROUP_ID = 'group:probes';
 const SECTION_GROUP_ID = 'group:sections';
 const ZONES_GROUP_ID = 'group:zones';
 const CONSTRAINTS_GROUP_ID = 'group:constraints';
+const GEOMETRY_GROUP_ID = 'group:geometry';
 const SPLATS_GROUP_ID = 'group:splats';
 const CAMERA_NODE_PREFIX = 'cam:';
 const PROBE_NODE_PREFIX = 'probe:';
@@ -75,6 +78,7 @@ const ZONE_NODE_PREFIX = 'zone:';
 const VOLUME_NODE_PREFIX = 'volume:';
 const CONSTRAINT_GROUP_NODE_PREFIX = 'cg:';
 const CONSTRAINT_NODE_PREFIX = 'con:';
+const GEOMETRY_NODE_PREFIX = 'geom:';
 const SPLAT_NODE_PREFIX = 'splat:';
 
 /** Stable tree-node id for a camera (namespaced to avoid collisions). */
@@ -161,6 +165,18 @@ export function constraintIdForNode(nodeId: string): string | null {
     : null;
 }
 
+/** Stable tree-node id for a geometry object (namespaced to avoid collisions). */
+export function nodeIdForGeometry(geometryId: string): string {
+  return `${GEOMETRY_NODE_PREFIX}${geometryId}`;
+}
+
+/** Inverse of {@link nodeIdForGeometry}; null if the node id isn't a geometry object. */
+export function geometryIdForNode(nodeId: string): string | null {
+  return nodeId.startsWith(GEOMETRY_NODE_PREFIX)
+    ? nodeId.slice(GEOMETRY_NODE_PREFIX.length)
+    : null;
+}
+
 /** Stable tree-node id for a splat (namespaced to avoid collisions). */
 export function nodeIdForSplat(splatId: string): string {
   return `${SPLAT_NODE_PREFIX}${splatId}`;
@@ -194,6 +210,7 @@ export function nodeIdForSelection(selection: Selection): string | null {
     volume: nodeIdForVolume,
     constraintGroup: nodeIdForConstraintGroup,
     constraint: nodeIdForConstraint,
+    geometry: nodeIdForGeometry,
     splat: nodeIdForSplat,
   };
   return nodeIdFor[selection.kind](selection.id);
@@ -226,6 +243,7 @@ export function buildSceneTree(
   constraintGroups: ConstraintGroup[] = [],
   constraints: CameraConstraint[] = [],
   splats: SplatObject[] = [],
+  geometry: GeometryObject[] = [],
 ): SceneNode[] {
   const cameraNodes: SceneNode[] = cameras.map((c) => ({
     kind: 'camera',
@@ -344,6 +362,31 @@ export function buildSceneTree(
     nodes.push(umbrella, ...groupNodes, ...constraintNodes);
   }
 
+  // The Geometry group is the one group with **no** "when non-empty" condition
+  // (`geometry_assets.md` §2.3): an empty geometry list is a legal, reachable
+  // state (§5.3), and the header is where that state is explained and where the
+  // group menu's Add geometry… lives — a group that vanished when emptied would
+  // take the only route back with it. It sits between Constraints and Splats:
+  // the order runs from what the user works on toward what the scene is drawn
+  // against, and Geometry belongs beside the other backdrop.
+  {
+    const labels = geometryLabels(geometry);
+    const geometryNodes: SceneNode[] = geometry.map((o, i) => ({
+      kind: 'geometry',
+      id: nodeIdForGeometry(o.id),
+      label: labels[i],
+      geometryId: o.id,
+    }));
+    const geometryGroup: SceneNode = {
+      kind: 'group',
+      groupKind: 'geometry',
+      id: GEOMETRY_GROUP_ID,
+      label: 'Geometry',
+      childIds: geometryNodes.map((n) => n.id),
+    };
+    nodes.push(geometryGroup, ...geometryNodes);
+  }
+
   // The Splats group appears once any capture exists — auto-derived by type like
   // Cameras/Probes/Sections, not a user-created sub-group
   // (`gaussian_splats.md` §2.2). It sits **last** in the fixed root order because
@@ -455,6 +498,7 @@ export function nodeSelection(node: SceneNode): Selection {
     volume: (n) => ({ kind: 'volume', id: n.volumeId }),
     constraintGroup: (n) => ({ kind: 'constraintGroup', id: n.groupId }),
     constraint: (n) => ({ kind: 'constraint', id: n.constraintId }),
+    geometry: (n) => ({ kind: 'geometry', id: n.geometryId }),
     splat: (n) => ({ kind: 'splat', id: n.splatId }),
   };
   return (pick[node.kind] as (n: SceneNode) => Selection)(node);

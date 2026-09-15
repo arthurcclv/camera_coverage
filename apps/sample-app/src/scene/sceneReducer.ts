@@ -39,6 +39,7 @@ import {
   type ConstraintKind,
 } from '../placement/region.ts';
 import { defaultSplat, FLIP_Z_ROTATION, identityRegistration, type SplatObject } from './splats.ts';
+import { identityTransform, type GeometryTransform } from './geometryModel.ts';
 import type { Scene } from './sceneModel.ts';
 import type { Selection } from './viewportSelection.ts';
 import {
@@ -47,6 +48,7 @@ import {
   duplicateConstraintGroup,
   duplicateProbe,
   duplicateSection,
+  duplicateGeometry,
   duplicateSplat,
   duplicateVolume,
   duplicateZone,
@@ -89,11 +91,25 @@ export type EntityKind =
   | 'constraintGroup'
   | 'constraint'
   /** A splat capture (`gaussian_splats.md` §6.3, §6.4). */
-  | 'splat';
+  | 'splat'
+  /** A geometry object — room, box or mesh (`geometry_assets.md` §6.3, §6.4). */
+  | 'geometry';
 
-/** The persisted scene-document fields (the {@link Scene} minus its geometry). */
+/**
+ * The persisted scene-document fields — the whole {@link Scene}.
+ *
+ * **Geometry joined this in `geometry_assets.md` §2.1.** It used to live in
+ * `App.tsx` alone, because nothing edited it: the list was authored by hand in
+ * the scene file. Now that it has hierarchy rows, its adds, deletes,
+ * duplications, transforms and toggles are transitions like any other, and the
+ * rules about which of them mark the result stale belong here with the rest.
+ * What stays in App is the *build* — the Three.js group, the merged collision
+ * mesh and the engine load — which is a side effect of this state, not part of
+ * it.
+ */
 export type SceneDoc = Pick<
   Scene,
+  | 'geometry'
   | 'cameras'
   | 'probes'
   | 'sections'
@@ -142,6 +158,12 @@ export type SceneAction =
    * the only "+" entry that opens one — the app never writes into `assets/`.
    */
   | { type: 'addSplat'; src: string }
+  /**
+   * New mesh geometry referencing an asset already in the scene folder's
+   * `assets/` (`geometry_assets.md` §3.2). Committed by the **Add Geometry**
+   * dialog; the app never writes into `assets/`.
+   */
+  | { type: 'addGeometry'; src: string }
   | { type: 'deleteEntity'; kind: EntityKind; id: string }
   | { type: 'duplicateEntity'; kind: EntityKind; id: string }
   /** Hierarchy drag-reorder (§5.5.1): move `id` before sibling `beforeId`, or last when null. */
@@ -168,6 +190,12 @@ export type SceneAction =
    * analysis input (§1.1).
    */
   | { type: 'changeSplat'; id: string; patch: Partial<SplatObject> }
+  /**
+   * Edit one geometry object's transform (`geometry_assets.md` §7) — a gizmo
+   * drag, a committed numeric field, or a unit/up-axis preset. A coverage
+   * input, unlike `changeSplat`, so it marks the result stale.
+   */
+  | { type: 'changeGeometry'; id: string; patch: Partial<GeometryTransform> }
   /** Reset a splat's registration to identity, or apply the Flip 180° Z preset (§7). */
   | { type: 'splatPreset'; id: string; preset: 'reset' | 'flipZ' }
   | { type: 'changeConstraintGroup'; id: string; patch: Partial<ConstraintGroup> }
@@ -202,13 +230,13 @@ export type SceneAction =
     }
   | {
       type: 'renameEntity';
-      kind: 'camera' | 'probe' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat';
+      kind: 'camera' | 'probe' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat' | 'geometry';
       id: string;
       name: string;
     }
   | {
       type: 'toggleEnabled';
-      kind: 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat';
+      kind: 'camera' | 'section' | 'zone' | 'constraintGroup' | 'constraint' | 'splat' | 'geometry';
       id: string;
     }
   | { type: 'toggleSectionClip'; id: string }
@@ -225,6 +253,7 @@ export type SceneAction =
 /** Initial document state from a {@link Scene} (spec §14.1): first camera selected, nothing collapsed, clean. */
 export function initSceneState(scene: Scene): SceneDocState {
   return {
+    geometry: scene.geometry,
     cameras: scene.cameras,
     probes: scene.probes,
     sections: scene.sections,
@@ -249,6 +278,18 @@ const cameraInput = (s: SceneDocState) => (s.hasRunOnce ? { stale: true } : null
 // A volume/`useZones`/`zoneId` edit also dirties the sampled region set (§8);
 // `samplingDirty` latches regardless of whether a run has happened yet.
 const samplingInput = (s: SceneDocState) => ({ samplingDirty: true, ...(s.hasRunOnce ? { stale: true } : null) });
+/**
+ * A geometry edit is a coverage input — the **inverse of a splat**
+ * (`geometry_assets.md` §1.1): it changes the merged collision mesh and can
+ * change the workspace AABB, so the standing result no longer describes the
+ * scene on screen. Adding, deleting, duplicating, transforming and toggling all
+ * route through here; **renaming and reordering do not**, being presentation
+ * only, exactly as for every other kind.
+ *
+ * It marks `stale` and nothing else: the re-merge, the AABB derivation and the
+ * engine re-init are the *next run's* work (§4.3), not this transition's.
+ */
+const geometryInput = (s: SceneDocState) => (s.hasRunOnce ? { stale: true } : null);
 
 /**
  * Project a bound camera's position into its constraint's region
@@ -443,6 +484,21 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
       };
     }
 
+    case 'addGeometry': {
+      const id = nextFreeId('geom', state.geometry.map((o) => o.id));
+      // Spawns at an identity transform and auto-selects, so the GeometryPanel
+      // is open on it with its size readout — which is what makes a wrong
+      // up-axis or a millimetre-unit file obvious immediately
+      // (`geometry_assets.md` §3.2, §7). A coverage input from the moment it
+      // lands, unlike a splat.
+      return {
+        ...state,
+        geometry: [...state.geometry, { kind: 'mesh', id, name: '', enabled: true, src: action.src, ...identityTransform() }],
+        selection: { kind: 'geometry', id },
+        ...geometryInput(state),
+      };
+    }
+
     case 'deleteEntity': {
       const { kind, id } = action;
       const selection = selectionAfterDelete(state.selection, kind, id);
@@ -487,6 +543,13 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
           // `src`) are the splat layer's side effects, driven off the array
           // shrinking (`gaussian_splats.md` §3.3, §6.3). Never marks stale.
           return { ...state, splats: state.splats.filter((s) => s.id !== id), selection };
+        case 'geometry':
+          // Deleting the **last** object is allowed and lands in the empty-scene
+          // state (`geometry_assets.md` §5.3): the scene stays legal, and the
+          // Run gate — not a refusal here — is what stops a measurement against
+          // nothing. Disposal of the render meshes is App's side effect, driven
+          // off the array shrinking.
+          return { ...state, geometry: state.geometry.filter((o) => o.id !== id), selection, ...geometryInput(state) };
         case 'zone': {
           // Removing a zone removes its volumes too (§4); it is a coverage input
           // only when it actually had volumes (an empty zone marks nothing).
@@ -558,6 +621,14 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
           // decode** (`gaussian_splats.md` §3.3, §6.4) and never marks stale.
           return { ...state, splats: [...state.splats, copy], selection: { kind: 'splat', id: copy.id } };
         }
+        case 'geometry': {
+          const copy = duplicateGeometry(state.geometry, id);
+          if (!copy) return state;
+          // The copy coincides with the original and shares a mesh's parse
+          // (`geometry_assets.md` §6.4); it is a second occluder, so it marks
+          // the result stale.
+          return { ...state, geometry: [...state.geometry, copy], selection: { kind: 'geometry', id: copy.id }, ...geometryInput(state) };
+        }
         case 'zone': {
           const copy = duplicateZone(state.zones, state.volumes, id);
           if (!copy) return state;
@@ -602,6 +673,11 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
           // view depth across all captures, so row order does not even affect
           // draw order (`gaussian_splats.md` §6.6).
           return { ...state, splats: moveBefore(state.splats, id, beforeId) };
+        case 'geometry':
+          // Also presentation-only, and for a reason of its own: the collision
+          // mesh is a union of triangles, so the merge is order-independent
+          // (`geometry_assets.md` §6.5).
+          return { ...state, geometry: moveBefore(state.geometry, id, beforeId) };
       }
       return state;
     }
@@ -653,6 +729,17 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
       return {
         ...state,
         splats: state.splats.map((s) => (s.id === action.id ? { ...s, ...action.patch } : s)),
+      };
+
+    case 'changeGeometry':
+      // A coverage input (`geometry_assets.md` §1.1), so — deliberately unlike
+      // `changeSplat` directly above — it marks the result stale. The re-merge
+      // and the engine re-init wait for the next run (§4.3); this only records
+      // the edit.
+      return {
+        ...state,
+        geometry: state.geometry.map((o) => (o.id === action.id ? { ...o, ...action.patch } : o)),
+        ...geometryInput(state),
       };
 
     case 'splatPreset':
@@ -797,6 +884,12 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
           // A blank name reads back as the capture's filename, not `Splat N`
           // (`gaussian_splats.md` §2.3).
           return { ...state, splats: state.splats.map((s) => (s.id === id ? { ...s, name } : s)) };
+        case 'geometry':
+          // A blank mesh name reads back as its file's basename, a blank
+          // primitive's as `Room N` / `Box N` (`geometry_assets.md` §2.4). A
+          // rename is a label write, so — like every other kind — it is the one
+          // geometry edit that does **not** mark the result stale.
+          return { ...state, geometry: state.geometry.map((o) => (o.id === id ? { ...o, name } : o)) };
       }
       return state;
     }
@@ -839,6 +932,17 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
           // The capture stays decoded and resident, so re-ticking is instant —
           // hide is not unload, which is the whole point of a checkbox.
           return { ...state, splats: state.splats.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)) };
+        case 'geometry':
+          // **Not** a draw toggle (`geometry_assets.md` §5.1): an unticked
+          // object contributes no triangles and no bounds either, which is what
+          // makes the checkbox answer "what does coverage look like without this
+          // rack?" in one click. The only checkbox in this app that changes a
+          // number — hence the stale flag its five siblings above do not set.
+          return {
+            ...state,
+            geometry: state.geometry.map((o) => (o.id === id ? { ...o, enabled: !o.enabled } : o)),
+            ...geometryInput(state),
+          };
       }
       return state;
     }
@@ -915,6 +1019,17 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
             splats: state.splats.map((s) =>
               s.id === change.id ? { ...s, position: change.position, rotation: change.rotation } : s,
             ),
+          };
+        case 'geometry':
+          // Position, rotation **and per-axis scale** — a triangle mesh takes a
+          // non-uniform scale correctly (`geometry_assets.md` §7). A coverage
+          // input, so it marks stale; the re-merge waits for the run (§4.3).
+          return {
+            ...state,
+            geometry: state.geometry.map((o) =>
+              o.id === change.id ? { ...o, position: change.position, rotation: change.rotation, scale: change.scale } : o,
+            ),
+            ...geometryInput(state),
           };
         case 'constraintVertex': {
           const constraints = mapPolyline(state.constraints, change.id, (points) =>

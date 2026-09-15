@@ -31,7 +31,13 @@ export type ReorderableKind =
   /** `gaussian_splats.md` §6.6 — row order is presentation only; Spark sorts
    * every Gaussian globally by view depth, so it does not even affect draw
    * order. */
-  | 'splat';
+  | 'splat'
+  /**
+   * `geometry_assets.md` §6.5 — likewise presentation only: the collision mesh
+   * is a union of triangles, so the merge is order-independent, and opaque
+   * double-sided meshes draw by depth rather than by array position.
+   */
+  | 'geometry';
 
 /** The vertical extent of one rendered row, in the scroll container's client space. */
 export interface RowBox {

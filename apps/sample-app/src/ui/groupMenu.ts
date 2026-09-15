@@ -9,9 +9,13 @@
  * Group headers had **no** menu at all before this (spec §5.5), and most still
  * behave that way: only **Cameras** declares an item today, every other group
  * declares `[]`, and an empty list opens **nothing** — right-clicking Probes,
- * Sections, Zones, Constraints, or Splats stays the no-op it always was. That is
- * the point of an empty array over an absent key: "this group has no items" is a
- * stated decision, not an oversight.
+ * Sections, Zones, Constraints, Geometry, or Splats stays the no-op it always
+ * was. That is the point of an empty array over an absent key: "this group has
+ * no items" is a stated decision, not an oversight.
+ *
+ * **Geometry** will declare **Add geometry…** with the Add Geometry dialog
+ * (`geometry_assets.md` §3.2, stage 2); until that dialog exists there is
+ * nothing for the item to open, so the group states `[]` like the rest.
  */
 import type { GroupKind } from '../scene/sceneTree.ts';
 
@@ -53,6 +57,7 @@ export function groupMenuItems(h: GroupMenuHandlers): Record<GroupKind, GroupMen
     sections: [],
     zones: [],
     constraints: [],
+    geometry: [],
     splats: [],
   };
 }

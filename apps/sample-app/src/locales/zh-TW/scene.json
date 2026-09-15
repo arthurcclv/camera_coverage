@@ -57,7 +57,17 @@
       "sections": "截面",
       "zones": "計算空間",
       "constraints": "限制幾何",
-      "splats": "潑濺"
+      "splats": "潑濺",
+      "geometry": "幾何物件"
+    },
+    "geometry": {
+      "exclude": "移出場景 — 不再遮擋攝影機",
+      "include": "放回場景 — 重新遮擋攝影機",
+      "kind": {
+        "room": "房間",
+        "box": "方塊",
+        "mesh": "模型"
+      }
     }
   },
   "sceneFileControls": {
@@ -123,5 +133,13 @@
     "elapsed": "耗時",
     "perCamera": "各相機",
     "emptyHint": "按下「執行覆蓋率計算」以取得結果。"
+  },
+  "geometryPanel": {
+    "titlePrefix": "幾何物件 — {{label}}",
+    "sourceLabel": "來源",
+    "roomParams": "房間",
+    "roomParamsValue": "{{x}} × {{z}} 公尺，高 {{height}} 公尺，牆厚 {{thickness}} 公尺",
+    "boxParams": "方塊",
+    "boxParamsValue": "{{x}} × {{y}} × {{z}} 公尺"
   }
 }

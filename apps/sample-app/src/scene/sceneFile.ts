@@ -31,21 +31,30 @@ import type { SplatObject } from './splats.ts';
 
 /**
  * Version written by {@link serializeScene}: 2 for zones/volumes, 3 for camera
- * constraints (§14.3, `camera_placement.md` §9).
+ * constraints, **4 for editable geometry** (§14.3, `geometry_assets.md` §8).
+ *
+ * The geometry bump is the first that is **not** additive. Every earlier
+ * addition (`name`, `clipRange`, the camera `enabled` flag, section footprints,
+ * `splats`) could be ignored by an older reader; `kind: "mesh"` cannot — a v3
+ * reader rejects an unknown geometry kind outright, so a file carrying one would
+ * abort on an older build with a schema error instead of a version error. The
+ * bump is the honest signal.
  */
-export const SCENE_FILE_FORMAT_VERSION = 3;
+export const SCENE_FILE_FORMAT_VERSION = 4;
 /**
  * Versions {@link parseSceneFile} accepts (§14.8): a v1 file reads with empty
  * zones/volumes, and a v1 or v2 file with empty constraint groups/constraints.
+ * A v1–v3 file's geometry reads with **back-filled ids** (`geom-1`… by array
+ * position), blank names, and `enabled: true`, and its `kind: "gltf"` objects
+ * read as `mesh` (`geometry_assets.md` §8) — so an older file loads as exactly
+ * the scene it always described, now addressable from the hierarchy.
  *
  * **Splats did not bump this.** `splats` reads as `[]` when absent, the same
  * additive precedent `name`, `clipRange`, the camera `enabled` flag and the
- * section footprint bounds already set. A bump to 4 was rejected precisely
- * because a version > 3 is rejected *outright*: a scene carrying a visual
- * backdrop would become unopenable by an older build, when an older reader can
- * simply ignore a key it does not know (`gaussian_splats.md` §8).
+ * section footprint bounds already set (`gaussian_splats.md` §8). Editable
+ * geometry did, for the reason {@link SCENE_FILE_FORMAT_VERSION} records.
  */
-export const SUPPORTED_FORMAT_VERSIONS = [1, 2, 3] as const;
+export const SUPPORTED_FORMAT_VERSIONS = [1, 2, 3, 4] as const;
 
 /** On-disk shape of a name-bearing entity: `name` is optional (§14.3 omit-on-write). */
 type Serialized<T extends { name: string }> = Omit<T, 'name'> & { name?: string };
@@ -75,9 +84,19 @@ type SerializedSplat = Omit<SplatObject, 'name' | 'enabled'> & {
   enabled?: boolean;
 };
 
+/**
+ * On-disk geometry shape (§14.3, `geometry_assets.md` §8): `name` omitted when
+ * blank and `enabled` omitted when `true`, exactly like a camera's and a
+ * splat's. `id` is always written — it is what a hierarchy row selects by.
+ */
+type SerializedGeometry = Omit<GeometryObject, 'name' | 'enabled'> & {
+  name?: string;
+  enabled?: boolean;
+};
+
 export interface SceneFileJSON {
   formatVersion: number;
-  geometry: GeometryObject[];
+  geometry: SerializedGeometry[];
   /** App camera shape — `CameraConfig` fields plus optional `name`/`enabled` (§14.3). */
   cameras: SerializedCamera[];
   probes: Serialized<Probe>[];
@@ -156,38 +175,85 @@ function fail(error: string): ParseResult {
   return { ok: false, error };
 }
 
+/**
+ * Reads the `geometry` array (§14.3, `geometry_assets.md` §8).
+ *
+ * Three back-compat rules, all silent by design — an older file describes the
+ * same scene, it just could not address it:
+ *
+ * - **`kind: "gltf"` reads as `mesh`.** One name for asset-backed geometry at
+ *   any moment, rather than two depending on when the file was written (§2.2).
+ * - **A missing `id` is back-filled by array position** (`geom-1`…), so every
+ *   row has the stable identity selection and reordering need. A file that
+ *   already carries ids keeps them; duplicates *among those* are rejected.
+ *   Back-filling runs as a **second pass** over the ids the file spells out and
+ *   takes the lowest `geom-N` still free (§8), so a hand-edited v4 mixing
+ *   explicit and absent ids — `[{ id: 'geom-2' }, {}, {}]` ⇒ `geom-2`,
+ *   `geom-1`, `geom-3` — loads instead of aborting on a clash it never
+ *   contained. A back-filled id is the reader's own invention; letting one veto
+ *   a legal file would be the reader rejecting its own output.
+ * - **`name` and `enabled` default to blank and `true`**, like every other
+ *   entity's.
+ *
+ * A **non-positive or non-finite `scale` component** is rejected: zero collapses
+ * the object and a negative one mirrors it, inverting every triangle's winding
+ * (§7).
+ */
 function parseGeometry(raw: unknown): GeometryObject[] | string {
   if (!Array.isArray(raw)) return 'geometry must be an array';
   const geometry: GeometryObject[] = [];
+  // Pass 1: the ids the file spells out, so pass 2's back-fill can route around
+  // them. Validation stays in pass 2 so the first malformed object still reports
+  // first, whatever is wrong with it.
+  const explicitIds = new Set<string>();
+  for (const item of raw) {
+    if (isRecord(item) && typeof item.id === 'string' && item.id.length > 0) explicitIds.add(item.id);
+  }
+  const usedIds = new Set<string>();
+  let nextBackfill = 1;
+  const backfillId = (): string => {
+    let id = `geom-${nextBackfill}`;
+    while (explicitIds.has(id) || usedIds.has(id)) id = `geom-${++nextBackfill}`;
+    nextBackfill++;
+    return id;
+  };
   for (const [i, item] of raw.entries()) {
     if (!isRecord(item) || !hasTransform(item)) return `geometry[${i}]: missing or invalid position/rotation/scale`;
     const { position, rotation, scale } = item as { position: Vec3; rotation: Quat; scale: Vec3 };
+    if (!scale.every((c) => Number.isFinite(c) && c > 0)) return `geometry[${i}]: scale components must be > 0`;
+    if (item.id !== undefined && typeof item.id !== 'string') return `geometry[${i}]: id must be a string`;
+    if (item.enabled !== undefined && typeof item.enabled !== 'boolean') return `geometry[${i}]: enabled must be a boolean`;
+    const explicit = typeof item.id === 'string' && item.id.length > 0 ? item.id : null;
+    if (explicit !== null && usedIds.has(explicit)) return `duplicate geometry id "${explicit}"`;
+    const id = explicit ?? backfillId();
+    usedIds.add(id);
+    const base = { id, name: readName(item.name), enabled: item.enabled !== false, position, rotation, scale };
     switch (item.kind) {
       case 'room': {
         if (!isFiniteNumber(item.halfX) || !isFiniteNumber(item.halfZ) || !isFiniteNumber(item.height) || !isFiniteNumber(item.thickness)) {
           return `geometry[${i}]: room requires numeric halfX/halfZ/height/thickness`;
         }
         geometry.push({
+          ...base,
           kind: 'room',
           halfX: item.halfX,
           halfZ: item.halfZ,
           height: item.height,
           thickness: item.thickness,
-          position,
-          rotation,
-          scale,
         });
         break;
       }
       case 'box': {
         if (!isVec3(item.min) || !isVec3(item.max)) return `geometry[${i}]: box requires min/max as [x,y,z]`;
-        geometry.push({ kind: 'box', min: item.min, max: item.max, position, rotation, scale });
+        geometry.push({ ...base, kind: 'box', min: item.min, max: item.max });
         break;
       }
-      case 'gltf': {
-        if (typeof item.src !== 'string') return `geometry[${i}]: gltf requires a string src`;
-        if (!isSafeAssetPath(item.src)) return `geometry[${i}]: unsafe gltf src "${item.src}"`;
-        geometry.push({ kind: 'gltf', src: item.src, position, rotation, scale });
+      // `gltf` is the pre-v4 spelling of `mesh` and reads as one (§8).
+      case 'gltf':
+      case 'mesh': {
+        if (typeof item.src !== 'string') return `geometry[${i}]: mesh requires a string src`;
+        if (!isSafeAssetPath(item.src)) return `geometry[${i}]: unsafe mesh src "${item.src}"`;
+        geometry.push({ ...base, kind: 'mesh', src: item.src });
         break;
       }
       default:
@@ -195,6 +261,21 @@ function parseGeometry(raw: unknown): GeometryObject[] | string {
     }
   }
   return geometry;
+}
+
+/**
+ * On-disk form of one geometry object (§14.3): blank `name` dropped, `enabled`
+ * dropped when `true` — the same omit-on-write rules the camera and splat
+ * writers follow, so a default scene round-trips without a field of noise per
+ * object.
+ */
+function serializeGeometry(object: GeometryObject): SerializedGeometry {
+  const { name, enabled, ...rest } = object;
+  return {
+    ...rest,
+    ...(name.trim().length > 0 ? { name } : null),
+    ...(enabled ? null : { enabled: false }),
+  } as SerializedGeometry;
 }
 
 function parseCameras(raw: unknown): SceneCamera[] | string {
@@ -701,7 +782,9 @@ function serializeSplat(splat: SplatObject): SerializedSplat {
 export function serializeScene(scene: Scene): SceneFileJSON {
   return {
     formatVersion: SCENE_FILE_FORMAT_VERSION,
-    geometry: scene.geometry,
+    // Geometry carries ids, names and an `enabled` flag now (`geometry_assets.md`
+    // §8); the blank name and the default `true` are omitted, like everywhere else.
+    geometry: scene.geometry.map(serializeGeometry),
     // Camera/probe/section display names ride on the entity; blank names are
     // omitted on write (§5.6, §14.3). A camera's `enabled` is omitted when true.
     cameras: scene.cameras.map(serializeCamera),

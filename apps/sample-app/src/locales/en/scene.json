@@ -57,7 +57,17 @@
       "sections": "Sections",
       "zones": "Zones",
       "constraints": "Constraints",
-      "splats": "Splats"
+      "splats": "Splats",
+      "geometry": "Geometry"
+    },
+    "geometry": {
+      "exclude": "Exclude from the scene — it stops blocking cameras",
+      "include": "Put back in the scene — it blocks cameras again",
+      "kind": {
+        "room": "room",
+        "box": "box",
+        "mesh": "mesh"
+      }
     }
   },
   "sceneFileControls": {
@@ -123,5 +133,13 @@
     "elapsed": "Elapsed",
     "perCamera": "Per camera",
     "emptyHint": "Press \"Run coverage\" to compute results."
+  },
+  "geometryPanel": {
+    "titlePrefix": "Geometry — {{label}}",
+    "sourceLabel": "Source",
+    "roomParams": "Room",
+    "roomParamsValue": "{{x}} × {{z}} m, {{height}} m high, {{thickness}} m walls",
+    "boxParams": "Box",
+    "boxParamsValue": "{{x}} × {{y}} × {{z}} m"
   }
 }

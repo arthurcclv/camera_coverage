@@ -35,7 +35,7 @@ async function fileHandleAt(dir: FileSystemDirectoryHandle, src: string, create:
   return current.getFileHandle(segments[segments.length - 1], { create });
 }
 
-async function resolveAssetFromDirectory(dir: FileSystemDirectoryHandle, src: string): Promise<ArrayBuffer> {
+export async function resolveAssetFromDirectory(dir: FileSystemDirectoryHandle, src: string): Promise<ArrayBuffer> {
   const file = await (await fileHandleAt(dir, src, false)).getFile();
   return file.arrayBuffer();
 }

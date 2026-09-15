@@ -2,8 +2,12 @@
  * Default scene geometry (spec §4.1, §14.1): an enclosed room, open top, plus
  * freestanding box obstacles. `defaultGeometry()` is the `geometry` half of
  * `sceneModel.ts`'s `defaultScene()`; `scene/sceneGeometryBuild.ts` reduces it
- * (plus any imported `gltf` objects) to the single world-space triangle mesh
+ * (plus any imported `mesh` objects) to the single world-space triangle mesh
  * used both for `engine.loadScene` and Three.js rendering.
+ *
+ * The defaults carry **ids** (`geom-1`…) like every other entity, because they
+ * are hierarchy rows now (`geometry_assets.md` §2.1): blank-named, so they label
+ * as `Room 1` / `Box 1`…, and enabled.
  */
 import type { Vec3 } from '@linkervision/camera-coverage-sdk';
 import { identityTransform, type BoxGeometryObject, type GeometryObject, type RoomGeometryObject } from './geometryModel.ts';
@@ -24,6 +28,9 @@ const BOX_BOUNDS: Array<{ min: Vec3; max: Vec3 }> = [
 /** The default scene's geometry list (spec §14.1) — a room plus 5 box obstacles, identity transforms. */
 export function defaultGeometry(): GeometryObject[] {
   const room: RoomGeometryObject = {
+    id: 'geom-1',
+    name: '',
+    enabled: true,
     kind: 'room',
     halfX: ROOM_HALF_X,
     halfZ: ROOM_HALF_Z,
@@ -31,7 +38,12 @@ export function defaultGeometry(): GeometryObject[] {
     thickness: WALL_THICKNESS,
     ...identityTransform(),
   };
-  const boxes: BoxGeometryObject[] = BOX_BOUNDS.map(({ min, max }) => ({
+  const boxes: BoxGeometryObject[] = BOX_BOUNDS.map(({ min, max }, i) => ({
+    // Continue the room's numbering: ids are unique across the whole array, not
+    // per kind (`geometry_assets.md` §2.1). The *labels* are per kind (§2.4).
+    id: `geom-${i + 2}`,
+    name: '',
+    enabled: true,
     kind: 'box',
     min,
     max,

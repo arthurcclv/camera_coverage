@@ -241,23 +241,31 @@ test('the confirmation adds the asset count only for a cross-folder save (spec �
 
 // --- Asset copy planning (spec §14.5) ---
 
-const gltf = (src: string): GeometryObject => ({ kind: 'gltf', src, ...identityTransform() });
-const box: GeometryObject = { kind: 'box', min: [0, 0, 0], max: [1, 1, 1], ...identityTransform() };
-const room: GeometryObject = { kind: 'room', halfX: 5, halfZ: 5, height: 3, thickness: 0.2, ...identityTransform() };
+let meshCount = 0;
+const mesh = (src: string): GeometryObject => ({
+  kind: 'mesh',
+  id: `geom-mesh-${++meshCount}`,
+  name: '',
+  enabled: true,
+  src,
+  ...identityTransform(),
+});
+const box: GeometryObject = { kind: 'box', id: 'geom-box', name: '', enabled: true, min: [0, 0, 0], max: [1, 1, 1], ...identityTransform() };
+const room: GeometryObject = { kind: 'room', id: 'geom-room', name: '', enabled: true, halfX: 5, halfZ: 5, height: 3, thickness: 0.2, ...identityTransform() };
 // `splats` is a required argument, not a defaulted one: every caller has the
 // scene's array in hand (`gaussian_splats.md` §8), so a scene with no capture
 // passes `[]` rather than leaving it off.
 const splat = (src: string) => defaultSplat('splat-1', src);
 
 test('the copy plan is every referenced asset, in scene order (spec §14.5)', () => {
-  assert.deepEqual(planAssetCopy([gltf('assets/shelf.glb'), box, gltf('assets/rack.glb')], []), [
+  assert.deepEqual(planAssetCopy([mesh('assets/shelf.glb'), box, mesh('assets/rack.glb')], []), [
     'assets/shelf.glb',
     'assets/rack.glb',
   ]);
 });
 
 test('an asset referenced twice is copied once (spec §14.5)', () => {
-  assert.deepEqual(planAssetCopy([gltf('assets/shelf.glb'), gltf('assets/shelf.glb')], []), ['assets/shelf.glb']);
+  assert.deepEqual(planAssetCopy([mesh('assets/shelf.glb'), mesh('assets/shelf.glb')], []), ['assets/shelf.glb']);
 });
 
 test('primitive-only geometry copies nothing — the default scene never has assets (spec §14.5)', () => {
@@ -266,7 +274,7 @@ test('primitive-only geometry copies nothing — the default scene never has ass
 });
 
 test('nested asset paths are planned verbatim, for the destination to recreate (spec §14.2, §14.5)', () => {
-  assert.deepEqual(planAssetCopy([gltf('assets/site/level-1/rack.glb')], []), ['assets/site/level-1/rack.glb']);
+  assert.deepEqual(planAssetCopy([mesh('assets/site/level-1/rack.glb')], []), ['assets/site/level-1/rack.glb']);
 });
 
 // --- Failure text (spec §14.8) ---
@@ -287,11 +295,11 @@ test('a save failure names the file and points at Save As… (spec §14.8, §18.
 
 // --- splat captures in the asset copy plan (`gaussian_splats.md` §8) --------
 
-test('planAssetCopy includes splat srcs alongside gltf srcs', () => {
+test('planAssetCopy includes splat srcs alongside mesh srcs', () => {
   // A cross-folder Save As… must leave the destination holding a *complete*
   // scene, and a capture is as much a referenced file as a GLB.
   assert.deepEqual(
-    planAssetCopy([gltf('assets/shelf.glb')], [splat('assets/site.spz'), splat('assets/dock.sog')]),
+    planAssetCopy([mesh('assets/shelf.glb')], [splat('assets/site.spz'), splat('assets/dock.sog')]),
     ['assets/shelf.glb', 'assets/site.spz', 'assets/dock.sog'],
   );
 });
@@ -305,14 +313,14 @@ test('a capture referenced by two splat rows copies once (§3.3)', () => {
   );
 });
 
-test('a src shared by a gltf object and a splat row is deduplicated across the two', () => {
+test('a src shared by a mesh object and a splat row is deduplicated across the two', () => {
   assert.deepEqual(
-    planAssetCopy([gltf('assets/thing.glb')], [splat('assets/thing.glb')]),
+    planAssetCopy([mesh('assets/thing.glb')], [splat('assets/thing.glb')]),
     ['assets/thing.glb'],
   );
 });
 
-test('a scene with no splats plans exactly its gltf srcs', () => {
-  assert.deepEqual(planAssetCopy([gltf('assets/shelf.glb')], []), ['assets/shelf.glb']);
+test('a scene with no splats plans exactly its mesh srcs', () => {
+  assert.deepEqual(planAssetCopy([mesh('assets/shelf.glb')], []), ['assets/shelf.glb']);
   assert.deepEqual(planAssetCopy([], []), []);
 });

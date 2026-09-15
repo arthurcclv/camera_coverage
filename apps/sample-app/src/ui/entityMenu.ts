@@ -30,7 +30,9 @@ export type DeletableKind =
   | 'constraintGroup'
   | 'constraint'
   /** A splat capture (`gaussian_splats.md` §6.3, §6.4). */
-  | 'splat';
+  | 'splat'
+  /** A geometry object — room, box or mesh (`geometry_assets.md` §6.3, §6.4). */
+  | 'geometry';
 
 /** The per-kind callbacks the hierarchy takes for its context menu. */
 export interface EntityMenuHandlers {
@@ -42,6 +44,7 @@ export interface EntityMenuHandlers {
   onDeleteConstraintGroup(id: string): void;
   onDeleteConstraint(id: string): void;
   onDeleteSplat(id: string): void;
+  onDeleteGeometry(id: string): void;
   onDuplicateCamera(id: string): void;
   onDuplicateProbe(id: string): void;
   onDuplicateSection(id: string): void;
@@ -50,6 +53,7 @@ export interface EntityMenuHandlers {
   onDuplicateConstraintGroup(id: string): void;
   onDuplicateConstraint(id: string): void;
   onDuplicateSplat(id: string): void;
+  onDuplicateGeometry(id: string): void;
 }
 
 /** Which handler the Delete item fires, per kind. */
@@ -63,6 +67,7 @@ export function deleteHandlers(h: EntityMenuHandlers): Record<DeletableKind, (id
     constraintGroup: h.onDeleteConstraintGroup,
     constraint: h.onDeleteConstraint,
     splat: h.onDeleteSplat,
+    geometry: h.onDeleteGeometry,
   };
 }
 
@@ -77,5 +82,6 @@ export function duplicateHandlers(h: EntityMenuHandlers): Record<DeletableKind, 
     constraintGroup: h.onDuplicateConstraintGroup,
     constraint: h.onDuplicateConstraint,
     splat: h.onDuplicateSplat,
+    geometry: h.onDuplicateGeometry,
   };
 }

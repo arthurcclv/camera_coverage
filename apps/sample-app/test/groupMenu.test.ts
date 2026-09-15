@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { groupMenuItems, type GroupMenuHandlers } from '../src/ui/groupMenu.ts';
 import type { GroupKind } from '../src/scene/sceneTree.ts';
 
-const KINDS: GroupKind[] = ['cameras', 'probes', 'sections', 'zones', 'constraints', 'splats'];
+const KINDS: GroupKind[] = ['cameras', 'probes', 'sections', 'zones', 'constraints', 'geometry', 'splats'];
 
 function spies(exportCameraInfoBlocker: string | null = null) {
   const calls: string[] = [];

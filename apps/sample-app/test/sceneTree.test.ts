@@ -16,6 +16,8 @@ import {
   nodeIdForVolume,
   nodeIdForZone,
   nodeIdForSplat,
+  nodeIdForGeometry,
+  geometryIdForNode,
   nodeEnabled,
   nodeSelection,
   probeIdForNode,
@@ -29,6 +31,7 @@ import {
 import type { SamplingVolume, Zone } from '../src/scene/samplingVolumes.ts';
 import type { CameraConstraint, ConstraintGroup } from '../src/placement/region.ts';
 import type { SplatObject } from '../src/scene/splats.ts';
+import { identityTransform, type GeometryObject } from '../src/scene/geometryModel.ts';
 
 function cam(id: string): SceneCamera {
   return { id, name: '', position: [0, 0, 0], rotation: [0, 0, 0, 1], fov: 60 };
@@ -50,9 +53,31 @@ function volume(id: string, zoneId: string): SamplingVolume {
   return { id, zoneId, position: [0, 0, 0], rotation: [0, 0, 0, 1], size: [1, 1, 1] };
 }
 
+function boxObject(id: string, name = ''): GeometryObject {
+  return { kind: 'box', id, name, enabled: true, min: [0, 0, 0], max: [1, 1, 1], ...identityTransform() };
+}
+
+function meshObject(id: string, src: string, name = ''): GeometryObject {
+  return { kind: 'mesh', id, name, enabled: true, src, ...identityTransform() };
+}
+
+/**
+ * The tree minus the **Geometry** group, which is always present even when empty
+ * (`geometry_assets.md` §2.3). The tests below that predate it are about other
+ * groups, so they assert against the tree without it rather than repeating it in
+ * every expectation.
+ */
+function withoutGeometry<T extends { node: SceneNode } | SceneNode>(items: T[]): T[] {
+  const nodeOf = (item: T): SceneNode => ('node' in item ? item.node : (item as SceneNode));
+  return items.filter((item) => {
+    const node = nodeOf(item);
+    return node.kind !== 'geometry' && !(node.kind === 'group' && node.groupKind === 'geometry');
+  });
+}
+
 test('buildSceneTree yields a Cameras group over one node per camera, in order', () => {
   const cameras = [cam('a'), cam('b'), cam('c')];
-  const nodes = buildSceneTree(cameras);
+  const nodes = withoutGeometry(buildSceneTree(cameras));
 
   const group = nodes[0];
   assert.equal(group.kind, 'group');
@@ -77,7 +102,7 @@ test('camera node ids round-trip through nodeIdForCamera / cameraIdForNode', () 
 
 test('flattenVisible lists the group then its children when expanded', () => {
   const nodes = buildSceneTree([cam('a'), cam('b')]);
-  const rows = flattenVisible(nodes, new Set());
+  const rows = withoutGeometry(flattenVisible(nodes, new Set()));
 
   assert.deepEqual(
     rows.map((r) => [r.node.id, r.depth]),
@@ -93,7 +118,7 @@ test('flattenVisible lists the group then its children when expanded', () => {
 
 test('flattenVisible hides descendants of a collapsed group', () => {
   const nodes = buildSceneTree([cam('a'), cam('b')]);
-  const rows = flattenVisible(nodes, new Set(['group:cameras']));
+  const rows = withoutGeometry(flattenVisible(nodes, new Set(['group:cameras'])));
 
   assert.deepEqual(
     rows.map((r) => r.node.id),
@@ -104,9 +129,9 @@ test('flattenVisible hides descendants of a collapsed group', () => {
 });
 
 test('empty camera list yields an empty (childless) group', () => {
-  const nodes = buildSceneTree([]);
+  const nodes = withoutGeometry(buildSceneTree([]));
   assert.equal(nodes.length, 1);
-  const rows = flattenVisible(nodes, new Set());
+  const rows = withoutGeometry(flattenVisible(buildSceneTree([]), new Set()));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].hasChildren, false);
 });
@@ -139,7 +164,7 @@ test('probe node ids round-trip and stay disjoint from camera ids', () => {
 
 test('flattenVisible lists Cameras then Probes groups with their children', () => {
   const nodes = buildSceneTree([cam('a')], [probe('p1')]);
-  const rows = flattenVisible(nodes, new Set());
+  const rows = withoutGeometry(flattenVisible(nodes, new Set()));
   assert.deepEqual(
     rows.map((r) => r.node.id),
     ['group:cameras', nodeIdForCamera('a'), 'group:probes', nodeIdForProbe('p1')],
@@ -175,7 +200,7 @@ test('section node ids round-trip and stay disjoint from camera/probe ids', () =
 
 test('flattenVisible lists Cameras, Probes, then Sections groups with their children', () => {
   const nodes = buildSceneTree([cam('a')], [probe('p1')], [section('s1')]);
-  const rows = flattenVisible(nodes, new Set());
+  const rows = withoutGeometry(flattenVisible(nodes, new Set()));
   assert.deepEqual(
     rows.map((r) => r.node.id),
     ['group:cameras', nodeIdForCamera('a'), 'group:probes', nodeIdForProbe('p1'), 'group:sections', nodeIdForSection('s1')],
@@ -354,7 +379,7 @@ test('Constraints is the last root group: Cameras → Probes → Sections → Zo
     [cgroup('cg-1')],
     [],
   );
-  const roots = flattenVisible(nodes, new Set())
+  const roots = withoutGeometry(flattenVisible(nodes, new Set()))
     .filter((r) => r.depth === 0)
     .map((r) => r.node.label);
   assert.deepEqual(roots, ['Cameras', 'Probes', 'Zones', 'Constraints']);
@@ -480,9 +505,10 @@ test('splat nodes are selectable leaves under the group, in array order (§2.2)'
   assert.equal('childIds' in leaf, false);
 });
 
-test('Splats sits last in the fixed root order (§2.2)', () => {
-  // It is the only group that cannot change a number, and the order already runs
-  // from analysis inputs toward presentation.
+test('Splats sits last in the fixed root order, with Geometry just above it (§2.2, `geometry_assets.md` §2.3)', () => {
+  // Splats is the only group that cannot change a number, and the order runs
+  // from analysis inputs toward presentation. Geometry sits beside it: the two
+  // are the scene's backdrop, one measured and one not.
   const nodes = buildSceneTree(
     [cam('a')],
     [probe('p')],
@@ -495,7 +521,7 @@ test('Splats sits last in the fixed root order (§2.2)', () => {
   );
   const rows = flattenVisible(nodes, new Set());
   const groups = rows.filter((r) => r.node.kind === 'group' && r.depth === 0).map((r) => r.node.label);
-  assert.deepEqual(groups, ['Cameras', 'Probes', 'Sections', 'Zones', 'Constraints', 'Splats']);
+  assert.deepEqual(groups, ['Cameras', 'Probes', 'Sections', 'Zones', 'Constraints', 'Geometry', 'Splats']);
 });
 
 test('a splat row is labelled by its own name, else its filename — never an ordinal (§2.3)', () => {
@@ -599,6 +625,7 @@ test('every group header carries its own `groupKind` discriminator (spec §15.1)
     [cgroup('cg-1')],
     [con('con-1', 'cg-1')],
     [splat('splat-1')],
+    [boxObject('geom-1')],
   );
   const groups = nodes.filter((n) => n.kind === 'group');
   assert.deepEqual(
@@ -609,7 +636,65 @@ test('every group header carries its own `groupKind` discriminator (spec §15.1)
       ['Sections', 'sections'],
       ['Zones', 'zones'],
       ['Constraints', 'constraints'],
+      ['Geometry', 'geometry'],
       ['Splats', 'splats'],
     ],
   );
+});
+
+// --- the Geometry group (`geometry_assets.md` §2.3, §2.4) --------------------
+
+test('the Geometry group is present even when the list is empty (§2.3)', () => {
+  // The one group with no "when non-empty" condition: an empty geometry list is
+  // a legal, reachable state, and the header is where that state is explained
+  // and where Add geometry… lives. A group that vanished when emptied would take
+  // the only route back with it.
+  const nodes = buildSceneTree([cam('a')]);
+  const group = nodes.find((n) => n.kind === 'group' && n.groupKind === 'geometry');
+  assert.ok(group);
+  assert.deepEqual(group.kind === 'group' && group.childIds, []);
+});
+
+test('every geometry object gets a row — room, box and mesh alike (§2.3)', () => {
+  const objects = [boxObject('geom-1'), meshObject('geom-2', 'assets/site/rack.obj')];
+  const nodes = buildSceneTree([cam('a')], [], [], [], [], [], [], [], objects);
+  const rows = nodes.filter((n) => n.kind === 'geometry');
+  assert.deepEqual(rows.map((n) => n.kind === 'geometry' && n.geometryId), ['geom-1', 'geom-2']);
+});
+
+test('geometry rows label by basename for a mesh and by per-kind ordinal for a primitive (§2.4)', () => {
+  const nodes = buildSceneTree(
+    [cam('a')], [], [], [], [], [], [], [],
+    [boxObject('geom-1'), meshObject('geom-2', 'assets/site/rack.obj'), boxObject('geom-3', 'Pallet')],
+  );
+  const labelOf = (id: string) => nodes.find((n) => n.kind === 'geometry' && n.geometryId === id)?.label;
+  assert.equal(labelOf('geom-1'), 'Box 1');
+  assert.equal(labelOf('geom-2'), 'rack.obj');
+  assert.equal(labelOf('geom-3'), 'Pallet');
+});
+
+test('a geometry node selects itself, and round-trips through its node id', () => {
+  const nodes = buildSceneTree([cam('a')], [], [], [], [], [], [], [], [boxObject('geom-1')]);
+  const node = nodes.find((n) => n.kind === 'geometry')!;
+  assert.deepEqual(nodeSelection(node), { kind: 'geometry', id: 'geom-1' });
+  assert.equal(nodeIdForSelection({ kind: 'geometry', id: 'geom-1' }), node.id);
+  assert.equal(geometryIdForNode(nodeIdForGeometry('geom-1')), 'geom-1');
+  assert.equal(geometryIdForNode(nodeIdForSplat('splat-1')), null);
+});
+
+test('nodeEnabled routes a geometry row to its own flag (spec §5.4)', () => {
+  const nodes = buildSceneTree([cam('a')], [], [], [], [], [], [], [], [boxObject('geom-1')]);
+  const node = nodes.find((n) => n.kind === 'geometry')!;
+  const lookup: EnabledLookup = {
+    camera: () => true,
+    probe: () => true,
+    section: () => true,
+    zone: () => true,
+    volume: () => true,
+    constraintGroup: () => true,
+    constraint: () => true,
+    splat: () => true,
+    geometry: (id) => id !== 'geom-1',
+  };
+  assert.equal(nodeEnabled(node, lookup), false);
 });

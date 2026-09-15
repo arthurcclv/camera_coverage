@@ -43,7 +43,7 @@ import type { CameraConstraint } from '../../placement/region.ts';
 import { CoverageOverlay, type OverlayOptions } from '../coverageOverlay.ts';
 import { threeSpace, type TransformSpace } from '../transformSpace.ts';
 import { axisMapping, type ClipBand, type Section, type SectionCellGrid } from '../sectionHeatmap.ts';
-import { clipBandPlanes, setGeometryClippingPlanes, swapGeometry, type GeometryBuild } from '../sceneGeometryBuild.ts';
+import { clipBandPlanes, positionFromNode, setGeometryClippingPlanes, swapGeometry, type GeometryBuild } from '../sceneGeometryBuild.ts';
 import {
   isClick,
   selectionAfterClick,
@@ -64,6 +64,7 @@ import { nearestHit, type PickCandidate } from './pick.ts';
 import { surfaceHit } from './surfaceHit.ts';
 import { planeFromHit, planeHit, seedPlane, type HoverPlane } from './hoverPlane.ts';
 import { floorVolumeSize, sectionBoundsFromCenters } from './transformReadback.ts';
+import { resolveMode } from './transformMode.ts';
 import type { GizmoAttachable, GizmoPicker } from '../gizmoSet.ts';
 import type { TransformChange } from './types.ts';
 
@@ -652,7 +653,10 @@ export class SceneView {
       prev.placing !== next.placing ||
       prev.drawing !== next.drawing ||
       prev.selectedVertex !== next.selectedVertex ||
-      prev.constraints !== next.constraints
+      prev.constraints !== next.constraints ||
+      // A geometry rebuild replaces the node the gizmo is attached to
+      // (`geometry_assets.md` §4.3, §7), so the attach has to follow the build.
+      prev.room !== next.room
     ) {
       this.attachForSelection(next);
     }
@@ -946,6 +950,23 @@ export class SceneView {
             : { kind: 'constraint', id, position: t.position },
         );
       },
+      geometry: (id) => {
+        // The render node carries the object's transform on itself rather than
+        // baked into its vertices, precisely so the gizmo can drag it
+        // (`geometry_assets.md` §7), so the readback is the node's own TRS.
+        const node = this.prev?.room.objectNodes.get(id);
+        if (!node) return;
+        this.transformHandler?.({
+          kind: 'geometry',
+          id,
+          // The node sits at the object's geometric **centre** so the gizmo lands
+          // on the object rather than at its frame origin, so the position comes
+          // back through the same offset that placed it (§7).
+          position: positionFromNode(node),
+          rotation: [node.quaternion.x, node.quaternion.y, node.quaternion.z, node.quaternion.w],
+          scale: [node.scale.x, node.scale.y, node.scale.z],
+        });
+      },
       zone: () => {},
       constraintGroup: () => {},
     };
@@ -984,25 +1005,19 @@ export class SceneView {
         return;
       }
     }
+    // Geometry's attach target lives on the current build rather than in a
+    // gizmo set: the render node *is* the object (`geometry_assets.md` §7), and
+    // the build is replaced wholesale on every geometry edit, so there is no
+    // long-lived set to register. A disabled object has no node — it is out of
+    // the scene (§5.1) — and then nothing attaches.
+    if (selection?.kind === 'geometry') {
+      const node = state.room.objectNodes.get(selection.id);
+      if (node) this.viewport.transformControls.attach(node);
+      return;
+    }
     const target = selection ? this.attachableSets[selection.kind]?.getAttachTarget(selection.id) : undefined;
     if (target) this.viewport.transformControls.attach(target);
     else this.viewport.transformControls.detach();
   }
 }
 
-/**
- * The active TransformControls mode for a selection (spec §12.4, §13.8): a probe
- * is a point and a section slides along one axis — both translate only; scale is
- * a volume-only mode and falls back to translate on any other selection.
- *
- * A **splat** therefore keeps Move/Rotate and never Scale, which is deliberate
- * rather than incidental: `TransformControls`'s scale mode is per-axis, and
- * dragging one handle would write the non-uniform scale that shears a capture's
- * Gaussians. Its scale is a single number in its panel instead
- * (`gaussian_splats.md` §2.1, §7).
- */
-function resolveMode(mode: 'translate' | 'rotate' | 'scale', selection: Selection): 'translate' | 'rotate' | 'scale' {
-  if (selection?.kind === 'probe' || selection?.kind === 'section') return 'translate';
-  if (mode === 'scale' && selection?.kind !== 'volume') return 'translate';
-  return mode;
-}

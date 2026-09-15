@@ -13,6 +13,7 @@ import type { Section } from './sectionHeatmap.ts';
 import type { SamplingVolume, Zone } from './samplingVolumes.ts';
 import type { CameraConstraint, ConstraintGroup } from '../placement/region.ts';
 import type { SplatObject } from './splats.ts';
+import type { GeometryObject } from './geometryModel.ts';
 
 /** Next free `prefix-N` id given the existing ids (spec §5.5). */
 export function nextFreeId(prefix: string, ids: string[]): string {
@@ -148,5 +149,32 @@ export function duplicateSplat(splats: SplatObject[], id: string): SplatObject |
     id: nextFreeId('splat', splats.map((s) => s.id)),
     position: [...src.position] as SplatObject['position'],
     rotation: [...src.rotation] as SplatObject['rotation'],
+  };
+}
+
+/**
+ * Verbatim copy of geometry object `id` with the next free `geom-N` id, or null
+ * if absent (`geometry_assets.md` §6.4).
+ *
+ * Carries **every** property — kind and per-kind parameters, `src`, `name`
+ * (blank stays blank), `enabled` and the full transform — so the copy
+ * **coincides with the original** and is then moved by its gizmo, exactly as
+ * every other kind duplicates. An offset would be a second rule for no reason: a
+ * copy placed "somewhere near" is a position the user did not choose and must
+ * undo, and this app has no undo.
+ *
+ * The transform tuples are copied out so dragging one row's gizmo cannot move
+ * the other's; a `mesh` copy keeps the same `src`, so it **shares the
+ * original's parse** (§3.5).
+ */
+export function duplicateGeometry(geometry: GeometryObject[], id: string): GeometryObject | null {
+  const src = geometry.find((o) => o.id === id);
+  if (!src) return null;
+  return {
+    ...src,
+    id: nextFreeId('geom', geometry.map((o) => o.id)),
+    position: [...src.position] as GeometryObject['position'],
+    rotation: [...src.rotation] as GeometryObject['rotation'],
+    scale: [...src.scale] as GeometryObject['scale'],
   };
 }

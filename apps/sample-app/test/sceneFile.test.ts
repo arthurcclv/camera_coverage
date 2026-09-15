@@ -12,9 +12,10 @@ import { splatLabel } from '../src/scene/splats.ts';
 
 function validDoc(): SceneFileJSON {
   return {
-    formatVersion: 3,
+    formatVersion: 4,
     geometry: [
       {
+        id: 'geom-1',
         kind: 'room',
         halfX: 10,
         halfZ: 10,
@@ -25,6 +26,7 @@ function validDoc(): SceneFileJSON {
         scale: [1, 1, 1],
       },
       {
+        id: 'geom-2',
         kind: 'box',
         min: [-7, 0, -7],
         max: [-4, 2.5, -4],
@@ -33,7 +35,8 @@ function validDoc(): SceneFileJSON {
         scale: [1, 1, 1],
       },
       {
-        kind: 'gltf',
+        id: 'geom-3',
+        kind: 'mesh',
         src: 'assets/shelf.glb',
         position: [2, 0, 3],
         rotation: [0, 0.707, 0, 0.707],
@@ -311,7 +314,7 @@ test('parseSceneFile rejects non-object JSON', () => {
 });
 
 test('parseSceneFile rejects an unknown/newer formatVersion (spec §14.8)', () => {
-  const result = parseSceneFile({ ...validDoc(), formatVersion: 4 });
+  const result = parseSceneFile({ ...validDoc(), formatVersion: 5 });
   assert.equal(result.ok, false);
   assert.equal(parseSceneFile({ ...validDoc(), formatVersion: 0 }).ok, false);
 });
@@ -356,7 +359,7 @@ test('serializeScene always writes the current formatVersion (§14.3)', () => {
   assert.equal(parsed.ok, true);
   if (!parsed.ok) return;
   assert.equal(serializeScene(parsed.scene).formatVersion, SCENE_FILE_FORMAT_VERSION);
-  assert.equal(SCENE_FILE_FORMAT_VERSION, 3);
+  assert.equal(SCENE_FILE_FORMAT_VERSION, 4);
 });
 
 test('parseSceneFile rejects a volume whose zoneId references no zone (§14.8)', () => {
@@ -607,19 +610,17 @@ test('splats round-trip with their registration (§8)', () => {
   assert.equal(named.scale, 0.98);
 });
 
-test('an absent `splats` key reads as empty, which is why formatVersion stays 3 (§8)', () => {
-  // The whole point of the additive choice: a version > 3 is rejected outright,
-  // so bumping would make a scene carrying a backdrop unopenable by an older
-  // build — while an older reader can simply ignore a key it does not know.
+test('an absent `splats` key reads as empty — splats were additive, and did not bump the version (§8)', () => {
+  // Splats stayed at 3 deliberately: an older reader can ignore a key it does
+  // not know. Editable geometry could not stay additive — a v3 reader rejects
+  // `kind: "mesh"` outright — which is why *that* bumped to 4
+  // (`geometry_assets.md` §8).
   const doc = validDoc();
   delete (doc as Partial<SceneFileJSON>).splats;
   const parsed = parseSceneFile(doc);
   assert.equal(parsed.ok, true);
   if (!parsed.ok) return;
   assert.deepEqual(parsed.scene.splats, []);
-  assert.equal(SCENE_FILE_FORMAT_VERSION, 3);
-  // And it writes back at 3, so the round-trip does not upgrade the file.
-  assert.equal(serializeScene(parsed.scene).formatVersion, 3);
 });
 
 test('`enabled` is optional on read and omitted on write when true (§8)', () => {
@@ -751,4 +752,120 @@ test('a non-array `splats` aborts the import (§9)', () => {
   assert.equal(parsed.ok, false);
   if (parsed.ok) return;
   assert.match(parsed.error, /splats must be an array/);
+});
+
+// --- editable geometry: the v4 format (`geometry_assets.md` §8) ---------------
+
+/** The pre-v4 geometry shape: `kind: "gltf"`, no `id`, no `name`, no `enabled`. */
+function v3Doc(): Record<string, unknown> {
+  const doc = validDoc();
+  return {
+    ...doc,
+    formatVersion: 3,
+    geometry: [
+      { kind: 'room', halfX: 10, halfZ: 10, height: 6, thickness: 0.3, position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+      { kind: 'box', min: [-7, 0, -7], max: [-4, 2.5, -4], position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+      { kind: 'gltf', src: 'assets/shelf.glb', position: [2, 0, 3], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+    ],
+  };
+}
+
+test('a v3 file reads with ids back-filled by position and `gltf` read as `mesh` (§8)', () => {
+  // An older file describes the same scene; it just could not address it. One
+  // name for asset-backed geometry at any moment, rather than two depending on
+  // when the file was written.
+  const parsed = parseSceneFile(v3Doc());
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.scene.geometry.map((o) => o.id), ['geom-1', 'geom-2', 'geom-3']);
+  assert.deepEqual(parsed.scene.geometry.map((o) => o.kind), ['room', 'box', 'mesh']);
+  assert.equal(parsed.scene.geometry.every((o) => o.enabled && o.name === ''), true);
+});
+
+test('back-filled geometry ids route around the ones the file spells out (§8)', () => {
+  // A hand-edited v4 that names some objects and not others. Naming strictly by
+  // array position would hand object 1 the `geom-2` object 0 already holds and
+  // abort the whole import — the reader rejecting an id it invented itself.
+  const doc = validDoc();
+  const { id: _drop, ...anon } = doc.geometry[1];
+  doc.geometry = [{ ...anon, id: 'geom-2' }, { ...anon }, { ...anon }];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.scene.geometry.map((o) => o.id), ['geom-2', 'geom-1', 'geom-3']);
+});
+
+test('two objects spelling out the same geometry id still abort the import (§9)', () => {
+  // The clash the file really does contain, as opposed to one back-filling made up.
+  const doc = validDoc();
+  doc.geometry = [
+    { ...doc.geometry[1], id: 'geom-7' },
+    { ...doc.geometry[1], id: 'geom-7' },
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.match(parsed.error, /duplicate geometry id "geom-7"/);
+});
+
+test('a v3 file written back comes out as v4 `mesh` geometry (§8)', () => {
+  const parsed = parseSceneFile(v3Doc());
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const out = serializeScene(parsed.scene);
+  assert.equal(out.formatVersion, 4);
+  assert.deepEqual(out.geometry.map((o) => o.kind), ['room', 'box', 'mesh']);
+  // Ids are always written — they are what a hierarchy row selects by.
+  assert.deepEqual(out.geometry.map((o) => o.id), ['geom-1', 'geom-2', 'geom-3']);
+});
+
+test('geometry `name` is omitted when blank and `enabled` when true (§8 omit-on-write)', () => {
+  const doc = validDoc();
+  doc.geometry = [
+    { ...doc.geometry[1], id: 'geom-1' },
+    { ...doc.geometry[1], id: 'geom-2', name: 'Pallet', enabled: false },
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(parsed.scene.geometry[0].enabled, true); // absent → default true
+  assert.equal(parsed.scene.geometry[1].enabled, false);
+  const out = serializeScene(parsed.scene);
+  assert.equal('name' in out.geometry[0], false);
+  assert.equal('enabled' in out.geometry[0], false);
+  assert.equal(out.geometry[1].name, 'Pallet');
+  assert.equal(out.geometry[1].enabled, false);
+});
+
+test('explicit geometry ids are kept, and duplicates are rejected (§8)', () => {
+  const doc = validDoc();
+  doc.geometry = [
+    { ...doc.geometry[1], id: 'shelf' },
+    { ...doc.geometry[1], id: 'rack' },
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) assert.deepEqual(parsed.scene.geometry.map((o) => o.id), ['shelf', 'rack']);
+
+  const clashing = validDoc();
+  clashing.geometry = [{ ...clashing.geometry[1], id: 'same' }, { ...clashing.geometry[1], id: 'same' }];
+  assert.equal(parseSceneFile(clashing).ok, false);
+});
+
+test('a zero or negative scale component is rejected (§7, §8)', () => {
+  // Zero collapses the object; a negative mirrors it, inverting every triangle's
+  // winding — the panel's field refuses both too.
+  for (const scale of [[1, 0, 1], [1, 1, -1], [Number.NaN, 1, 1]]) {
+    const doc = validDoc();
+    doc.geometry = [{ ...doc.geometry[1], scale } as never];
+    assert.equal(parseSceneFile(doc).ok, false, JSON.stringify(scale));
+  }
+});
+
+test('a v4 file with a `mesh` src outside the folder is still rejected (§14.2, §9)', () => {
+  for (const src of ['/etc/passwd', 'http://x/y.glb', '../outside.glb']) {
+    const doc = validDoc();
+    doc.geometry = [{ ...doc.geometry[2], src } as never];
+    assert.equal(parseSceneFile(doc).ok, false, src);
+  }
 });

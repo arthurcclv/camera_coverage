@@ -139,7 +139,7 @@ function count(n: number, noun: string): string {
 
 /**
  * The referenced-asset paths a cross-folder Save As… must copy alongside the
- * scene file (§14.5) — every `gltf` object's `src` **and every splat's `src`**
+ * scene file (§14.5) — every `mesh` object's `src` **and every splat's `src`**
  * (`gaussian_splats.md` §8), in scene order, each once and **deduplicated across
  * the two**: a capture referenced by two splat rows (§3.3) copies once.
  *
@@ -156,7 +156,7 @@ export function planAssetCopy(
   const add = (src: string) => {
     if (!srcs.includes(src)) srcs.push(src);
   };
-  for (const obj of geometry) if (obj.kind === 'gltf') add(obj.src);
+  for (const obj of geometry) if (obj.kind === 'mesh') add(obj.src);
   for (const splat of splats) add(splat.src);
   return srcs;
 }

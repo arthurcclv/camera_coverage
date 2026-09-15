@@ -17,8 +17,16 @@ result. It is a **readable reference for SDK consumers**, not a shipping product
 
 ## What a user can do
 
-- Explore a fixed enclosed room (open-top box with freestanding obstacles) seeded
+- Explore an enclosed room (open-top box with freestanding obstacles) seeded
   with 10 CCTV-style cameras.
+- **Edit the scene's geometry in the app** — every geometry object, the default room
+  and its obstacles included, is a hierarchy row that can be selected, named, moved,
+  rotated, scaled, duplicated, reordered, switched off, or deleted
+  (`geometry_assets.md`). Unticking one takes it *out of the scene* rather than merely
+  off screen, which is how "what does coverage look like without this rack?" is asked;
+  deleting the last one leaves a legal scene that renders and saves but cannot be run.
+  Importing `.glb` / `.gltf` / `.ply` / `.obj` assets from the scene folder's `assets/`
+  follows in the next stage of that spec.
 - **Move / rotate / re-aim each camera** and change its FOV and detection range
   (far), via in-viewport gizmos or panel sliders.
 - **Look through the selected camera** — the **Selected** view renders the viewport

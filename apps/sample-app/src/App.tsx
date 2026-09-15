@@ -48,9 +48,15 @@ import { DEFAULT_INTENSITY_SCALE } from './scene/volumetric.ts';
 import { defaultGeometry } from './scene/buildRoom.ts';
 import { defaultScene, type Scene } from './scene/sceneModel.ts';
 import { serializeScene } from './scene/sceneFile.ts';
-import type { GeometryObject } from './scene/geometryModel.ts';
+import { describeError } from './errorText.ts';
+import { runBlocker } from './scene/runGate.ts';
+import { isScaleCapable } from './scene/sceneView/transformMode.ts';
+import { geometryLabels, type GeometryObject, type GeometryTransform } from './scene/geometryModel.ts';
 import {
+  buildSceneGeometry,
   buildStaticGeometrySync,
+  disposeGeometryBuild,
+  rebuildWithTransforms,
   type GeometryBuild,
 } from './scene/sceneGeometryBuild.ts';
 import {
@@ -60,6 +66,7 @@ import {
   exportSceneFile,
   fileExists,
   importSceneFile,
+  resolveAssetFromDirectory,
   resolveSplatFile,
 } from './scene/sceneIO.ts';
 import {
@@ -122,6 +129,7 @@ import { SaveSceneAsDialog } from './ui/SaveSceneAsDialog.tsx';
 import { VolumePanel } from './ui/VolumePanel.tsx';
 import { ZonePanel } from './ui/ZonePanel.tsx';
 import { SplatPanel } from './ui/SplatPanel.tsx';
+import { GeometryPanel } from './ui/GeometryPanel.tsx';
 import { AddSplatDialog } from './ui/AddSplatDialog.tsx';
 import { SamplingVolumeControls } from './ui/SamplingVolumeControls.tsx';
 import { MAX_CAMERAS, type Bvh, type Quat } from '@linkervision/camera-coverage-sdk';
@@ -320,12 +328,30 @@ export function App() {
   // Resolves a saveTarget.ts Message (spec §18.4) to display text — the one
   // point these composers cross from pure/testable data into translated copy.
   const toMessage = useCallback((m: Message): string => t(m.key, m.params), [t]);
-  // The default scene (spec §14.1) is computed once; `geometryObjects`/`room`
-  // (its built render+collision artifact) can later be replaced wholesale by
-  // Import/Reset (spec §14.4, §14.7) — see `applyScene` below.
+  // The default scene (spec §14.1) is computed once. The **geometry list** lives
+  // in the reducer with the rest of the document now that it is editable
+  // (`geometry_assets.md` §2.1); `room` is its *build* — the render group, the
+  // lazily-merged collision mesh and the bounds — which App owns as a side
+  // effect of that state and rebuilds below (§4.3).
   const initialScene = useMemo(() => defaultScene(), []);
-  const [geometryObjects, setGeometryObjects] = useState<GeometryObject[]>(initialScene.geometry);
   const [room, setRoom] = useState<GeometryBuild>(() => buildStaticGeometrySync(initialScene.geometry));
+  /**
+   * The geometry list `room` was built from (`geometry_assets.md` §4.3). The
+   * rebuild effect compares identity against it, so a build installed by
+   * `applyScene` is not immediately redone.
+   */
+  const builtGeometryRef = useRef<GeometryObject[]>(initialScene.geometry);
+  /**
+   * Bumped only when the geometry is **replaced wholesale** — mount and
+   * import/reset — never on an edit.
+   *
+   * This is what defers the engine (§4.3): `initAndLoad` is the session's most
+   * expensive operation, and re-running it per gizmo frame would make dragging a
+   * rack unusable. An edit marks the result stale instead, and `handleRun`'s own
+   * `initializedRoomRef.current !== room` check forces the re-init at the next
+   * run, which is exactly where the spec puts it.
+   */
+  const [engineRoomEpoch, setEngineRoomEpoch] = useState(0);
   const engine = useEngine();
   // The merged store of the run's per-chunk aggregation results + the run-
   // generation guard, behind one coordinator (spec §3.3, §12–§13, §14.4). App
@@ -377,7 +403,7 @@ export function App() {
   // of the document.
   const [sceneState, dispatch] = useReducer(sceneReducer, initialScene, initSceneState);
   const { cameras, probes, sections, clipSectionId, zones, volumes, useZones, selection, collapsedIds, stale, hasRunOnce } = sceneState;
-  const { constraintGroups, constraints, splats } = sceneState;
+  const { constraintGroups, constraints, splats, geometry } = sceneState;
   const [zoneLevel, setZoneLevel] = useState(DEFAULT_ZONE_LEVEL);
   const [boxLevel, setBoxLevel] = useState(DEFAULT_BOX_LEVEL);
 
@@ -1794,6 +1820,28 @@ export function App() {
     dispatch({ type: 'deleteEntity', kind: 'splat', id });
   }, []);
 
+  /**
+   * Geometry CRUD (`geometry_assets.md` §6.3, §6.4). Every one of these marks
+   * the coverage result stale in the reducer — geometry is what the numbers are
+   * measured against — and the render group is rebuilt by the effect that
+   * watches the list, not here.
+   */
+  const handleDeleteGeometry = useCallback((id: string) => {
+    dispatch({ type: 'deleteEntity', kind: 'geometry', id });
+  }, []);
+
+  const handleDuplicateGeometry = useCallback((id: string) => {
+    dispatch({ type: 'duplicateEntity', kind: 'geometry', id });
+  }, []);
+
+  const handleGeometryChange = useCallback((id: string, patch: Partial<GeometryTransform>) => {
+    dispatch({ type: 'changeGeometry', id, patch });
+  }, []);
+
+  const handleRenameGeometry = useCallback((id: string, name: string) => {
+    dispatch({ type: 'renameEntity', kind: 'geometry', id, name });
+  }, []);
+
   // The copy carries the same `src`, so it **shares** the original's decode
   // rather than re-reading and re-decoding the file (§3.3, §6.4).
   const handleDuplicateSplat = useCallback((id: string) => {
@@ -1903,12 +1951,17 @@ export function App() {
       // resources for a frame. `SceneView.sync` disposes it the moment it detaches
       // the group (`swapGeometry`).
       setRoom(next.build);
-      setGeometryObjects(next.geometry);
+      // The build App just installed is the one this geometry list describes, so
+      // the rebuild effect below must not immediately redo it (§4.3), and the
+      // engine's eager load fires for a *swap* rather than for an edit.
+      builtGeometryRef.current = next.geometry;
+      setEngineRoomEpoch((e) => e + 1);
       // The cached BVH is invalidated (rebuilt lazily on the next Generate).
       bvhRef.current = null;
       dispatch({
         type: 'sceneReplaced',
         doc: {
+          geometry: next.geometry,
           cameras: next.cameras,
           probes: next.probes,
           sections: next.sections,
@@ -1969,7 +2022,7 @@ export function App() {
   /** The scene exactly as a save would write it — also the dirty-check subject (§14.4). */
   const currentScene = useCallback(
     (): Scene => ({
-      geometry: geometryObjects,
+      geometry: geometry,
       cameras,
       probes,
       sections,
@@ -1981,7 +2034,7 @@ export function App() {
       constraints,
       splats,
     }),
-    [geometryObjects, cameras, probes, sections, clipSectionId, zones, volumes, useZones, constraintGroups, constraints, splats],
+    [geometry, cameras, probes, sections, clipSectionId, zones, volumes, useZones, constraintGroups, constraints, splats],
   );
 
   /**
@@ -2101,7 +2154,7 @@ export function App() {
       // authoring), and import always sets a target.
       // Captures copy the same way GLBs do, deduplicated across the two: a
       // capture referenced by two splat rows copies once (`gaussian_splats.md` §8).
-      const assetSrcs = sameFolder || saveTarget == null ? [] : planAssetCopy(geometryObjects, splats);
+      const assetSrcs = sameFolder || saveTarget == null ? [] : planAssetCopy(geometry, splats);
       const copyFrom = assetSrcs.length > 0 ? saveTarget?.folder ?? null : null;
       setSceneIOBusy(true);
       try {
@@ -2136,7 +2189,7 @@ export function App() {
         setConfirmOverwrite(null);
       }
     },
-    [saveTarget, geometryObjects, splats, currentScene, flashSavedStatus],
+    [saveTarget, geometry, splats, currentScene, flashSavedStatus],
   );
 
   /**
@@ -2204,7 +2257,7 @@ export function App() {
   );
 
   /** The assets a cross-folder Save As… would copy (§14.5). */
-  const assetCopyPlan = useMemo(() => planAssetCopy(geometryObjects, splats), [geometryObjects, splats]);
+  const assetCopyPlan = useMemo(() => planAssetCopy(geometry, splats), [geometry, splats]);
 
   // An error raised while a dialog is up belongs *in* it, so the next file or
   // folder can be tried without re-navigating; the panel's banner is for
@@ -2285,10 +2338,78 @@ export function App() {
   // has already bumped the epoch by then). What the epoch fixes is the *key*: the
   // remount must not join the terminated worker's unsettled `init`.
   useEffect(() => {
-    void ensureLoaded(room, debouncedVoxelSizeRef.current, camerasRef.current.length);
-  }, [room, ensureLoaded]);
+    void ensureLoaded(roomRef.current, debouncedVoxelSizeRef.current, camerasRef.current.length);
+    // Keyed on the *swap* epoch rather than on `room` itself
+    // (`geometry_assets.md` §4.3): a geometry edit replaces the build too, and
+    // loading the engine on each one would re-voxelize the workspace mid-drag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engineRoomEpoch, ensureLoaded]);
+
+  /**
+   * Rebuild the render group when the geometry list changes
+   * (`geometry_assets.md` §4.3).
+   *
+   * Immediate, because the viewport must follow a gizmo drag and Place on
+   * surface raycasts these very meshes — and cheap, because the merged collision
+   * mesh behind `room.sceneMesh` is not computed until a run asks for it.
+   *
+   * A build produced after the effect is superseded is **disposed**, not
+   * installed: it never reached the scene graph, so nothing else will free it.
+   */
+  useEffect(() => {
+    if (builtGeometryRef.current === geometry) return;
+    builtGeometryRef.current = geometry;
+    // A move/rotate/scale reuses the existing scene graph: the render nodes carry
+    // their objects' transforms, so nothing has to be rebuilt — and `objectChange`
+    // fires per frame, so a rebuild here would dispose the node under the gizmo
+    // and the drag would die on its first pixel (§4.3).
+    const moved = rebuildWithTransforms(roomRef.current, geometry);
+    if (moved) {
+      setRoom(moved);
+      return;
+    }
+    const needsAssets = geometry.some((o) => o.enabled && o.kind === 'mesh');
+    if (!needsAssets) {
+      setRoom(buildStaticGeometrySync(geometry));
+      return;
+    }
+    const dir = saveTarget?.folder;
+    if (!dir) return; // a mesh can only have come from a folder that is still open
+    let cancelled = false;
+    void buildSceneGeometry(geometry, (src) => resolveAssetFromDirectory(dir, src))
+      .then((build) => {
+        if (cancelled) {
+          disposeGeometryBuild(build);
+          return;
+        }
+        setRoom(build);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setSceneError(describeError(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [geometry, saveTarget]);
+
+  /**
+   * An empty geometry list clears the standing result (`geometry_assets.md`
+   * §5.3): an overlay describing a scene that no longer exists is worse than no
+   * overlay, and `runBlocker` has already refused the run that would replace it.
+   */
+  useEffect(() => {
+    if (!room.isEmpty) return;
+    setSummary(null);
+    viewRef.current?.clearCoverage();
+    coverageRun.clear();
+    setMasksVersion((v) => v + 1);
+  }, [room, coverageRun]);
 
   const handleRun = useCallback(async () => {
+    // No geometry, nothing to measure (`geometry_assets.md` §5.3). The button is
+    // disabled and auto-run is gated, but a run can also be reached from a
+    // keyboard path, so the gate is restated here rather than assumed.
+    if (runBlocker(stateRef.current.geometry) !== null) return;
     // A re-aggregation is about to replace the whole store under a new descriptor
     // (spec §3.3). Starting a run now would stream accumulators laid out by the
     // old one into results the adopt is about to discard — and, for an
@@ -2472,6 +2593,17 @@ export function App() {
 
   // --- auto-run: recompute automatically once results go stale, throttled to
   // at most AUTO_RUN_MAX_HZ runs/sec ------------------------------------------
+  /**
+   * Why a run is refused, translated, or null (`geometry_assets.md` §5.3).
+   *
+   * One pure decision (`scene/runGate.ts`) read by all three places that must
+   * agree: the Run button, the auto-run poll, and `handleRun` itself.
+   */
+  const blocker = useMemo(() => runBlocker(geometry), [geometry]);
+  const runBlockerText = blocker ? t(`runBlocker.${blocker}`) : null;
+  const runBlockedRef = useRef(blocker != null);
+  runBlockedRef.current = blocker != null;
+
   const busy = engine.state.status === 'initializing' || engine.state.status === 'computing';
   const staleRef = useRef(stale);
   staleRef.current = stale;
@@ -2491,6 +2623,10 @@ export function App() {
       // over two different lists.
       if (
         staleRef.current &&
+        // Nothing to measure against: the edit that emptied the scene marked the
+        // result stale, and auto-run must not answer that by running anyway
+        // (`geometry_assets.md` §5.3).
+        !runBlockedRef.current &&
         !busyRef.current &&
         !optimizerBusyRef.current &&
         !placementBusyRef.current &&
@@ -2511,6 +2647,12 @@ export function App() {
   const selectedConstraintGroup = constraintGroups.find((g) => g.id === selectedConstraintGroupId) ?? null;
   const selectedConstraint = constraints.find((c) => c.id === selectedConstraintId) ?? null;
   const selectedSplat = splats.find((s) => s.id === selectedSplatId) ?? null;
+  // The selected geometry object and the label its row shows — the panel takes
+  // the label rather than recomputing it, because the per-kind ordinal
+  // (`Box 3`) is a property of the whole list (`geometry_assets.md` §2.4).
+  const selectedGeometryIndex = selection?.kind === 'geometry' ? geometry.findIndex((o) => o.id === selection.id) : -1;
+  const selectedGeometry = selectedGeometryIndex >= 0 ? geometry[selectedGeometryIndex] : null;
+  const selectedGeometryLabel = selectedGeometryIndex >= 0 ? geometryLabels(geometry)[selectedGeometryIndex] : '';
 
   const selectedGroupMemberCount = selectedConstraintGroupId
     ? constraints.filter((c) => c.groupId === selectedConstraintGroupId).length
@@ -2640,6 +2782,9 @@ export function App() {
               onDuplicateConstraint={handleDuplicateConstraint}
               onDeleteSplat={handleDeleteSplat}
               onDuplicateSplat={handleDuplicateSplat}
+              geometry={geometry}
+              onDeleteGeometry={handleDeleteGeometry}
+              onDuplicateGeometry={handleDuplicateGeometry}
               onReorder={handleReorder}
               onExportCameraInfo={handleExportCameraInfo}
               exportCameraInfoBlocker={exportingCameraInfo ? t('exportingCameraRays') : null}
@@ -2659,7 +2804,14 @@ export function App() {
             ref={detailPanelRef}
             style={detailHeight != null ? { height: detailHeight, flex: '0 0 auto' } : undefined}
           >
-            {selectedSplat ? (
+            {selectedGeometry ? (
+              <GeometryPanel
+                object={selectedGeometry}
+                label={selectedGeometryLabel}
+                onRename={handleRenameGeometry}
+                onChange={handleGeometryChange}
+              />
+            ) : selectedSplat ? (
               <SplatPanel
                 splat={selectedSplat}
                 loadState={splatLoadStates.get(selectedSplat.id)}
@@ -2779,11 +2931,13 @@ export function App() {
                 </button>
                 <button
                   type="button"
-                  className={`btn secondary icon-btn${selection?.kind === 'volume' && transformMode === 'scale' ? ' active' : ''}`}
+                  className={`btn secondary icon-btn${isScaleCapable(selection) && transformMode === 'scale' ? ' active' : ''}`}
                   title={t('transformScale')}
                   aria-label={t('transformScale')}
-                  aria-pressed={selection?.kind === 'volume' && transformMode === 'scale'}
-                  disabled={selection?.kind !== 'volume'}
+                  aria-pressed={isScaleCapable(selection) && transformMode === 'scale'}
+                  // Volumes and geometry objects, via the same predicate the gizmo
+                  // itself uses — the two must not drift (`geometry_assets.md` §7).
+                  disabled={!isScaleCapable(selection)}
                   onClick={() => setTransformMode('scale')}
                 >
                   <ScaleIcon />
@@ -2916,6 +3070,7 @@ export function App() {
             // An open session owns the engine's camera list, so a display run
             // started here would fight it (`aim_optimization.md` §3.1).
             runDisabled={optimizer.busy || placement.busy}
+            runBlocker={runBlockerText}
             autoRun={autoRun}
             onAutoRunChange={setAutoRun}
             onRun={handleRun}

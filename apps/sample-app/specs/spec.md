@@ -86,6 +86,7 @@ apps/sample-app/
       sectionGizmos.ts     per-section heatmap plane + faint bound outlines + transform target (§13.5, §13.8)
       sceneTree.ts         scene hierarchy node model + derivation (camera + probe + section + zone/volume + constraint group/constraint) (§5.5)
       reorder.ts           hierarchy drag-reorder: pointer hit-test → insertion target + array splice (§5.5.1)
+      runGate.ts           the single pure reason a run is refused, or null (geometry_assets.md §5.3, §5.4)
       samplingVolumes.ts   zone/volume model + OBB math + BVH seeding + marked filter + per-zone aggregation (sampling_volumes.md)
       samplingVolumeGizmos.ts  per-volume wireframe boxes + transform target (sampling_volumes.md §5)
       constraintGizmos.ts  per-constraint primitive handles + translucent dilation (camera_placement.md §6.1)
@@ -93,6 +94,7 @@ apps/sample-app/
       splats.ts            SplatObject model + label + ids + clip-band → SDF box mapping (gaussian_splats.md §2, §5.4)
       splatAssets.ts       which assets/ files the Add 3DGS dialog lists, and in what order (gaussian_splats.md §3.2)
       splatLayer.ts        the splat group in the main scene: SparkRenderer, stream load, decode cache, SplatEdit lifecycle (gaussian_splats.md §4)
+      sceneView/transformMode.ts  which transform modes a selection supports, as a pure function over the selection (geometry_assets.md §7)
     cameras/
       defaults.ts          10 default camera configs
       math.ts              Euler <-> quaternion helpers
@@ -120,9 +122,10 @@ apps/sample-app/
       ZonePanel.tsx        selected-zone name + member count + per-zone stats (sampling_volumes.md §6.2)
       ConstraintGroupPanel.tsx  selected-group name + the Camera placement section: camera template + `Place cameras` (camera_placement.md §5)
       ConstraintPanel.tsx  selected-constraint kind + distance + geometry + vertex list (camera_placement.md §6)
+      GeometryPanel.tsx    selected-geometry-object name + transform + read-only kind parameters (geometry_assets.md §7)
       SplatPanel.tsx       selected-splat name + source + position/rotation/uniform scale + Flip 180° Z (gaussian_splats.md §7)
       AddSplatDialog.tsx   the Add 3DGS dialog: the capture files found in assets/ (gaussian_splats.md §3.2)
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections/Splats groups + Zones and Constraints umbrellas, enable/visibility toggle, add "+" menu with its nested Constraint submenu and its 3D Gaussian Splat… dialog entry, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections/Geometry/Splats groups + Zones and Constraints umbrellas, enable/visibility toggle, add "+" menu with its nested Constraint submenu and its 3D Gaussian Splat… dialog entry, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
       OverlayControls.tsx  overlay mode + intensity scale + resolution slider
       ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones/Constraints/Splats/Geometry visibility checkboxes (§2.4)
       ViewSelector.tsx     top-middle View dropdown: Perspective/Top/Front/Right camera selection (§2.4)
@@ -146,7 +149,7 @@ The app is a **three-column** flex layout (desktop only, §1):
   scene-file actions (`SceneFileControls`, §14.7) at the top, then the
   `SceneHierarchy` tree, then the selected entity's editor
   (`CameraPanel`/`ProbePanel`/`SectionPanel`/`VolumePanel`/`ZonePanel`/
-  `ConstraintGroupPanel`/`ConstraintPanel`/`SplatPanel`) below it. The
+  `ConstraintGroupPanel`/`ConstraintPanel`/`GeometryPanel`/`SplatPanel`) below it. The
   hierarchy grows to fill the column and scrolls internally; the detail panel
   sits below (and shows a placeholder when nothing is selected). A **draggable
   divider** between the two resizes the split: dragging sets the detail panel's
@@ -294,10 +297,13 @@ heatmap legend at its bottom-right (§13.6):
   is the grouping — there is no divider rule.
   - Transform **mode** toggle: **Move** / **Rotate** / **Scale** icon buttons,
     switching `TransformControls`'s mode. Each shows its name as a tooltip on hover
-    and is highlighted ("active") when its mode is current. **Scale** is a
-    volume-only mode (`sampling_volumes.md` §5) — enabled only while a sampling
-    volume is selected (cameras and **splats** keep Move/Rotate; probes and sections
-    are Move-only); on any other selection it falls back to Move. A **splat**'s scale
+    and is highlighted ("active") when its mode is current. **Scale** applies to a
+    sampling volume (`sampling_volumes.md` §5) **and to a geometry object**
+    (`geometry_assets.md` §7), whose per-axis `scale` a triangle mesh takes correctly;
+    cameras and **splats** keep Move/Rotate, probes and sections
+    are Move-only, and on any other selection it falls back to Move. The rule is one
+    pure function (`scene/sceneView/transformMode.ts`), not a condition restated at
+    each use site. A **splat**'s scale
     is deliberately **not** on the gizmo: it is a single uniform number edited in its
     panel, because the per-axis scale gizmo would shear the capture's Gaussians
     (`gaussian_splats.md` §2.1, §7).
@@ -553,7 +559,13 @@ volume's `position` is its box *centre* — placing it on a surface would bury h
 the box below that surface — so all three leave the button **disabled**. A
 **splat** carries a `position` but is disabled too, for a different reason: its
 registration is a whole-capture frame, not a point to drop on a wall
-(`gaussian_splats.md` §7). The
+(`gaussian_splats.md` §7). A **geometry object** is disabled for the plainest
+reason of all: **it is not a point**. A room is a shell, a box is a pair of
+corners, and a mesh is a body about its own pivot (`geometry_assets.md` §7) —
+none of them has a position that "sits on" a surface the way a camera does.
+Meshes do, however, become ordinary **targets**: an imported mesh is part of the
+scene geometry the click ray tests against (§14.6), so a camera can be placed on
+a rack or a gantry exactly as on a wall. The
 supported set is a single named list in the code, not a condition spelled out at
 each use site, and widening it is a deliberate edit that every consumer must be
 updated for.
@@ -669,8 +681,16 @@ load.
 
 `enabled: false` — on a camera (§5.4), a section (§13.1), a zone
 (`sampling_volumes.md` §6.2), a constraint / constraint group
-(`camera_placement.md` §3.1), or a splat (`gaussian_splats.md` §5.1) — means the
+(`camera_placement.md` §3.1), a splat (`gaussian_splats.md` §5.1), or a **geometry
+object** (`geometry_assets.md` §5.1) — means the
 entity **draws nothing in the viewport**.
+
+**Geometry is the one kind whose checkbox also changes a number.** An unticked
+geometry object is not merely undrawn: it contributes **no triangles** to the merged
+collision mesh and **no bounds** to the workspace AABB, so unticking it marks the
+coverage result stale (§8.1) and the next run measures the scene without it. That is
+the point — it is how "what does coverage look like without this rack?" is asked and
+answered in one click, in an app with no undo to recover a deletion with.
 Before this rule each kind chose its own answer: sections vanished, cameras and
 zones and constraints dimmed. A large layout disables in **bulk** — Apply parks its
 surplus cameras with this very flag (`camera_placement.md` §9.4) — and a dimmed body
@@ -704,7 +724,15 @@ same value a selected but **mount-excluded** constraint takes
 (`camera_placement.md` §4.1.1): both mean *selected, and contributing nothing*, and
 separate values would be a distinction with no decision behind it.
 
-**A splat is the one exception to "selection wins."** A disabled **splat**
+**A disabled geometry object takes the same exception.** It stays hidden while
+selected, for two reasons of its own: it is genuinely not in the scene, and the
+selected-disabled tier would have to write `opacity` onto materials that
+`geometry_assets.md` §3.5 shares between every row on one asset, dimming every other
+copy with it. Its `TransformControls` gizmo **still attaches** — the object keeps an
+invisible render node — so a hidden object can be moved and re-ticked to check the
+result, which is the editability the rule was protecting.
+
+**A splat is the other exception to "selection wins."** A disabled **splat**
 (`gaussian_splats.md` §5.1) stays hidden **even while selected**. The exception above
 exists so a gizmo's own wireframe is visible to the drag that needs it; a splat is
 not a gizmo but a photoreal capture filling the viewport, and re-drawing one the user
@@ -867,9 +895,17 @@ An enclosed rectangular room, **open top**, plus freestanding box obstacles:
   create occlusion shadows.
 
 Geometry is the `geometry` list of the unified `Scene` (§14.1) — an ordered set of
-objects (`room`/`box` primitives and `gltf` references). The **default** scene's
-geometry is produced in code by `buildRoom.ts` (the room shell + box obstacles above);
-imported scenes may add GLB-referenced meshes (§14).
+objects (`room`/`box` primitives and **`mesh`** asset references). The **default**
+scene's geometry is produced in code by `buildRoom.ts` (the room shell + box obstacles
+above); a scene may add mesh assets from its folder's `assets/`
+(`geometry_assets.md`).
+
+**The list is authored in the app.** Every geometry object is a hierarchy row
+(§5.5) with an id, a name, a visibility checkbox and a transform, and can be
+selected, moved, duplicated, reordered and deleted like any other entity — the rule
+this replaced (geometry "is not selectable/editable") is gone (§14.9,
+`geometry_assets.md` §1). Deleting or unticking every object is legal and leaves a
+scene that renders and saves but cannot be **run** (§8, `geometry_assets.md` §5.3).
 
 All geometry objects are reduced to a single indexed triangle mesh
 (`positions: Float32Array`, `indices: Uint32Array`, world space, meters — §14.6) used
@@ -884,7 +920,13 @@ for **both**:
 `WorkspaceConfig` passed to `init`:
 
 - `worldMin` / `worldMax` — the room's AABB (with a small margin). Derived from the
-  merged **geometry** alone (§14.6): a **splat** capture contributes **no bounds**,
+  **enabled** geometry alone (§14.6): an imported mesh that extends past the room
+  **grows** the analysis volume with it — voxel count is cubic in extent, and that
+  cost is the user's to spend (`geometry_assets.md` §4.4) — while an unticked object
+  contributes nothing (§2.4.3). With no enabled geometry at all there is **no
+  workspace**: the build reports itself empty, the viewport falls back to a unit box
+  purely so it has something to frame, and Run is refused
+  (`geometry_assets.md` §5.3). A **splat** capture contributes **no bounds**,
   however far it extends, because it is not measured (`gaussian_splats.md` §1.1).
   Widening the analysis volume to enclose a backdrop would add voxels nothing can
   cover and dilute every reported rate.
@@ -1214,15 +1256,18 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   expandable**) and `{ kind: 'volume' }` (a selectable leaf), and — for the placement tool
   (`camera_placement.md` §7) — `{ kind: 'constraintGroup' }` (**both selectable and
   expandable**) and `{ kind: 'constraint' }` (a selectable leaf), and — for splat
-  captures (`gaussian_splats.md` §2.2) — `{ kind: 'splat' }` (a selectable leaf).
+  captures (`gaussian_splats.md` §2.2) — `{ kind: 'splat' }` (a selectable leaf), and
+  — for the scene's own geometry (`geometry_assets.md` §2.3) — `{ kind: 'geometry' }`
+  (a selectable leaf).
   Nodes carry hierarchy and
   identity only; entity payload stays in the canonical arrays — cameras in
   `CameraConfig[]` (§5), probes in `Probe[]` (§12.1), sections in `Section[]` (§13.1),
   zones in `Zone[]`, volumes in `SamplingVolume[]` (`sampling_volumes.md` §2), constraint
   groups in `ConstraintGroup[]` and constraints in `CameraConstraint[]`
-  (`camera_placement.md` §3.1), splats in `SplatObject[]` (`gaussian_splats.md` §2.1) —
+  (`camera_placement.md` §3.1), splats in `SplatObject[]` (`gaussian_splats.md` §2.1),
+  geometry in `GeometryObject[]` (`geometry_assets.md` §2.1) —
   which a node references by id. The tree is **derived** via
-  `buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats)`
+  `buildSceneTree(cameras, probes, sections, zones, volumes, constraintGroups, constraints, splats, geometry)`
   — no separate mutable node state.
 - **Structure.** Auto-derived collapsible groups at the root, one per entity type:
   a **"Cameras"** group over the camera nodes, (when any probes exist) a **"Probes"**
@@ -1232,12 +1277,18 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   (`sampling_volumes.md` §4.1), and (when any **constraint group** exists — including an
   empty one) a passive **"Constraints"** umbrella over **selectable+expandable constraint-group
   nodes**, each holding its constraint children (`camera_placement.md` §7) — the
-  user-created sub-groups (all other groups are auto-derived by type) — and (when any
+  user-created sub-groups (all other groups are auto-derived by type) — and a
+  **"Geometry"** group over the geometry nodes, **always present even when the list is
+  empty** (`geometry_assets.md` §2.3) — the one group with no non-empty condition,
+  because an empty geometry list is a reachable state that has to stay explainable and
+  recoverable — and (when any
   splat exists) a **"Splats"** group over the splat nodes (`gaussian_splats.md` §2.2),
   auto-derived by type like Cameras/Probes/Sections. The root order is
-  **Cameras → Probes → Sections → Zones → Constraints → Splats**, fixed; Splats sits
-  last because it is the only group that cannot change a number, and the order already
-  runs from analysis inputs toward presentation. Rows are
+  **Cameras → Probes → Sections → Zones → Constraints → Geometry → Splats**, fixed;
+  Splats sits
+  last because it is the only group that cannot change a number, and the order runs
+  from analysis inputs toward presentation — with Geometry beside it as the scene's
+  other backdrop, the measured one. Rows are
   **reorderable by drag within their own group** (§5.5.1); **reparenting** by drag is not
   offered — a volume changes zone from its panel instead (`sampling_volumes.md` §6.1), and
   a constraint changes group from its panel (`camera_placement.md` §7).
@@ -1268,6 +1319,10 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   different file rather than a repair (`gaussian_splats.md` §6.2, §9). That state is **derived side state** held beside the
   scene, like the retained per-run probe/section data (§12.3, §13.4) — never part of
   the entity and never serialized. Nothing in the app blocks on a splat's load.
+  **Geometry** rows carry an **enabled checkbox** whose meaning is unique in this tree
+  — it decides whether the object is **in the scene at all**, triangles and bounds
+  included (§2.4.3, `geometry_assets.md` §5.1) — and a badge naming its kind
+  (`room` / `box` / `mesh`).
   A group header shows a caret, label, and passive child count.
 - **Labels.** A row's label is the entity's **resolved display name** — cameras
   (§5.6), probes (§12.1), sections (§13.1), and zones (`sampling_volumes.md` §6.2)
@@ -1276,6 +1331,10 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   exception: they keep showing the raw id (`volume-N`); volume names are out of scope
   (§16). Constraint groups and constraints resolve from their own **`name`**
   (`camera_placement.md` §3.1), falling back to `Group N` / `Constraint N`.
+  **Geometry** resolves from its own `name`, falling back to the **basename of a
+  mesh's `src`** (`rack.obj`) and, for a primitive, to an ordinal **within its own
+  kind** — `Room 1`, `Box 3`, since `Geometry 4` says nothing about what the row is
+  (`geometry_assets.md` §2.4).
   **Splats** resolve from their own `name` too, but fall back to the **basename of
   their `src`** — `site.spz`, `yard-scan.ply` — not to `Splat N`
   (`gaussian_splats.md` §2.3). It is the one documented exception to the ordinal
@@ -1305,7 +1364,15 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   draws it (`gaussian_splats.md` §5.1). A splat is likewise selectable **from the
   hierarchy only** — it is on the other canvas and not in the picked scene, and
   §2.4.2 gives the reason a click must not reach it.
-  Clicking a group header (incl. the "Zones", "Constraints" and "Splats" umbrellas)
+  Clicking a **geometry** node selects it (drives the `GeometryPanel`,
+  `geometry_assets.md` §7, and attaches the gizmo, which supports **Move, Rotate and
+  Scale** — §2.4). Geometry is selectable **from the hierarchy only**: a viewport click
+  on it still counts as a miss and deselects (§5.2), because the room's floor and walls
+  fill most of the viewport and making them pickable would leave the deselect gesture
+  almost nowhere to land (`geometry_assets.md` §6.6). Its own **enabled checkbox**
+  decides whether the object is in the scene at all (§2.4.3).
+  Clicking a group header (incl. the "Zones", "Constraints", "Geometry" and "Splats"
+  umbrellas)
   only expands/collapses it and does not change the selection.
 - **Adding entities.** The "Hierarchy" panel header **"+" menu** creates — **Camera**,
   **Probe**, **Section**, **Zone**, **Volume**, **Constraint ▸**, or
@@ -1368,6 +1435,10 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   Deleting a **splat** disposes its mesh, cancels an in-flight load, and releases its
   decoded capture **only if it was the last row referencing that `src`**
   (`gaussian_splats.md` §3.3); it never marks the result stale.
+  Deleting a **geometry object** removes an occluder, so it **marks the result stale**
+  (§8.1) — as adding, duplicating, transforming and unticking one do. Deleting the
+  **last** object is allowed and leaves the legal, unrunnable empty scene
+  (`geometry_assets.md` §5.3).
 - **Duplicating entities.** The context-menu **Duplicate** action creates a **deep copy**
   of the row's entity with the **next free id** (same id prefix) and **auto-selects** the
   copy. The copy carries **every property verbatim** — including `name` (copied exactly;
@@ -1398,7 +1469,12 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
     Duplicating to compare two registrations of one capture therefore costs a row, not
     a second copy in memory.
 
-  Duplicating a camera, a volume, or a **non-empty** zone marks the result stale (§8.1);
+  - **Geometry object** — the copy carries the kind, the shape parameters, the `src`,
+    the name, the `enabled` flag and the full transform, so it **coincides with the
+    original** and is then moved by its gizmo; a `mesh` copy **shares the original's
+    parse** (`geometry_assets.md` §6.4).
+
+  Duplicating a camera, a volume, a **geometry object**, or a **non-empty** zone marks the result stale (§8.1);
   duplicating a probe, a section, an **empty** zone, a constraint, a constraint group,
   or a splat does not (mirrors the add/delete stale rules above).
 - **Expand/collapse** state is ephemeral UI state (default expanded), not persisted
@@ -1410,14 +1486,15 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
 ### 5.5.1 Reordering rows (drag and drop)
 
 A row is **dragged to reorder it within its own group**. Draggable kinds: **camera**,
-**probe**, **section**, **zone**, **volume**, **constraint group**, **constraint**, and
+**probe**, **section**, **zone**, **volume**, **constraint group**, **constraint**,
+**geometry object**, and
 **splat**. The
 root group headers are **not** draggable — they are auto-derived by type and their order
-(Cameras → Probes → Sections → Zones → Constraints → Splats) is fixed.
+(Cameras → Probes → Sections → Zones → Constraints → Geometry → Splats) is fixed.
 
 - **Order is array order.** The tree is derived from the canonical arrays (§5.5), so
   reordering a row **is** a reorder of that entity's array — `cameras`, `probes`,
-  `sections`, `zones`, `volumes`, or `splats`. It therefore **round-trips in the scene file** with no
+  `sections`, `zones`, `volumes`, `geometry`, or `splats`. It therefore **round-trips in the scene file** with no
   new field and no format-version bump (§14.3). A **volume** is reordered **within the
   slots its own zone's volumes already occupy** in the (zone-interleaved) `volumes` array;
   no other element moves.
@@ -1627,6 +1704,23 @@ retained masks through `aggregateRetained` (§3.3) rather than recomputing
 (`sampling_volumes.md` §7.2, §7.3, §8). **Reordering** a hierarchy row (§5.5.1) likewise
 never marks stale or sampling-dirty: it permutes an array whose order is display-only, and
 results are keyed by entity id, not array position.
+
+**A geometry edit marks stale, and the rebuild waits for the run.** Adding, deleting,
+duplicating, transforming or unticking a **geometry object**
+(`geometry_assets.md` §1.1) changes the merged collision mesh and can change the
+workspace AABB, so the standing result no longer describes the scene on screen;
+**renaming and reordering do not**, being presentation like every other kind's. The
+edit sets the flag and nothing more: the render group is rebuilt at once (the viewport
+must follow a gizmo drag, and Place on surface raycasts those meshes), while the
+**merge, the AABB derivation, `init` and `loadScene` all happen as part of the next
+run** (`geometry_assets.md` §4.3) — re-voxelizing per gizmo frame would make dragging
+a site model unusable. A transform-only edit reuses the render nodes outright, since
+they carry their objects' transforms; only a structural change rebuilds them. A run
+whose AABB differs from the engine's current one is a **full re-init**, like a
+resolution change. With **no enabled geometry at all** a run is refused rather than
+marked stale: the Run button disables and says so, auto-run is gated on the same pure
+rule (`scene/runGate.ts`), and any standing result is cleared rather than left
+describing a scene that no longer exists (`geometry_assets.md` §5.3).
 
 **No splat action ever marks stale.** Adding, deleting, duplicating, moving, scaling,
 renaming, or toggling a **splat** (`gaussian_splats.md` §1.1) leaves both flags alone,
@@ -2272,7 +2366,7 @@ section stats."*; retained run diverged from the live scene → the numbers plus
 ### 13.9 Clip (geometry cross-section)
 
 Exactly **one section at a time** can hide all **scene geometry** (floor, walls, boxes,
-glTF — §14.6) **and every splat capture** (`gaussian_splats.md` §5.4) outside a band
+meshes — §14.6) **and every splat capture** (`gaussian_splats.md` §5.4) outside a band
 along its **normal (collapse axis)**, giving a CAD-style
 cross-section into the scene at the heatmap plane. Which section that is — if any — is the
 scene-level **`clipSectionId`** (§14.1); it is **independent of selection**. The band is
@@ -2282,7 +2376,9 @@ scene-level **`clipSectionId`** (§14.1); it is **independent of selection**. Th
 
 - **Scope — geometry and splats.** The clip sets two intersecting world clipping planes
   (at the band bounds) on the **materials of every mesh in the scene geometry group** —
-  floor, walls, boxes, glTF — with `renderer.localClippingEnabled` on. The coverage
+  floor, walls, boxes, and **imported mesh assets**, which take the same material
+  clipping planes as every other render mesh and need no rule of their own
+  (`geometry_assets.md` §13.9) — with `renderer.localClippingEnabled` on. The coverage
   overlay (§9), cameras, probes, and the section's own heatmap and outline planes
   (§13.5) carry no clipping planes and are **never** clipped. Rebuilding or swapping the
   geometry group (§14.4) **re-applies** the active band to the incoming materials —
@@ -2339,6 +2435,12 @@ split) are **not** part of the scene file — they remain app-local.
 
 ### 14.1 Unified `Scene` model
 
+- A **`GeometryObject`** carries an `id` (`geom-N`), an editable `name` (§5.5), an
+  `enabled` flag (§2.4.3) and a transform, and is one of three kinds — `room`, `box`,
+  or **`mesh`** (an asset under `assets/`; one kind for `.glb`/`.gltf`/`.ply`/`.obj`,
+  with the loader chosen by extension). It is **addable, selectable and editable**
+  like every other entity (`geometry_assets.md` §2.1); the rule that once said
+  otherwise is gone (§14.9).
 - All scene entities live in a single in-memory `Scene`:
   `{ geometry: GeometryObject[], cameras: Camera[], probes: Probe[],
   sections: Section[], clipSectionId: string | null, zones: Zone[],
@@ -2391,7 +2493,7 @@ split) are **not** part of the scene file — they remain app-local.
 - Scene files are **flat** — only the folder root is searched, never subfolders. A
   scene one level down would sit one level from `assets/`, and reaching back up needs a
   `..` segment that this section's own path rule rejects.
-- A `gltf` geometry object's `src` is a path **relative to the folder root**
+- A `mesh` geometry object's `src` is a path **relative to the folder root**
   (e.g. `assets/shelf.glb`), resolved through the picked directory handle — so every
   scene file in a folder resolves assets identically, which is exactly what lets them
   share one `assets/`.
@@ -2412,13 +2514,21 @@ split) are **not** part of the scene file — they remain app-local.
 ### 14.3 Scene file format
 
 - **Filename** — any portable name ending `.json` (§14.2, §14.5); nothing in the format
-  depends on it, which is why **`formatVersion` stays `3`**. Naming scene files changes
+  depends on it, which is why naming a scene file needs no version bump. Naming scene files changes
   which file is read, not what is in it. (`scene.json` remains the conventional default
   name, and the name this spec uses in examples.)
 - **`formatVersion`** — integer, currently `3` (bumped from 1 for zones/volumes, and
   from 2 for camera constraints). The reader **accepts 1, 2, and 3**: a v1 file reads with
   empty `zones`/`volumes` and `useZones` false, and a v1 or v2 file reads with empty
-  `constraintGroups`/`constraints`. A version **> 3** is rejected (§14.8).
+  `constraintGroups`/`constraints`. A v1–v3 file's **geometry** reads with back-filled
+  ids (`geom-1`… by array position), blank names and `enabled: true`, and its
+  `kind: "gltf"` objects read as **`mesh`** (`geometry_assets.md` §8). A version
+  **> 4** is rejected (§14.8).
+  **Editable geometry bumped the version, and splats did not**, for a reason worth
+  stating: every earlier addition could simply be *ignored* by an older reader, while
+  `kind: "mesh"` cannot — a v3 reader rejects an unknown geometry kind outright, so
+  such a file would abort on an older build with a schema error rather than a version
+  one. The bump is the honest signal.
   **Splats did not bump it.** `splats` reads as `[]` when absent, so every existing file
   loads unchanged — the same additive precedent `name`, `clipRange`, the camera
   `enabled` flag and the section footprint bounds set below. A bump to `4` was rejected
@@ -2429,11 +2539,18 @@ split) are **not** part of the scene file — they remain app-local.
   as the SDK and glTF. Rotations are **quaternions `[x, y, z, w]`** throughout (matching
   `CameraConfig.rotation`, §5.1).
 - **`geometry`** — an ordered list of objects, each a discriminated union on `kind`,
-  all carrying a transform (`position [x,y,z]`, `rotation [x,y,z,w]`, `scale [x,y,z]`):
+  all carrying an `id`, an optional `name`, an optional `enabled`, and a transform
+  (`position [x,y,z]`, `rotation [x,y,z,w]`, `scale [x,y,z]`, every scale component `> 0`):
   - `room` — parametric shell (`halfX`, `halfZ`, `height`, `thickness`): floor + 4 walls,
     open top (§4.1).
   - `box` — axis-aligned obstacle (`min`, `max`) in the object's local frame.
-  - `gltf` — a `src` reference (§14.2) to a GLB/GLTF asset.
+  - `mesh` — a `src` reference (§14.2) to an asset under `assets/`. The reader accepts
+    **`gltf`** too, the pre-v4 spelling of the same thing (`geometry_assets.md` §2.2).
+
+  `id` is always written; `name` is omitted when blank and `enabled` when `true`,
+  exactly like a camera's and a splat's. A zero or negative `scale` component is
+  rejected: zero collapses the object and a negative one mirrors it, inverting every
+  triangle's winding.
 - **`cameras`** / **`probes`** / **`sections`** — the serialized cameras, `Probe[]`,
   and `Section[]` (§5, §12.1, §13.1). A **camera** object is the app `Camera` shape —
   the `CameraConfig` fields **plus** an optional `name`, an optional `enabled`, an
@@ -2511,14 +2628,14 @@ Sketch:
 
 ```json
 {
-  "formatVersion": 3,
+  "formatVersion": 4,
   "useZones": false,
   "geometry": [
-    { "kind": "room", "halfX": 10, "halfZ": 10, "height": 6, "thickness": 0.3,
+    { "id": "geom-1", "kind": "room", "halfX": 10, "halfZ": 10, "height": 6, "thickness": 0.3,
       "position": [0,0,0], "rotation": [0,0,0,1], "scale": [1,1,1] },
-    { "kind": "box", "min": [-7,0,-7], "max": [-4,2.5,-4],
+    { "id": "geom-2", "kind": "box", "min": [-7,0,-7], "max": [-4,2.5,-4],
       "position": [0,0,0], "rotation": [0,0,0,1], "scale": [1,1,1] },
-    { "kind": "gltf", "src": "assets/shelf.glb",
+    { "id": "geom-3", "kind": "mesh", "name": "Rack row A", "src": "assets/shelf.glb",
       "position": [2,0,3], "rotation": [0,0.707,0,0.707], "scale": [1,1,1] }
   ],
   "cameras": [
@@ -2701,9 +2818,9 @@ scene file within it:
   when a target exists, plus a stable `id` so the app keeps its own
   remembered-directory bucket instead of following the last folder used anywhere in the
   origin.
-- An in-place **Save** writes **only the scene file** — the GLB/GLTF and capture bytes
+- An in-place **Save** writes **only the scene file** — the mesh and capture bytes
   are already
-  in the folder, and are shared with every other scene file there. A `gltf` object whose
+  in the folder, and are shared with every other scene file there. A `mesh` object whose
   `src` is absent from the folder is a **dangling reference** and will fail a later
   import (§14.8); it also aborts a cross-folder Save As…, which cannot copy a file that
   isn't there. A **splat** whose `src` is absent is the deliberate asymmetry: it is
@@ -2713,7 +2830,7 @@ scene file within it:
   (`gaussian_splats.md` §9). Bundling/embedding asset bytes into the scene file stays
   out of scope (§14.9) — copies are ordinary files.
 - **Assets follow a cross-folder Save As…** — a save into a folder that is *not* the
-  target's copies every asset the scene references (§14.2) — every `gltf` `src` **and
+  target's copies every asset the scene references (§14.2) — every `mesh` `src` **and
   every splat `src`**, deduplicated across the two by `planAssetCopy(geometry, splats)`
   — from the target folder
   to the same relative path under the destination, creating intermediate folders as
@@ -2738,35 +2855,55 @@ scene file within it:
 
 ### 14.6 Geometry rendering & collision
 
-- **Rendering** — `room`/`box` primitives render as today (§4.1); `gltf` objects render
-  with their own materials from the loaded glTF scene graph, positioned by the object
-  transform. **All** renderable geometry — primitives and glTF meshes alike — is forced
+- **Rendering** — `room`/`box` primitives render as today (§4.1); `mesh` objects render
+  with their own materials from the loaded asset, positioned by the object
+  transform. **The transform rides on each object's own render node**, not baked into
+  its vertices, because that node is what `TransformControls` drags — and the node sits
+  at the object's **geometric centre**, with its content offset back by the same
+  amount, so the gizmo lands on the object instead of at a frame origin that is
+  routinely elsewhere (`geometry_assets.md` §7) — collision still bakes to world space, since
+  `engine.loadScene` takes one flat buffer. **All** renderable geometry — primitives and glTF meshes alike — is forced
   **double-sided** (`side = THREE.DoubleSide`), overriding whatever `side` a glTF file's
   materials authored, so back-faces never cull (e.g. viewing a room from inside, or a
   section cutaway exposing an interior face). This applies only to `side`; every other
   material property from the glTF is preserved.
+- **Lazy merge, lazy engine** — a geometry edit rebuilds only what the viewport needs.
+  The merged `SceneMesh` is computed on **first read** and the engine is re-initialized
+  **at the next run**, not on the edit (§8.1, `geometry_assets.md` §4.3); a
+  transform-only edit reuses the existing scene graph outright, since a per-frame
+  rebuild during a gizmo drag would dispose the very node being dragged.
 - **Build swap** — replacing the geometry on import (§14.4) **detaches** the outgoing
   build from the scene graph before **releasing** its GPU resources, and attaches the
-  incoming one after. A load therefore never draws a frame against a freed build: no
+  incoming one after. A build that **reuses** the previous one's scene graph (the
+  transform case above) swaps nothing and disposes nothing. A load therefore never draws a frame against a freed build: no
   flash of the outgoing scene, no both-scenes-at-once, and no garbage where a clip band
   (§13.9) was active.
-- **Collision** — **every** geometry object contributes to occlusion. Each object is
-  reduced to world-space triangles: primitives generated as before; GLB meshes traversed,
+- **Collision** — **every enabled** geometry object contributes to occlusion; an
+  unticked one contributes neither triangles nor bounds and is not drawn
+  (§2.4.3, `geometry_assets.md` §5.1). Each object is
+  reduced to world-space triangles: primitives generated as before; asset meshes traversed,
   each mesh's geometry transformed by (node world-matrix × object transform) and
-  de-indexed into world-space positions/indices. Non-mesh glTF nodes (embedded lights /
+  de-indexed into world-space positions/indices — the per-object triangles kept in
+  their **own** frame as well, so a later move/rotate/scale re-bakes them instead of
+  re-parsing the asset (`geometry_assets.md` §4.3). Non-mesh glTF nodes (embedded lights /
   cameras) are ignored. All triangles are merged into the single indexed `SceneMesh`
   passed to `engine.loadScene` (§4.1). This statement is **exact**, and is one of the
   two reasons a splat capture is not a `GeometryObject` (§14.1): a capture has no
   triangles to contribute, so it occludes nothing and is absent from the `SceneMesh`.
-- **The Geometry layer toggle hides drawing only** (§2.4). Unticking it sets the render
+- **The Geometry layer toggle hides drawing only** (§2.4) — and it is deliberately
+  *not* the same control as a geometry row's checkbox, which takes an object out of
+  the scene (§2.4.3). The layer menu is about **drawing**; the hierarchy is about
+  **what is in the scene**, exactly as for cameras (`geometry_assets.md` §5.2). Unticking it sets the render
   group invisible; the merged `SceneMesh`, the workspace AABB, and every standing
   coverage result are untouched, so the toggle never marks the result stale (§8.1). It
   exists because splats draw **behind** this group (§2.3) — hiding the model is how the
   real capture is seen with the same cameras and the same overlay
   (`gaussian_splats.md` §5.3).
-- **Workspace** — the AABB passed to `init` (§4.2) is derived from the merged geometry's
-  bounds (with the existing margin), so imported geometry extending beyond the default
-  room is still covered. Splats contribute **no** bounds (§4.2).
+- **Workspace** — the AABB passed to `init` (§4.2) is derived from the **enabled**
+  geometry's bounds (with the existing margin), so imported geometry extending beyond
+  the default room is still covered — and, on a large asset, costs the cubic voxel
+  growth that implies (`geometry_assets.md` §4.4). With nothing enabled there is no
+  workspace and no run (§8.1). Splats contribute **no** bounds (§4.2).
 
 ### 14.7 UI controls
 
@@ -2854,9 +2991,10 @@ scene file within it:
 | Folder holds no valid scene file | the dialog says so and offers **Change…**; nothing is loaded |
 | A `*.json` in the folder is not a valid scene file | that row lists greyed and unselectable with its reason (§14.4); the rest of the list is unaffected |
 | Chosen scene file unreadable / not JSON / schema-invalid | abort, keep current scene and target, error in the dialog |
-| Newer `formatVersion` (> 3) | abort, keep current scene, show error (v1, v2 and v3 are accepted) |
+| Newer `formatVersion` (> 4) | abort, keep current scene, show error (v1–v4 are accepted; a v1–v3 file's geometry back-fills ids and reads `gltf` as `mesh`, §14.3) |
 | Duplicate id within a category (incl. zones, volumes, constraint groups, constraints) | abort, keep current scene, show error |
-| Unknown geometry `kind` | abort, keep current scene, show error |
+| Unknown geometry `kind`, duplicate geometry `id`, or a zero/negative/non-finite `scale` component | abort, keep current scene, show error (`geometry_assets.md` §9) |
+| Every geometry object deleted or unticked | legal; the scene loads, renders and saves, and **Run is disabled** with *"No geometry to measure"*, the standing result cleared (`geometry_assets.md` §5.3) |
 | `volume.zoneId` referencing no zone, or non-positive `size` | abort, keep current scene, show error |
 | `constraint.groupId` referencing no group, or `camera.constraintId` referencing no constraint | abort, keep current scene, show error |
 | Unknown constraint `kind`, negative/non-finite `distance`, a polyline with fewer than 2 points, or a non-positive plane `size` component | abort, keep current scene, show error |
@@ -2871,7 +3009,7 @@ scene file within it:
 | Target folder renamed / deleted / unmounted on save | keep in-memory scene and the target, show error (Save As… redirects) |
 | Referenced asset missing from the source folder on a cross-folder Save As… | abort before writing the scene file, keep target, show error naming the asset (splat captures included — a copy cannot invent bytes) |
 | Asset copy fails (read, write, or quota) | abort before writing the scene file, keep target, show error naming the asset |
-| Unsafe splat `src` (absolute / URL / `..` / outside folder) | abort the import, keep current scene, show error (as for `gltf`) |
+| Unsafe splat `src` (absolute / URL / `..` / outside folder) | abort the import, keep current scene, show error (as for a mesh `src`) |
 | Duplicate splat id, non-positive or non-finite `scale`, malformed `rotation`, non-boolean `enabled` | abort the import, keep current scene, show error |
 | Referenced splat capture **missing** from `assets/` | **import succeeds**; the row badges `⚠ missing from assets/`; nothing is drawn; no coverage number changes (§14.4 step 5) |
 | Referenced splat capture unreadable or **fails to decode** | **import succeeds**; the row badges `⚠ could not be decoded`; nothing is drawn; no coverage number changes |
@@ -2883,16 +3021,18 @@ scene file within it:
 
 ### 14.9 Out of scope for this feature
 
-- In-app **`geometry`** authoring — no add / move / scale / delete of geometry via gizmos
-  or panels, and geometry is not selectable/editable like cameras/probes/sections. The
-  geometry list is authored by editing the scene file or via export (§14.5). This rule
-  is scoped to the **`geometry` array**: a **splat** lives in its own `splats` array and
-  *is* addable, selectable, and editable, which is one of the two reasons it is not a
-  fourth `GeometryObject` kind (§14.1, `gaussian_splats.md` §2.1).
+- **Creating primitives in-app** — no `+ ▸ Box` / `+ ▸ Room`, and a primitive's own
+  parameters (`halfX`/`height`/`min`/`max`) are shown read-only rather than edited
+  (`geometry_assets.md` §7, §14). Arbitrary shapes come in as **mesh assets**, which
+  *are* addable, selectable and editable, along with the room and boxes themselves —
+  the rule this bullet used to state ("geometry is not selectable/editable") was
+  deleted by `geometry_assets.md`.
 - Embedding or bundling assets (data-URI, zip) — assets stay file references (§14.5).
 - **File management** — no renaming, duplicating or deleting scene files from within the
-  app, and **nothing is ever written into `assets/`**: a splat capture is dropped in by
-  the user and merely **referenced** (`gaussian_splats.md` §3.2), never copied or
+  app, and **nothing is ever written into `assets/`**: a splat capture *or a mesh asset*
+  is dropped in by
+  the user and merely **referenced** (`gaussian_splats.md` §3.2,
+  `geometry_assets.md` §3.2), never copied or
   transcoded in-app. The Load and Add 3DGS dialogs list what is on disk; rearranging it
   is the OS's job. (Save As… under a new name is the supported way to fork a scene, and
   it is the one operation that does copy asset bytes, §14.5.)
@@ -3097,16 +3237,19 @@ must not be "fixed" into a nested object.
   strings via the Settings → Language dialog, §18; its §18.6 lists that feature's own
   out-of-scope items (additional languages, locale-aware number/date formatting,
   translating SDK-originated error text).
-- In-app scene *editing* — adding/removing/transforming **geometry** through the UI. The
-  scene file (§14) can carry imported geometry (including GLB meshes), but authoring it
-  in-app is out of scope. (Splat captures are a separate array and *are* authorable,
-  §14.9.)
+- **Editable geometry shipped** — adding, removing, transforming and switching off
+  **geometry** through the UI, [`geometry_assets.md`](./geometry_assets.md); its §14
+  lists that feature's own out-of-scope items (creating primitives in-app, editing a
+  primitive's intrinsic parameters, writing into `assets/`). What remains out of scope
+  here is only the last of those: **nothing is ever written into `assets/`** — a mesh
+  asset is dropped in by the user and merely referenced (§14.9).
 - Auto-persisting layouts across reloads (localStorage / autosave); explicit
   scene-file import/export is §14.
-- Scene-hierarchy: further entity types (lights, meshes), user-created groups beyond
+- Scene-hierarchy: further entity types (lights), user-created groups beyond
   zones, **reparenting by drag**, reordering the root type groups, and keyboard navigation
   / keyboard reordering. (Drag **reordering within a group** shipped, §5.5.1; **splats**
-  shipped as the newest entity type, `gaussian_splats.md` §2.2.)
+  shipped as an entity type, `gaussian_splats.md` §2.2, and **geometry objects** —
+  meshes among them — as the newest, `geometry_assets.md` §2.)
 - Probes: richer per-camera detail (distance / angle), sub-voxel visibility (a true
   per-point ray cast instead of reusing the voxel mask), and sightlines for
   non-selected probes.
@@ -3199,6 +3342,14 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
   sections, and the main stats panel). Toggled per zone from its hierarchy row
   checkbox, decoupled from selection; toggling is a client-side re-filter, not a
   recompute (`sampling_volumes.md` §7.3).
+- **Geometry object** — one member of the scene's `geometry` list: a `room`, a `box`,
+  or a `mesh`. **Coverage input**: it contributes triangles to the merged collision
+  mesh and bounds to the workspace AABB, so every geometry edit marks the result stale
+  — the exact inverse of a splat (`geometry_assets.md` §1.1).
+- **Mesh** (the geometry kind) — a geometry object referencing a triangle asset under
+  `assets/` (`.glb`, `.gltf`, `.ply`, `.obj`), with a transform, a name and a
+  membership checkbox. Its file is a **mesh asset**, distinguished from a *capture* by
+  what it holds: triangles a ray can hit, versus Gaussians it cannot.
 - **3D Gaussian Splat** (3DGS, **capture**) — a photogrammetric reconstruction of a
   real place stored as millions of oriented, coloured 3D Gaussians rather than
   triangles, rendered by projecting each to screen and blending them back-to-front.
