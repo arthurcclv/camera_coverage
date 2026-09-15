@@ -40,6 +40,7 @@ import {
 } from '../placement/region.ts';
 import { defaultSplat, FLIP_Z_ROTATION, identityRegistration, type SplatObject } from './splats.ts';
 import { identityTransform, type GeometryTransform } from './geometryModel.ts';
+import { withRewrittenSrcs } from './assetMaterialise.ts';
 import type { Scene } from './sceneModel.ts';
 import type { Selection } from './viewportSelection.ts';
 import {
@@ -164,6 +165,17 @@ export type SceneAction =
    * dialog; the app never writes into `assets/`.
    */
   | { type: 'addGeometry'; src: string }
+  /**
+   * Re-point every row whose asset moved when a save resolved it
+   * (`asset_import.md` §8.3): an imported file that turned out to already be in
+   * `assets/` is referenced where it actually lives, not where the import
+   * provisionally put it.
+   *
+   * **Never marks the result stale.** The bytes did not change and neither did a
+   * triangle — only the name they are filed under — so this is presentation, in
+   * the same class as a rename (§1.1).
+   */
+  | { type: 'rewriteAssetSrcs'; rewrites: ReadonlyMap<string, string> }
   | { type: 'deleteEntity'; kind: EntityKind; id: string }
   | { type: 'duplicateEntity'; kind: EntityKind; id: string }
   /** Hierarchy drag-reorder (§5.5.1): move `id` before sibling `beforeId`, or last when null. */
@@ -469,6 +481,12 @@ export function sceneReducer(state: SceneDocState, action: SceneAction): SceneDo
       };
       return { ...state, zones, volumes: [...state.volumes, volume], selection: { kind: 'volume', id }, ...samplingInput(state) };
     }
+
+    case 'rewriteAssetSrcs':
+      // The same mapping the written scene file gets, applied by the same
+      // function — so the rows on screen and the `src`s on disk cannot disagree
+      // about where an asset moved to.
+      return withRewrittenSrcs(state, action.rewrites);
 
     case 'addSplat': {
       const id = nextFreeId('splat', state.splats.map((s) => s.id));

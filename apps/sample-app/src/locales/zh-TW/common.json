@@ -22,7 +22,6 @@
   "resizeHierarchyPanels": "調整階層與詳細資料面板大小",
   "exportingCameraRays": "正在計算攝影機視線…",
   "selectedViewDisabledReason": "請選取一台攝影機以使用此檢視",
-  "addSplatBlocker": "請先載入或儲存場景。",
   "unionLabelZones": "所有已啟用的區域",
   "unionLabelWorkspace": "整個工作區",
   "view": "視角",
@@ -82,5 +81,23 @@
   "legendCamerasSeeingVoxel": "可見攝影機數",
   "runBlocker": {
     "noGeometry": "沒有可量測的幾何物件 — 請先勾選或新增幾何列。"
-  }
+  },
+  "unsavedPendingAssets_one": "載入將捨棄 1 個尚未寫入磁碟的匯入資產。",
+  "unsavedPendingAssets_other": "載入將捨棄 {{count}} 個尚未寫入磁碟的匯入資產。",
+  "writePermissionDenied": "寫入權限遭拒",
+  "pendingAssetUnreadable": "「{{src}}」已無法讀取——可能在匯入後被移動或刪除。未儲存任何內容。",
+  "importRefusalSogBundle": "這是 SOG 套件——請改用它的 .sog 壓縮檔。",
+  "importRefusalExtension": "這裡無法匯入 {{ext}} 檔案——可接受：{{accepted}}。",
+  "importRefusalNoExtension": "無副檔名的檔案無法匯入——可接受：{{accepted}}。",
+  "importRefusalMeshPly": "這是網格 PLY——請改用「匯入模型…」。",
+  "importRefusalSplatPly": "這是 3DGS 擷取檔——請改用「匯入 3DGS 擷取檔…」。",
+  "importRefusalNoFaces": "沒有面——無法遮擋任何東西。",
+  "importRefusalUnreadablePly": "不是可讀的 PLY。",
+  "materialiseNotImportPath": "「{{src}}」不是匯入資產的路徑，因此無法寫入。",
+  "materialiseFolderIsFile": "已有名為 {{folder}} 的檔案。請先重新命名或移除它。",
+  "materialiseFolderInUse": "無法取代 {{folder}}/：此場景仍使用其中的「{{src}}」。",
+  "savedAssetsPresent_other": "已儲存「{{name}}」——有 {{count}} 個匯入資產原本就在此資料夾中。",
+  "savedWithAssetsAndPresent_other": "已將「{{name}}」儲存至 {{folder}}，含 {{count}} 個資產——其中 {{present}} 個原本就在。",
+  "savedAssetsPresent_one": "已儲存「{{name}}」——有 {{count}} 個匯入資產原本就在此資料夾中。",
+  "savedWithAssetsAndPresent_one": "已將「{{name}}」儲存至 {{folder}}，含 {{count}} 個資產——其中 {{present}} 個原本就在。"
 }

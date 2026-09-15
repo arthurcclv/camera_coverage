@@ -7,15 +7,15 @@
  * menu — the failure `entityMenu.ts`'s header documents at length.
  *
  * Group headers had **no** menu at all before this (spec §5.5), and most still
- * behave that way: only **Cameras** declares an item today, every other group
- * declares `[]`, and an empty list opens **nothing** — right-clicking Probes,
- * Sections, Zones, Constraints, Geometry, or Splats stays the no-op it always
- * was. That is the point of an empty array over an absent key: "this group has
- * no items" is a stated decision, not an oversight.
+ * behave that way: only **Cameras** and **Geometry** declare an item, every other
+ * group declares `[]`, and an empty list opens **nothing** — right-clicking
+ * Probes, Sections, Zones, Constraints or Splats stays the no-op it always was.
+ * That is the point of an empty array over an absent key: "this group has no
+ * items" is a stated decision, not an oversight.
  *
- * **Geometry** will declare **Add geometry…** with the Add Geometry dialog
- * (`geometry_assets.md` §3.2, stage 2); until that dialog exists there is
- * nothing for the item to open, so the group states `[]` like the rest.
+ * **Geometry** declares **Import model…** (`asset_import.md` §3.1), so the empty
+ * geometry list has a route out of itself without going via the header's "+"
+ * menu — the one place a group with no rows can still be acted on.
  */
 import type { GroupKind } from '../scene/sceneTree.ts';
 
@@ -45,6 +45,10 @@ export interface GroupMenuHandlers {
    * second click from starting a second worker over the same mesh.
    */
   exportCameraInfoBlocker: string | null;
+  /** Open the OS picker for a mesh asset (`asset_import.md` §3.1). */
+  onImportModel(): void;
+  /** The **Import model…** label, translated by the caller. */
+  importModelLabel: string;
 }
 
 /** Which items each group header offers, per group (spec §15.1). */
@@ -57,7 +61,7 @@ export function groupMenuItems(h: GroupMenuHandlers): Record<GroupKind, GroupMen
     sections: [],
     zones: [],
     constraints: [],
-    geometry: [],
+    geometry: [{ label: h.importModelLabel, disabled: null, run: h.onImportModel }],
     splats: [],
   };
 }

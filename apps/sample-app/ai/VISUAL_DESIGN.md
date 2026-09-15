@@ -562,6 +562,24 @@ this rig, check the asset's metalness before touching the lights.
   deliberate user action: a layer toggle applies instantly, or the control reads as
   laggy.
 
+**The `not saved` marker is blue and italic, never amber** (`asset_import.md` §9).
+It sits on a row whose asset was imported this session and has not been written to
+disk, before the load badge so the row still ends with what parsed. Amber in this
+app means *something is not what it looks* — a missing capture, a stale result —
+and nothing is wrong here: a pending asset loads, draws, occludes and runs exactly
+like a resolved one. So it takes `#7fb8e6`, the quiet readout blue of
+`.badge.splat`, with italics carrying the "temporary" reading that colour alone
+would not. The pair is deliberate: the marker says **where the bytes are**, the
+load badge says **whether they parsed**, and a row can legitimately show both.
+
+**The import shows no dialog on the clean path.** Picking a self-contained file
+adds the row and opens its panel, with nothing in between — the picker *is* the
+dialog. The two cards this feature does add are consequences: an **Import refusal**
+(filename, reason, **OK**; the smallest card in the app, and with no retry button,
+because the retry is the menu entry just used) and, at stage C, a **Resolve
+dependencies** card listing what a multi-file model is missing. Both are backdrop
+modals, like every other dialog that settles a reference to a file on disk.
+
 ## When adding UI
 
 **Amber is the splat family's own hue** (`#d0a88b` dot, `#ffb84d` failure badge),

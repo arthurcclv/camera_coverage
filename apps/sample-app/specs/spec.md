@@ -92,7 +92,10 @@ apps/sample-app/
       constraintGizmos.ts  per-constraint primitive handles + translucent dilation (camera_placement.md §6.1)
       polylineDraw.ts      the armed polyline draw mode, over §2.4.2's hit test (camera_placement.md §6.2)
       splats.ts            SplatObject model + label + ids + clip-band → SDF box mapping (gaussian_splats.md §2, §5.4)
-      splatAssets.ts       which assets/ files the Add 3DGS dialog lists, and in what order (gaussian_splats.md §3.2)
+      assetImport.ts       which entry accepts which picked file, why one is refused, and what its assets/ folder is called (asset_import.md §4, §6.2)
+      plyHeader.ts         routing a .ply by its header: mesh, capture, point cloud, or unreadable (asset_import.md §4.2)
+      pendingAssets.ts     imported bytes held until the next save, keyed by the src their row carries (asset_import.md §7)
+      assetMaterialise.ts  what a save must do to assets/ before it writes the scene file, as a pure plan (asset_import.md §8)
       splatLayer.ts        the splat group in the main scene: SparkRenderer, stream load, decode cache, SplatEdit lifecycle (gaussian_splats.md §4)
       sceneView/transformMode.ts  which transform modes a selection supports, as a pure function over the selection (geometry_assets.md §7)
     cameras/
@@ -124,8 +127,8 @@ apps/sample-app/
       ConstraintPanel.tsx  selected-constraint kind + distance + geometry + vertex list (camera_placement.md §6)
       GeometryPanel.tsx    selected-geometry-object name + transform + read-only kind parameters (geometry_assets.md §7)
       SplatPanel.tsx       selected-splat name + source + position/rotation/uniform scale + Flip 180° Z (gaussian_splats.md §7)
-      AddSplatDialog.tsx   the Add 3DGS dialog: the capture files found in assets/ (gaussian_splats.md §3.2)
-      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections/Geometry/Splats groups + Zones and Constraints umbrellas, enable/visibility toggle, add "+" menu with its nested Constraint submenu and its 3D Gaussian Splat… dialog entry, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
+      ImportRefusalDialog.tsx  why a picked file could not be imported (asset_import.md §4, §11)
+      SceneHierarchy.tsx   scene hierarchy tree (Cameras/Probes/Sections/Geometry/Splats groups + Zones and Constraints umbrellas, enable/visibility toggle, add "+" menu with its nested Constraint submenu and its two import entries, duplicate/delete context menu, drag-to-reorder within a group) (§5.5, §5.5.1)
       OverlayControls.tsx  overlay mode + intensity scale + resolution slider
       ViewportLayerMenu.tsx  top-right eye-button dropdown: Coverage/Sections/Cameras/Zones/Constraints/Splats/Geometry visibility checkboxes (§2.4)
       ViewSelector.tsx     top-middle View dropdown: Perspective/Top/Front/Right camera selection (§2.4)
@@ -1375,24 +1378,28 @@ holds cameras (§5) and probes (§12), and is structured to hold further entity 
   umbrellas)
   only expands/collapses it and does not change the selection.
 - **Adding entities.** The "Hierarchy" panel header **"+" menu** creates — **Camera**,
-  **Probe**, **Section**, **Zone**, **Volume**, **Constraint ▸**, or
-  **3D Gaussian Splat…**.
+  **Probe**, **Section**, **Zone**, **Volume**, **Constraint ▸**, **Import model…**, or
+  **Import 3DGS capture…**.
   Cameras/probes/sections spawn at the **workspace center** with the next free id and
   auto-select. A **Zone** creates an empty zone (`zone-N`); a **Volume** adds a 1 m cube
   at the center into the target zone (creating "Zone 1" first if none exist)
   (`sampling_volumes.md` §4.1). Creating a camera or a volume marks the result stale
   (§8.1); creating a probe, section, or empty zone does not.
 
-  **3D Gaussian Splat… is the one entry that opens a dialog**, and the one entry that
-  is **not always enabled**. It creates nothing itself: it opens the **Add 3DGS**
-  dialog (§14.7), which lists the capture files already sitting in the scene folder's
-  `assets/` and adds a row referencing the chosen one, at an identity transform,
-  auto-selected (`gaussian_splats.md` §3.2). It needs a folder to read, so with **no
-  save target** — at boot, before any Load or Save (§14.1) — the entry is **disabled**
-  with the hint *"Load or save a scene first."* The app never writes into `assets/`;
-  the user puts the file there, which is what keeps §14.9's no-file-management rule
-  intact and what lets one capture serve every scene file in the folder. **No splat
-  action ever marks the result stale** — splats are not analysis inputs
+  **The two import entries open the OS file picker** rather than spawning an entity
+  (`asset_import.md` §3.1) — directly, from the click, because that is what the
+  picker's required user activation is for, so no app dialog precedes one. The picked
+  file is classified, refused if it is the wrong kind (§14.7), and otherwise added as
+  a row that draws **from memory**; its bytes are written into the scene folder's
+  `assets/` by the next save (§14.5). **Every "+" entry is always enabled** — an
+  import needs no save target, because it writes nothing until one exists, which is
+  what removed this menu's former conditionally-disabled entry and its *"Load or save
+  a scene first."* hint.
+
+  A row whose asset was imported this session and not yet written carries a
+  **`not saved`** marker (`asset_import.md` §9), beside and distinct from the load
+  badge: one says where the bytes are, the other whether they parsed. **No splat
+    action ever marks the result stale** — splats are not analysis inputs
   (`gaussian_splats.md` §1.1), the same rule constraints follow.
 
   **Constraint ▸ is a submenu, and adds nothing itself.** It holds **Group**, **Point**,
@@ -2482,10 +2489,20 @@ split) are **not** part of the scene file — they remain app-local.
   night-shift.json    # another, sharing the same assets/
   dense-96cam.json    # …and another
   assets/
-    shelf.glb         # GLB/GLTF files referenced by the scene files
-    site.spz          # 3DGS capture files, likewise (gaussian_splats.md §3.1)
+    shelf.glb         # a hand-placed mesh asset, referenced as assets/shelf.glb
+    site.spz          # a hand-placed capture, likewise (gaussian_splats.md §3.1)
+    rack/             # an imported model: one subfolder per import
+      rack.gltf       #   referenced as assets/rack/rack.gltf
+      rack.bin
+      textures/
+        wall.png
     ...
 ```
+
+- **An import gets a folder of its own** (`asset_import.md` §6.2), so a `src` may be
+  multi-segment and two models that both ship `textures/wall.png` can never touch
+  each other's files. A hand-placed flat `assets/<file>` stays equally valid and
+  resolves identically — `isSafeAssetPath` accepts both shapes.
 
 - A **scene file** is any `*.json` at the **folder root** that parses as a valid scene
   (§14.3). `scene.json` is only the **default name** a first save proposes, never a
@@ -2818,8 +2835,17 @@ scene file within it:
   when a target exists, plus a stable `id` so the app keeps its own
   remembered-directory bucket instead of following the last folder used anywhere in the
   origin.
-- An in-place **Save** writes **only the scene file** — the mesh and capture bytes
-  are already
+- **A save is the one operation that writes asset bytes.** Where that used to mean
+  only a cross-folder Save As… copying existing files, it now also covers
+  **materialising** assets imported this session: their bytes are held in memory from
+  the import until the next save writes them into `<target>/assets/` (`asset_import.md`
+  §8). The steps a save gains — a pre-flight of every held file, an `isSameEntry`
+  dedupe against what is already in `assets/`, collisions folded into the overwrite
+  confirmation below, and a scoped, guarded folder replace — are that document's §8,
+  and the scene file is written **last** so a failed asset write never leaves a
+  `*.json` referencing bytes that are not there.
+- An in-place **Save** writes **only the scene file** when nothing is pending — the
+  mesh and capture bytes are already
   in the folder, and are shared with every other scene file there. A `mesh` object whose
   `src` is absent from the folder is a **dangling reference** and will fail a later
   import (§14.8); it also aborts a cross-folder Save As…, which cannot copy a file that
@@ -2909,13 +2935,11 @@ scene file within it:
 
 - **Load…** (import, §14.4), **Save**, and **Save As…** (export, §14.5) actions in a
   **"Scene"** panel at the top of the left panel (§2.2), above the scene hierarchy.
-- Load…, Save As…, and **Add 3DGS** open **centred modal dialogs over a dimmed
+- Load…, Save As…, and the import dialogs open **centred modal dialogs over a dimmed
   backdrop** — the app's
-  only backdrop modals (`ai/VISUAL_DESIGN.md`). All three genuinely block: each settles
+  only backdrop modals (`ai/VISUAL_DESIGN.md`). All genuinely block: each settles
   a reference to a **file on disk** — which scene is loaded, which file Save writes, or
-  which capture a splat row points at — and one of them can discard unsaved work. That
-  shared question is why Add 3DGS is a modal card rather than a popover hanging off the
-  "+" menu, despite being reached from a menu. **Escape**
+  which file an imported row points at — and one of them can discard unsaved work. **Escape**
   cancels, matching the existing dialog's key handling; the commit button is the primary
   action. **Keyboard and pointer**: in the Load list, **ArrowUp/ArrowDown** walk the
   **loadable** rows only — an unselectable row is listed to explain its absence, not to be
@@ -2939,21 +2963,19 @@ scene file within it:
     and the inline overwrite / asset-clash warning beneath it (§14.5), which turns the
     commit button into **Replace**. An invalid name disables commit and states the rule.
     Buttons: **Cancel**, **Save**.
-  - **Add 3DGS** — opened from the hierarchy's **"+" → 3D Gaussian Splat…** (§5.5), the
-    only "+" entry that opens a dialog. It lists the capture files **already present in
-    the scene folder's `assets/`** — root of `assets/` only, non-recursive, the same
-    flatness rule §14.2 applies to scene files — filtered to the accepted extensions
-    (§14.2) and sorted **case-insensitively and stably**, exactly as the Load list is,
-    so a folder's contents do not reshuffle between openings. Each row shows the
-    filename and its **byte size**; no file is read or decoded to build the list, only
-    its metadata. A file this scene already references is **still listed and still
-    selectable** — two rows on one capture is how two registrations are compared
-    (`gaussian_splats.md` §3.3). It opens on the **first selectable row**, and its
-    list takes the **same keyboard as the Load list** — Arrow keys over the
-    selectable rows only, clamped at both ends, Enter or a double-click to commit —
-    through the same shared `moveListSelection` (§14.7's list rule). Committing adds
-    a splat row at an identity transform and auto-selects it. A folder with no `assets/`, or none holding an accepted file,
-    says so and offers no commit. Buttons: **Cancel**, **Add**.
+  - **Import refusal** — why a picked file could not be imported
+    (`asset_import.md` §4, §11): the filename, the reason, and a way out. The
+    smallest card in the app, and the only dialog the import shows on the refusal
+    path — a self-contained file that passes the sniff is simply added, with **no
+    dialog at all** (§6.1 there). It carries no retry button: the retry is the menu
+    entry just used, and for the commonest refusal (a `.ply` picked in the wrong
+    entry) the remedy the reason names is the *other* entry, enabled and one click
+    away. Button: **OK**.
+  - **Resolve dependencies** — for a model that ships as more than one file
+    (`asset_import.md` §5.2). One row per missing dependency, naming the **required
+    relative path** the model itself spells out, marked **Required** or
+    **Optional**, each with **Choose…** and — for an optional row — **Skip**. Commit
+    is enabled once every Required row is satisfied. *(stage C)*
   - **Overwrite scene file?** — the confirmation of §14.5: a short card, no folder line
     and no fields, stating what would be replaced. Buttons: **Cancel**, **Overwrite**.
     It is the one dialog that may sit **over another** (the Save-as dialog it was
@@ -3014,8 +3036,9 @@ scene file within it:
 | Referenced splat capture **missing** from `assets/` | **import succeeds**; the row badges `⚠ missing from assets/`; nothing is drawn; no coverage number changes (§14.4 step 5) |
 | Referenced splat capture unreadable or **fails to decode** | **import succeeds**; the row badges `⚠ could not be decoded`; nothing is drawn; no coverage number changes |
 | Referenced splat `src` is a PCSOGS `meta.json` — only reachable by hand-editing, since the Add dialog never offers one | **import succeeds**; the row badges `⚠ SOG bundle — use its .sog zip`, naming the remedy rather than the bare failure |
-| No `assets/` folder, or it holds no accepted capture | the **Add 3DGS** dialog says so and offers no commit (§14.7) |
-| No save target yet (boot) | the "+" menu's **3D Gaussian Splat…** entry is disabled: *"Load or save a scene first."* (§5.5) |
+| Import picker cancelled | silent no-op; nothing added, no dialog, no banner (`asset_import.md` §11) |
+| Picked file refused — wrong extension, a `.ply` picked in the wrong entry, a faceless PLY as geometry, an unreadable header, a PCSOGS `meta.json` | the **Import refusal** dialog names the file and the remedy; nothing added (`asset_import.md` §4, §11) |
+| Save while an imported asset has not been written to disk | the save is refused in place, naming the reason; scene, target and held bytes all kept (`asset_import.md` §8, §15 stage A) |
 | No WebGL2 context | the viewport cannot be created and App surfaces the failure in its place; compute is unaffected, having its own device in the worker (§2.3) |
 | Spark's dynamic import fails | the affected rows badge `⚠ could not be decoded`; nothing else is affected (§2.3) |
 
@@ -3028,14 +3051,19 @@ scene file within it:
   the rule this bullet used to state ("geometry is not selectable/editable") was
   deleted by `geometry_assets.md`.
 - Embedding or bundling assets (data-URI, zip) — assets stay file references (§14.5).
-- **File management** — no renaming, duplicating or deleting scene files from within the
-  app, and **nothing is ever written into `assets/`**: a splat capture *or a mesh asset*
-  is dropped in by
-  the user and merely **referenced** (`gaussian_splats.md` §3.2,
-  `geometry_assets.md` §3.2), never copied or
-  transcoded in-app. The Load and Add 3DGS dialogs list what is on disk; rearranging it
-  is the OS's job. (Save As… under a new name is the supported way to fork a scene, and
-  it is the one operation that does copy asset bytes, §14.5.)
+- **File management** — no renaming, duplicating or deleting **scene files** from
+  within the app; rearranging them is the OS's job. (Save As… under a new name is the
+  supported way to fork a scene.)
+- **Deleting an asset** — deleting a row leaves its bytes in `assets/`, always. The
+  folder is shared by every scene file in it (§14.2) and the app sees only the scene
+  currently loaded, so "unused" is a claim it cannot make
+  (`asset_import.md` §10). This is the half of the no-file-management rule that
+  survives: the app may **create** a file it knows the scene needs, and may not
+  **remove** one whose absence it cannot verify is safe. The one exception is a
+  confirmed, scoped folder replace during a save (`asset_import.md` §8.5, §8.6).
+- **Transcoding or conversion** — the app writes the bytes it was given. Writing into
+  `assets/` itself is no longer out of scope: `asset_import.md` owns it, and a save is
+  the one operation that writes asset bytes (§14.5).
 - Non-Chromium browsers (no File System Access API).
 - Additional primitive kinds (cylinder, sphere, …) — use GLB for arbitrary shapes.
 
@@ -3055,14 +3083,14 @@ geometry outside the coverage engine.
   single item is **Export camera info** (§5.5). Choosing it casts every camera's center ray
   (§15.3), builds the file (§15.2), and downloads it.
 - **No ellipsis on the label.** Nothing opens: the file downloads. In this app "…" marks an
-  item that opens a dialog (**Save As…**, **3D Gaussian Splat…**, §14.7), and this is not one.
+  item that opens a dialog or a picker (**Save As…**, **Import model…**, §14.7), and this is not one.
 - **Enabled except during its own run.** With **no cameras** the export still runs and writes
   `[]` — the Cameras header renders even when the group is empty (§5.5), and an empty array is
   the truthful answer to "what is the layout", not an error. The one thing that disables it is
   a **previous export still casting** (§15.3): the item greys out carrying
   `Still casting the camera rays…` as its `title`, so a second click cannot start a second
   cast over the same mesh. The blocker is a **string, not a flag**, matching the "+" menu's
-  **3D Gaussian Splat…** gate (§14.7) — a disabled row explains itself rather than just
+  disabled-row convention (§14.7) — a disabled row explains itself rather than just
   failing to respond.
 - **Which group headers have menus is a per-group record.** The routing is one exhaustive
   `Record<groupKind, item[]>` (§5.5) — Cameras declares this one item, every other group
@@ -3371,6 +3399,14 @@ coverage-agnostic and defines only its own generic terms (voxel intensity, color
 - **Hit point** — where a center ray first meets the merged scene geometry (§14.6), or
   **null** when it meets nothing. Reported per camera by the camera info export (§15); it is
   **not** a coverage quantity — no analysis reads it and no number depends on it.
+- **Import** — bringing a file into a scene from anywhere on disk: pick, sniff,
+  resolve, commit (`asset_import.md` §3–§6). Distinct from **Load**, which opens a
+  *scene file*.
+- **Pending asset** — an imported asset whose bytes exist only in this session. It
+  draws, occludes and runs exactly like any other; it becomes ordinary at the next
+  save, and its row is marked **not saved** until then (`asset_import.md` §7, §9).
+- **Materialise** — to write a pending asset's bytes into the save target's `assets/`
+  (`asset_import.md` §8). Used narrowly and only for that.
 
 ---
 

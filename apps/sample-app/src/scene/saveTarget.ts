@@ -153,17 +153,40 @@ export function planAssetCopy(
   splats: readonly SplatObject[],
 ): string[] {
   const srcs: string[] = [];
-  const add = (src: string) => {
-    if (!srcs.includes(src)) srcs.push(src);
-  };
-  for (const obj of geometry) if (obj.kind === 'mesh') add(obj.src);
-  for (const splat of splats) add(splat.src);
+  for (const src of sceneAssetSrcs(geometry, splats)) if (!srcs.includes(src)) srcs.push(src);
+  return srcs;
+}
+
+/**
+ * Every asset path this scene references, in scene order and **as referenced** —
+ * one entry per row, so two rows on one capture appear twice.
+ *
+ * The question "which assets does this scene use?" is asked by three unrelated
+ * things — the copy plan above, the pending store's refcount release
+ * (`asset_import.md` §7.3) and the materialise plan's self-reference guard
+ * (§8.6) — and they must not be able to disagree about the answer.
+ */
+export function sceneAssetSrcs(
+  geometry: readonly GeometryObject[],
+  splats: readonly SplatObject[],
+): string[] {
+  const srcs: string[] = [];
+  for (const obj of geometry) if (obj.kind === 'mesh') srcs.push(obj.src);
+  for (const splat of splats) srcs.push(splat.src);
   return srcs;
 }
 
 /** What a completed save wrote, for the status line (§14.7). */
 export interface LastSave {
+  /** Assets copied by a cross-folder Save As…, plus folders materialised (`asset_import.md` §8.7). */
   assetsCopied: number;
+  /**
+   * Imports the save found **already in** the target's `assets/`, so nothing was
+   * written and their rows now point at where the file actually lives
+   * (`asset_import.md` §8.3). Reported separately because it is the one number
+   * that explains a `src` the save changed under the user (§8.7).
+   */
+  assetsPresent?: number;
 }
 
 /**
@@ -196,7 +219,21 @@ export function describeSceneFileStatus(
   if (lastSave == null) return { key: 'idleTarget', params: { folder: target.folder.name, name: target.name } };
   // The folder only changes on a cross-folder Save As…, which is also the only
   // save that copies — so the copy count is what earns the longer line.
-  if (lastSave.assetsCopied === 0) return { key: 'savedNoAssets', params: { name: target.name } };
+  const present = lastSave.assetsPresent ?? 0;
+  if (lastSave.assetsCopied === 0) {
+    // Nothing written, but a dedupe still moved rows: say so, since the alternative
+    // is a `src` that changed with no acknowledgement anywhere (§8.3).
+    if (present > 0) return { key: 'savedAssetsPresent', params: { name: target.name, count: present } };
+    return { key: 'savedNoAssets', params: { name: target.name } };
+  }
+  if (present > 0) {
+    return {
+      // Plural on the count that leads; `present` is interpolated as a plain
+      // number, since i18next keys off one count per key.
+      key: 'savedWithAssetsAndPresent',
+      params: { folder: target.folder.name, name: target.name, count: lastSave.assetsCopied, present },
+    };
+  }
   return {
     // `count` (not `assetsCopied`) is the param name i18next's pluralization
     // keys off of — see common.json's `savedWithAssets_one`/`_other`.
@@ -277,8 +314,16 @@ export function describeOverwriteConfirm(
  * The Load dialog's unsaved-changes warning (§14.4, §14.7). Named when the scene
  * came from a file, so it is clear *which* work is at stake; anonymous for a
  * scene built from the boot state, which has no name yet.
+ *
+ * With **pending imports** the warning says so instead (`asset_import.md` §9).
+ * A dirty scene has always been recoverable by redoing edits; a discarded import
+ * loses bytes the app can no longer reach, possibly assembled through a
+ * dependency-resolution loop. "Unsaved changes" understates that, so the count
+ * leads — and it is a count of *assets*, not rows, because two rows on one
+ * import are one thing at risk.
  */
-export function describeUnsavedWarning(name: string | null): Message {
+export function describeUnsavedWarning(name: string | null, pendingAssets = 0): Message {
+  if (pendingAssets > 0) return { key: 'unsavedPendingAssets', params: { count: pendingAssets } };
   return name == null ? { key: 'unsavedAnonymous' } : { key: 'unsavedNamed', params: { name } };
 }
 
@@ -296,8 +341,20 @@ export function describeAssetCopyFailure(src: string, reason: string): Message {
 }
 
 /**
+ * A pending import whose source file can no longer be read, so the save wrote
+ * nothing (`asset_import.md` §8.2). Unlike `describeAssetCopyFailure`'s, this
+ * reason is a sentence **this app** wrote, so it lives in the locale files
+ * rather than being passed in as text (`spec.md` §18.4).
+ */
+export function describePendingUnreadable(src: string): Message {
+  return { key: 'pendingAssetUnreadable', params: { src } };
+}
+
+/**
  * Failure to write the target file, pointing at the way out (§14.8). `reason`
- * is not itself translated — see `describeAssetCopyFailure`.
+ * is not itself translated — see `describeAssetCopyFailure`. A refusal composed
+ * by this app arrives here already resolved by the caller's `t()`, so the
+ * sentence is whole in the user's language.
  */
 export function describeSaveFailure(name: string, reason: string): Message {
   return { key: 'saveFailure', params: { name, reason } };

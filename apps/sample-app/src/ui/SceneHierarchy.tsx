@@ -32,6 +32,7 @@ import { averageDisplayValue, type Section, type SectionCellGrid } from '../scen
 import type { SamplingVolume, Zone, ZoneSummary } from '../scene/samplingVolumes.ts';
 import { splatBadge, type SplatLoadState, type SplatObject } from '../scene/splats.ts';
 import type { GeometryObject } from '../scene/geometryModel.ts';
+import type { ImportKind } from '../scene/assetImport.ts';
 import type { Selection } from '../scene/viewportSelection.ts';
 import {
   primitiveMeasure,
@@ -123,9 +124,13 @@ export interface SceneHierarchyProps extends EntityMenuHandlers, GroupMenuHandle
    * that opens a dialog rather than spawning an entity, and the one that is not
    * always enabled: it needs a scene folder to read `assets/` from.
    */
-  onAddSplat(): void;
-  /** Why **3D Gaussian Splat…** is disabled, or null when it is available (§3.2). */
-  addSplatBlocker: string | null;
+  onImport(kind: ImportKind): void;
+  /**
+   * The `src`s whose bytes exist only in this session (`asset_import.md` §9).
+   * Their rows are marked, so what a discard would cost is visible without
+   * opening a dialog.
+   */
+  pendingSrcs: ReadonlySet<string>;
   /** Drag-reorder within a group (§5.5.1): move `id` before `beforeId`, or last when null. */
   onReorder(kind: ReorderableKind, id: string, beforeId: string | null): void;
 }
@@ -656,22 +661,33 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
                   </ul>
                 )}
               </li>
-              {/* The one entry that opens a dialog, and the one that is not
-                  always enabled: it lists what is already in the scene folder's
-                  `assets/`, so it needs a folder (`gaussian_splats.md` §3.2). */}
+              {/* The two import entries (`asset_import.md` §3.1). Both open the
+                  **OS file picker** directly, because that is what the click's
+                  user activation is for — no app dialog can precede it.
+
+                  Both are **always enabled**: an import no longer needs a scene
+                  folder, because it no longer writes one. The bytes are held
+                  until the next save (§8), which is what removed this menu's only
+                  conditionally-disabled entries. */}
               <li
                 role="menuitem"
-                className={props.addSplatBlocker ? 'disabled' : undefined}
-                aria-disabled={props.addSplatBlocker ? true : undefined}
-                title={props.addSplatBlocker ?? undefined}
                 onPointerEnter={closeSubmenu}
                 onClick={() => {
-                  if (props.addSplatBlocker) return;
                   setAddMenu(null);
-                  props.onAddSplat();
+                  props.onImport('model');
                 }}
               >
-                {t('sceneHierarchy.addMenu.splat')}
+                {t('sceneHierarchy.addMenu.model')}
+              </li>
+              <li
+                role="menuitem"
+                onPointerEnter={closeSubmenu}
+                onClick={() => {
+                  setAddMenu(null);
+                  props.onImport('capture');
+                }}
+              >
+                {t('sceneHierarchy.addMenu.capture')}
               </li>
             </ul>
           )}
@@ -696,7 +712,9 @@ export function SceneHierarchy(props: SceneHierarchyProps) {
             volumeById={volumeById}
             constraintById={constraintById}
             geometryById={geometryById}
+            splatById={splatById}
             splatLoadStates={props.splatLoadStates}
+            pendingSrcs={props.pendingSrcs}
             onSelect={props.onSelect}
             onToggleEnabled={props.onToggleEnabled}
             onToggleCollapse={props.onToggleCollapse}
@@ -788,7 +806,9 @@ interface TreeRowProps {
   volumeById: Map<string, SamplingVolume>;
   constraintById: Map<string, CameraConstraint>;
   splatLoadStates: ReadonlyMap<string, SplatLoadState>;
+  pendingSrcs: ReadonlySet<string>;
   geometryById: Map<string, GeometryObject>;
+  splatById: Map<string, SplatObject>;
   onSelect(selection: Selection): void;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
   onToggleCollapse(nodeId: string): void;
@@ -919,6 +939,7 @@ function TreeRow(props: TreeRowProps) {
           node={node}
           enabled={enabled}
           loadState={props.splatLoadStates.get(node.splatId)}
+          pending={isPendingSrc(props.pendingSrcs, props.splatById.get(node.splatId)?.src)}
           onToggleEnabled={props.onToggleEnabled}
         />
       )}
@@ -927,6 +948,7 @@ function TreeRow(props: TreeRowProps) {
           node={node}
           object={props.geometryById.get(node.geometryId)}
           enabled={enabled}
+          pending={isPendingSrc(props.pendingSrcs, meshSrc(props.geometryById.get(node.geometryId)))}
           onToggleEnabled={props.onToggleEnabled}
         />
       )}
@@ -1177,6 +1199,33 @@ function ConstraintRowContent({
   );
 }
 
+/** Whether this row's asset is one whose bytes are still only in memory (§9). */
+function isPendingSrc(pending: ReadonlySet<string>, src: string | undefined): boolean {
+  return src != null && pending.has(src);
+}
+
+/** A geometry object's `src`, for the kinds that have one — `room`/`box` do not. */
+function meshSrc(object: GeometryObject | undefined): string | undefined {
+  return object?.kind === 'mesh' ? object.src : undefined;
+}
+
+/**
+ * The **not saved** marker (`asset_import.md` §9): this row's asset was imported
+ * this session and its bytes have not been written to disk.
+ *
+ * Distinct from, and additional to, the load badge — one says *where the bytes
+ * are*, the other says *whether they parsed*. A pending asset is not a load
+ * state: it draws, occludes and runs exactly like a resolved one (§7.2).
+ */
+function NotSavedMark() {
+  const { t } = useTranslation('scene');
+  return (
+    <span className="rate not-saved" title={t('sceneHierarchy.notSavedTitle')}>
+      {t('sceneHierarchy.notSaved')}
+    </span>
+  );
+}
+
 /**
  * A splat row (`gaussian_splats.md` §6.2): its enabled checkbox and a badge
  * reflecting **load state** — progress while reading, the splat count once
@@ -1191,11 +1240,13 @@ function SplatRowContent({
   node,
   enabled,
   loadState,
+  pending,
   onToggleEnabled,
 }: {
   node: Extract<SceneNode, { kind: 'splat' }>;
   enabled: boolean;
   loadState: SplatLoadState | undefined;
+  pending: boolean;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
   const { t } = useTranslation('scene');
@@ -1214,6 +1265,7 @@ function SplatRowContent({
       />
       <span className="dot splat-dot" />
       <span className="label">{node.label}</span>
+      {pending && <NotSavedMark />}
       {badge && <span className={failed ? 'rate splat-error' : 'rate'}>{badge}</span>}
     </>
   );
@@ -1233,11 +1285,13 @@ function GeometryRowContent({
   node,
   object,
   enabled,
+  pending,
   onToggleEnabled,
 }: {
   node: Extract<SceneNode, { kind: 'geometry' }>;
   object: GeometryObject | undefined;
   enabled: boolean;
+  pending: boolean;
   onToggleEnabled(kind: ToggleableKind, id: string): void;
 }) {
   const { t } = useTranslation('scene');
@@ -1254,6 +1308,7 @@ function GeometryRowContent({
       />
       <span className="dot geometry-dot" />
       <span className="label">{node.label}</span>
+      {pending && <NotSavedMark />}
       {object && <span className="rate">{t(`sceneHierarchy.geometry.kind.${object.kind}`)}</span>}
     </>
   );

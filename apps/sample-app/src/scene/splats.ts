@@ -78,15 +78,6 @@ export const SOG_BUNDLE_MANIFEST = 'meta.json';
 /** Why a `meta.json` is listed but not selectable (`gaussian_splats.md` §3.1, §9). */
 export const SOG_BUNDLE_REASON = "that's a SOG bundle — use its .sog zip instead";
 
-/** The scene folder subdirectory a splat's `src` is offered from (§3.2). */
-export const SPLAT_ASSET_DIR = 'assets';
-
-/** Whether a file name carries one of the accepted capture extensions (§3.1). */
-export function isSplatFileName(name: string): boolean {
-  const lower = name.toLowerCase();
-  return SPLAT_EXTENSIONS.some((ext) => lower.endsWith(ext) && lower.length > ext.length);
-}
-
 /** The last path segment of a folder-relative `src` (`assets/site.spz` → `site.spz`). */
 export function basename(src: string): string {
   const at = src.lastIndexOf('/');

@@ -9,7 +9,8 @@
       "zone": "Zone",
       "volume": "Volume",
       "constraint": "Constraint",
-      "splat": "3D Gaussian Splat…"
+      "model": "Import model…",
+      "capture": "Import 3DGS capture…"
     },
     "constraintSubmenu": {
       "group": "Group",
@@ -68,7 +69,9 @@
         "box": "box",
         "mesh": "mesh"
       }
-    }
+    },
+    "notSaved": "not saved",
+    "notSavedTitle": "Imported this session — its file is written when you save the scene."
   },
   "sceneFileControls": {
     "title": "Scene",
@@ -100,17 +103,6 @@
     "title": "Overwrite scene file?",
     "overwriteButton": "Overwrite"
   },
-  "addSplatDialog": {
-    "title": "Add 3D Gaussian Splat",
-    "captureFilesPrefix": "Capture files in",
-    "captureFilesSuffix": "Drop a {{extensions}} file in there to add it here — the app never writes to that folder.",
-    "readingFolder": "Reading folder…",
-    "noAssetDirPrefix": "This scene folder has no",
-    "noAssetDirSuffix": "folder. Create one and put a capture file in it.",
-    "noneAddablePrefix": "No capture file in",
-    "noneAddableSuffix": "can be added.",
-    "listAriaLabel": "Capture files"
-  },
   "splatPanel": {
     "titlePrefix": "Splat — {{label}}",
     "sourceLabel": "Source",
@@ -141,5 +133,9 @@
     "roomParamsValue": "{{x}} × {{z}} m, {{height}} m high, {{thickness}} m walls",
     "boxParams": "Box",
     "boxParamsValue": "{{x}} × {{y}} × {{z}} m"
+  },
+  "importRefusal": {
+    "title": "Can't import that file",
+    "dismiss": "OK"
   }
 }

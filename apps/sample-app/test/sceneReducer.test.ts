@@ -965,3 +965,41 @@ test('a geometry edit before the first run does not latch stale', () => {
   });
   assert.equal(s.stale, false);
 });
+
+// --- §8.3's src rewrites (asset_import.md) ---------------------------------
+
+test('rewriteAssetSrcs re-points the rows a save resolved, and only those', () => {
+  // A save's dedupe found the imported files already in `assets/`, so the rows
+  // are re-pointed at where the bytes actually live (§8.3). The scene written to
+  // disk gets the identical mapping through the same function, which is what
+  // keeps the file and the rows from disagreeing.
+  const state = base({
+    geometry: [geom('geom-1'), geom('geom-2', { kind: 'mesh', src: 'assets/rack/rack.glb' })],
+    splats: [splat('splat-1', 'assets/site/site.spz'), splat('splat-2', 'assets/other.spz')],
+  });
+  const s = run(state, {
+    type: 'rewriteAssetSrcs',
+    rewrites: new Map([
+      ['assets/rack/rack.glb', 'assets/models/rack.glb'],
+      ['assets/site/site.spz', 'assets/site.spz'],
+    ]),
+  });
+  const mesh = s.geometry[1];
+  assert.equal(mesh.kind === 'mesh' && mesh.src, 'assets/models/rack.glb');
+  assert.equal(s.splats[0]?.src, 'assets/site.spz');
+  // Untouched: a row the dedupe did not match, and a `box` that has no `src`.
+  assert.equal(s.splats[1]?.src, 'assets/other.spz');
+  assert.equal(s.geometry[0]?.kind, 'box');
+});
+
+test('rewriteAssetSrcs never marks the result stale, and is identity on an empty map', () => {
+  // The bytes did not change and neither did a triangle — only the name they are
+  // filed under — so this is presentation, in the same class as a rename (§1.1).
+  const state = base({ geometry: [geom('geom-1', { kind: 'mesh', src: 'assets/rack/rack.glb' })] });
+  const rewritten = run(state, {
+    type: 'rewriteAssetSrcs',
+    rewrites: new Map([['assets/rack/rack.glb', 'assets/rack.glb']]),
+  });
+  assert.equal(rewritten.stale, false);
+  assert.equal(run(state, { type: 'rewriteAssetSrcs', rewrites: new Map() }), state);
+});

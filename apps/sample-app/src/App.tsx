@@ -66,8 +66,14 @@ import {
   exportSceneFile,
   fileExists,
   importSceneFile,
-  resolveAssetFromDirectory,
-  resolveSplatFile,
+  dedupePendingAssets,
+  listAssetDir,
+  materialiseAssets,
+  meshResolver,
+  pickImportFile,
+  preflightPending,
+  PendingUnreadableError,
+  splatResolver,
 } from './scene/sceneIO.ts';
 import {
   DEFAULT_SCENE_FILE_NAME,
@@ -75,11 +81,13 @@ import {
   SCENE_PICKER_ID,
   describeAssetCopyFailure,
   describeOverwriteConfirm,
+  describePendingUnreadable,
   describeSaveFailure,
   describeSceneFileStatus,
   describeUnsavedWarning,
   nextSaveTarget,
   planAssetCopy,
+  sceneAssetSrcs,
   resolveSaveAction,
   resolveWriteAction,
   type DestinationClashes,
@@ -130,7 +138,27 @@ import { VolumePanel } from './ui/VolumePanel.tsx';
 import { ZonePanel } from './ui/ZonePanel.tsx';
 import { SplatPanel } from './ui/SplatPanel.tsx';
 import { GeometryPanel } from './ui/GeometryPanel.tsx';
-import { AddSplatDialog } from './ui/AddSplatDialog.tsx';
+import { ImportRefusalDialog } from './ui/ImportRefusalDialog.tsx';
+import {
+  importSrc,
+  resolveImportName,
+  routePickedFile,
+  type ImportKind,
+} from './scene/assetImport.ts';
+import {
+  planMaterialisation,
+  pendingPaths,
+  withRewrittenSrcs,
+  type MaterialisePlan,
+} from './scene/assetMaterialise.ts';
+import {
+  addPending,
+  noPendingAssets,
+  pendingCount,
+  pendingFolderNames,
+  releaseUnreferenced,
+  type PendingAssets,
+} from './scene/pendingAssets.ts';
 import { SamplingVolumeControls } from './ui/SamplingVolumeControls.tsx';
 import { MAX_CAMERAS, type Bvh, type Quat } from '@linkervision/camera-coverage-sdk';
 import { CAPTURE_SLOTS } from './optimize/cubeRig.ts';
@@ -325,6 +353,7 @@ const DEFAULT_OVERLAY_OPTIONS: OverlayOptions = {
 
 export function App() {
   const { t } = useTranslation('common');
+  const { t: tScene } = useTranslation('scene');
   // Resolves a saveTarget.ts Message (spec §18.4) to display text — the one
   // point these composers cross from pure/testable data into translated copy.
   const toMessage = useCallback((m: Message): string => t(m.key, m.params), [t]);
@@ -762,17 +791,22 @@ export function App() {
   // own user activation rather than being chained inside the dialog (§14.5).
   const [loadDialogFolder, setLoadDialogFolder] = useState<FileSystemDirectoryHandle | null>(null);
   const [saveAsDialog, setSaveAsDialog] = useState<{ folder: FileSystemDirectoryHandle; name: string } | null>(null);
-  // The **Add 3DGS** dialog and the folder it reads `assets/` from
-  // (`gaussian_splats.md` §3.2). Held as the folder rather than a boolean for
-  // the same reason the other two are: the dialog only ever opens on an
-  // already-granted handle.
-  const [addSplatFolder, setAddSplatFolder] = useState<FileSystemDirectoryHandle | null>(null);
+  // Imported assets whose bytes exist only in this session (`asset_import.md`
+  // §7). Keyed by the `src` their row already carries, so `Scene` itself is
+  // untouched — no nullable `src`, no new array, no format change.
+  const [pendingAssets, setPendingAssets] = useState<PendingAssets>(noPendingAssets);
+  // A picked file the import refused, with the reason the dialog shows (§4).
+  // The only dialog this feature has on the refusal path; the clean path opens
+  // none (§6.1).
+  const [importRefusal, setImportRefusal] = useState<{ fileName: string; reason: string } | null>(null);
   // The write waiting on its overwrite confirmation (spec §14.5). Held whole, so
   // **Overwrite** commits exactly what was routed rather than re-deciding: the
   // Save-as dialog may still be open underneath with an editable name.
   const [confirmOverwrite, setConfirmOverwrite] = useState<{
     target: SaveTarget<FileSystemDirectoryHandle>;
     sameFolder: boolean;
+    /** The plan computed before the question was asked, committed verbatim (§8.4). */
+    plan: Extract<MaterialisePlan, { ok: true }> | null;
     lines: string[];
   } | null>(null);
   const [unsavedWarning, setUnsavedWarning] = useState<string | null>(null);
@@ -1131,12 +1165,16 @@ export function App() {
    */
   const splatFolder = saveTarget?.folder ?? null;
   const splatLoader = useMemo(
-    () => (splatFolder == null ? null : (src: string) => resolveSplatFile(splatFolder, src)),
+    // Pending-first (`asset_import.md` §7.2): a capture imported this session
+    // decodes from memory, and one already on disk decodes from the folder, on
+    // one code path. Non-null even with no folder, since a pending capture can
+    // exist before any Load or Save.
+    () => splatResolver(pendingAssets, splatFolder),
     // Keyed on the **folder**, not the whole target: a plain Save mints a new
     // target object with the same folder, and re-decoding a resident 400 MB
     // capture on every save would be absurd. A *different* folder is exactly
     // when the cache must be dropped, since `src` is folder-relative.
-    [splatFolder],
+    [pendingAssets, splatFolder],
   );
 
   /** Which constraints and volumes the viewport draws (`spec.md` §2.4.3). */
@@ -1781,25 +1819,56 @@ export function App() {
   // no voxels, so there is nothing for a recompute to produce differently (§1.1).
   // The reducer enforces that; nothing here needs to. -------------------------
 
+
   /**
-   * The **Add 3DGS** dialog needs a folder to read `assets/` from, so the "+"
-   * entry is disabled until a Load or Save has settled one (§3.2). This is the
-   * one "+" entry that is not always enabled, and the string is the hint the row
-   * shows.
+   * One import entry, both kinds (`asset_import.md` §3–§6): open the OS picker,
+   * sniff what came back, refuse it or add a row that draws from memory.
+   *
+   * The picker is opened **from this click**, which is the user activation it
+   * requires — so nothing may be awaited before it. Nothing is written to disk
+   * here: the bytes are held until the next save (§8), which is what lets this
+   * run with no scene folder open at all.
    */
-  const addSplatBlocker = saveTarget == null ? t('addSplatBlocker') : null;
+  // Refcounted by referencing rows (`asset_import.md` §7.3): a deleted import
+  // releases its bytes, a duplicated row keeps them, and a scene replacement
+  // drops every entry at once — one mechanism, because "which rows still
+  // reference this?" is the only question any of those three asks.
+  useEffect(() => {
+    setPendingAssets((prev) => releaseUnreferenced(prev, sceneAssetSrcs(geometry, splats)));
+  }, [geometry, splats]);
 
-  const handleAddSplat = useCallback(() => {
-    if (saveTarget != null) setAddSplatFolder(saveTarget.folder);
-  }, [saveTarget]);
+  const handleImport = useCallback(
+    async (kind: ImportKind) => {
+      const picked = await pickImportFile(kind, saveTarget?.folder);
+      if (picked == null) return; // cancelled — a silent no-op (§11)
 
-  const handleAddSplatCommit = useCallback((src: string) => {
-    // Adds a row referencing a file the user already put in `assets/` — the app
-    // never writes there (§3.2, spec §14.9) — at an identity transform, and
-    // auto-selects it so the `SplatPanel` is open ready to register.
-    dispatch({ type: 'addSplat', src });
-    setAddSplatFolder(null);
-  }, []);
+      const routed = routePickedFile(kind, picked.file.name, picked.ply);
+      if (!routed.ok) {
+        // The router returns the reason as a key; this is the layer that has a
+        // `t()` to turn it into the user's language (§4, `spec.md` §18.4).
+        setImportRefusal({ fileName: picked.file.name, reason: toMessage(routed.reason) });
+        return;
+      }
+
+      // The folder name is uniquified against **pending imports only**; a
+      // collision with what is on disk is the save's business, because only that
+      // needs a folder to be readable (§6.2, §8.4).
+      const folderName = resolveImportName(picked.file.name, kind, pendingFolderNames(pendingAssets));
+      const src = importSrc(folderName, picked.file.name);
+      setPendingAssets((prev) =>
+        addPending(prev, src, { file: picked.file, handle: picked.handle, deps: new Map() }),
+      );
+      dispatch(kind === 'model' ? { type: 'addGeometry', src } : { type: 'addSplat', src });
+    },
+    [pendingAssets, saveTarget, toMessage],
+  );
+
+  /** The hierarchy's two import entries and the Geometry group menu's one item. */
+  const handleImportKind = useCallback((kind: ImportKind) => void handleImport(kind), [handleImport]);
+  const handleImportModel = useCallback(() => handleImportKind('model'), [handleImportKind]);
+
+  /** Which rows carry the **not saved** marker (`asset_import.md` §9). */
+  const pendingSrcs = useMemo(() => new Set(pendingAssets.keys()), [pendingAssets]);
 
   const handleSplatChange = useCallback((id: string, patch: Partial<SplatObject>) => {
     dispatch({ type: 'changeSplat', id, patch });
@@ -2076,7 +2145,11 @@ export function App() {
     // Computed here, once, rather than tracked on every edit (§14.4).
     // Snapshot equality, so a drag that ends where it started is not a change.
     const dirty = sceneSnapshot(currentScene()) !== sceneBaselineRef.current;
-    setUnsavedWarning(dirty ? toMessage(describeUnsavedWarning(saveTarget?.name ?? null)) : null);
+    setUnsavedWarning(
+      dirty
+        ? toMessage(describeUnsavedWarning(saveTarget?.name ?? null, pendingCount(pendingAssets)))
+        : null,
+    );
     if (saveTarget != null) {
       setLoadDialogFolder(saveTarget.folder);
       return;
@@ -2084,7 +2157,7 @@ export function App() {
     void pickLoadFolder().then((dir) => {
       if (dir != null) setLoadDialogFolder(dir);
     });
-  }, [saveTarget, currentScene, pickLoadFolder]);
+  }, [saveTarget, currentScene, pickLoadFolder, pendingAssets]);
 
   /**
    * Commit the Load dialog's selection (spec §14.4). All-or-nothing: the file is
@@ -2147,32 +2220,62 @@ export function App() {
    * one holding a scene file that can't import is a trap (§14.5).
    */
   const writeScene = useCallback(
-    async (target: SaveTarget<FileSystemDirectoryHandle>, sameFolder: boolean) => {
+    async (
+      target: SaveTarget<FileSystemDirectoryHandle>,
+      sameFolder: boolean,
+      /** The materialise plan `requestWrite` already computed and confirmed (§8). */
+      plan: Extract<MaterialisePlan, { ok: true }> | null,
+    ) => {
       const { folder: dir, name } = target;
       // The *current* target is the asset source — `target` here is the
       // destination. `gltf` geometry can only arrive by import (§14.9 forbids
       // authoring), and import always sets a target.
       // Captures copy the same way GLBs do, deduplicated across the two: a
       // capture referenced by two splat rows copies once (`gaussian_splats.md` §8).
-      const assetSrcs = sameFolder || saveTarget == null ? [] : planAssetCopy(geometry, splats);
+      // Pending assets are **written** into the destination (below), not copied
+      // from the source folder, where their bytes have never been — so they are
+      // excluded from the cross-folder copy that handles everything already on
+      // disk (`asset_import.md` §8.7 step 7).
+      const assetSrcs =
+        sameFolder || saveTarget == null
+          ? []
+          : planAssetCopy(geometry, splats).filter((src) => !pendingAssets.has(src));
       const copyFrom = assetSrcs.length > 0 ? saveTarget?.folder ?? null : null;
       setSceneIOBusy(true);
       try {
-        // First await, so the commit click still counts as the user activation
-        // `requestPermission` needs. Already-writable handles never prompt (§14.5).
+        // First await on the ordinary path, so the commit click still counts as
+        // the user activation `requestPermission` needs. With pending imports
+        // `requestWrite` has already asked from its own activation (§8.7 step 1),
+        // and an already-writable handle never prompts twice (§14.5).
         if (!(await ensureWritePermission(dir))) {
           // Target kept, so a retry or another folder is one click away (§14.8).
-          setSceneError(toMessage(describeSaveFailure(name, 'write permission was denied')));
+          setSceneError(toMessage(describeSaveFailure(name, t('writePermissionDenied'))));
           return;
         }
         if (copyFrom != null) await copyAssets(copyFrom, dir, assetSrcs);
-        const written = currentScene();
+        // Imported bytes land here, each folder emptied immediately before its
+        // own files when it is being replaced (§8.5, §8.7 step 6).
+        if (plan != null) await materialiseAssets(dir, plan.writes, pendingAssets);
+        // A dedupe re-points the rows it resolved. The scene is rewritten
+        // **locally** for the write and dispatched for the UI, so the file on
+        // disk and the scene on screen agree without waiting on a re-render.
+        const rewrites = plan?.rewrites ?? new Map<string, string>();
+        const written = withRewrittenSrcs(currentScene(), rewrites);
         await exportSceneFile(target, written);
+        if (rewrites.size > 0) dispatch({ type: 'rewriteAssetSrcs', rewrites });
+        // Materialised entries stop being pending; a deduped one never had bytes
+        // to write (§7.3, §8.7 step 9).
+        if (plan != null) setPendingAssets(noPendingAssets());
         setSaveTarget((prev) => nextSaveTarget(prev, { kind: 'saved', ...target }));
         sceneBaselineRef.current = sceneSnapshot(written);
         setSceneError(null);
         setSaveAsDialog(null);
-        flashSavedStatus({ assetsCopied: copyFrom == null ? 0 : assetSrcs.length });
+        flashSavedStatus({
+          assetsCopied: (copyFrom == null ? 0 : assetSrcs.length) + (plan?.writes.length ?? 0),
+          // Imports that turned out to be in the folder already: nothing written,
+          // but their rows moved, and §8.7 says the line must say so.
+          assetsPresent: rewrites.size,
+        });
       } catch (err) {
         setSceneError(
           toMessage(
@@ -2189,7 +2292,7 @@ export function App() {
         setConfirmOverwrite(null);
       }
     },
-    [saveTarget, geometry, splats, currentScene, flashSavedStatus],
+    [saveTarget, geometry, splats, currentScene, flashSavedStatus, pendingAssets, toMessage, t],
   );
 
   /**
@@ -2201,17 +2304,71 @@ export function App() {
    *
    * The confirmation's own click then supplies the user activation the lazy
    * `requestPermission` runs from, which is why nothing awaits between it and
-   * `writeScene`.
+   * `writeScene` — **except** when there are pending imports, which is why §8.7
+   * puts `ensureWritePermission` first and this function asks for it up front.
    */
   const requestWrite = useCallback(
     async (target: SaveTarget<FileSystemDirectoryHandle>, sameFolder: boolean, clashes: DestinationClashes) => {
-      if (resolveWriteAction(clashes).kind === 'write') {
-        await writeScene(target, sameFolder);
+      // Everything `asset_import.md` §8 does before a byte is written happens
+      // here, because this is the one gate both write paths pass through — and
+      // because every one of its refusals must land **before** the overwrite
+      // confirmation, so the user is never asked to confirm something that will
+      // then be refused (§8.6).
+      let plan: Extract<MaterialisePlan, { ok: true }> | null = null;
+      let assetClashes = clashes.assetClashes;
+      if (pendingAssets.size > 0) {
+        // §8.7 step 1, and the first await on this path: the pre-flight probe and
+        // the `isSameEntry` walk that follow can take a whole `assets/` tree, and
+        // an activation spent walking is an activation gone by the time
+        // `requestPermission` needs it. A denial keeps the scene, the target and
+        // the pending store — the import is not lost by a save that never
+        // happened (§8.1).
+        if (!(await ensureWritePermission(target.folder))) {
+          setSceneError(toMessage(describeSaveFailure(target.name, t('writePermissionDenied'))));
+          return;
+        }
+        try {
+          await preflightPending(pendingAssets); // §8.2
+        } catch (err) {
+          setSceneError(
+            toMessage(
+              err instanceof PendingUnreadableError
+                ? describePendingUnreadable(err.src)
+                : describeSaveFailure(target.name, describeSceneError(err)),
+            ),
+          );
+          return;
+        }
+        const planned = planMaterialisation({
+          pending: pendingPaths(pendingAssets),
+          deduped: await dedupePendingAssets(target.folder, pendingAssets), // §8.3
+          assetDir: await listAssetDir(target.folder),
+          sceneSrcs: sceneAssetSrcs(geometry, splats),
+        });
+        if (!planned.ok) {
+          // The refusal is a key; it is resolved here and handed to the save
+          // failure as a finished sentence (§18.4).
+          setSceneError(toMessage(describeSaveFailure(target.name, toMessage(planned.reason))));
+          return;
+        }
+        plan = planned;
+        // A replaced asset **folder** is the same destructive act as a replaced
+        // file, so it is counted into the same confirmation (§8.4).
+        assetClashes += planned.replaced.length;
+      }
+      const withFolders = { ...clashes, assetClashes };
+      if (resolveWriteAction(withFolders).kind === 'write') {
+        await writeScene(target, sameFolder, plan);
         return;
       }
-      setConfirmOverwrite({ target, sameFolder, lines: describeOverwriteConfirm(target, clashes).map(toMessage) });
+      setConfirmOverwrite({
+        target,
+        sameFolder,
+        plan,
+        lines: describeOverwriteConfirm(target, withFolders).map(toMessage),
+      });
     },
-    [writeScene],
+    [writeScene, pendingAssets, geometry, splats, toMessage, t],
   );
 
   /**
@@ -2373,10 +2530,13 @@ export function App() {
       setRoom(buildStaticGeometrySync(geometry));
       return;
     }
-    const dir = saveTarget?.folder;
-    if (!dir) return; // a mesh can only have come from a folder that is still open
+    const dir = saveTarget?.folder ?? null;
+    // A mesh's bytes are either pending (imported this session) or in the open
+    // folder; with neither there is nothing to resolve them against
+    // (`asset_import.md` §7.2).
+    if (dir == null && !geometry.every((o) => !o.enabled || o.kind !== 'mesh' || pendingAssets.has(o.src))) return;
     let cancelled = false;
-    void buildSceneGeometry(geometry, (src) => resolveAssetFromDirectory(dir, src))
+    void buildSceneGeometry(geometry, meshResolver(pendingAssets, dir))
       .then((build) => {
         if (cancelled) {
           disposeGeometryBuild(build);
@@ -2764,8 +2924,8 @@ export function App() {
               onAddVolume={handleAddVolume}
               onAddConstraintGroup={handleAddConstraintGroup}
               onAddConstraint={handleAddConstraint}
-              onAddSplat={handleAddSplat}
-              addSplatBlocker={addSplatBlocker}
+              onImport={handleImportKind}
+              pendingSrcs={pendingSrcs}
               onDeleteCamera={handleDeleteCamera}
               onDeleteProbe={handleDeleteProbe}
               onDeleteSection={handleDeleteSection}
@@ -2788,6 +2948,8 @@ export function App() {
               onReorder={handleReorder}
               onExportCameraInfo={handleExportCameraInfo}
               exportCameraInfoBlocker={exportingCameraInfo ? t('exportingCameraRays') : null}
+              onImportModel={handleImportModel}
+              importModelLabel={tScene('sceneHierarchy.addMenu.model')}
             />
           </div>
           <div
@@ -3119,14 +3281,14 @@ export function App() {
       {/* Scene-file dialogs (spec §14.7). Rendered last so the backdrop sits over
           the whole app; both open only once a folder is granted, so the picker
           runs from the button's own user activation (§14.5). */}
-      {/* The **Add 3DGS** dialog (`gaussian_splats.md` §3.2): a backdrop modal
-          like the other two, because it settles the same question — which file
-          on disk something points at (spec §14.7). */}
-      {addSplatFolder != null && (
-        <AddSplatDialog
-          folder={addSplatFolder}
-          onAdd={handleAddSplatCommit}
-          onCancel={() => setAddSplatFolder(null)}
+      {/* The import refusal (`asset_import.md` §4, §11): a backdrop modal like
+          the others, and the only dialog this feature shows on the refusal path
+          — the clean path opens none (§6.1). */}
+      {importRefusal != null && (
+        <ImportRefusalDialog
+          fileName={importRefusal.fileName}
+          reason={importRefusal.reason}
+          onDismiss={() => setImportRefusal(null)}
         />
       )}
       {loadDialogFolder != null && (
@@ -3168,7 +3330,9 @@ export function App() {
         <ConfirmOverwriteDialog
           lines={confirmOverwrite.lines}
           busy={sceneIOBusy}
-          onConfirm={() => void writeScene(confirmOverwrite.target, confirmOverwrite.sameFolder)}
+          onConfirm={() =>
+            void writeScene(confirmOverwrite.target, confirmOverwrite.sameFolder, confirmOverwrite.plan)
+          }
           // A no-op: nothing written, target unchanged, and the dialog underneath
           // keeps its typed name (spec §14.8).
           onCancel={() => setConfirmOverwrite(null)}

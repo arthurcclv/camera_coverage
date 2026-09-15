@@ -1584,3 +1584,16 @@ button.tree-caret:focus-visible {
   font-size: 11px;
   color: #9aa3b0;
 }
+
+/* The **not saved** marker on a row whose asset was imported this session and
+   has not been written to disk (`asset_import.md` §9).
+
+   Deliberately *not* the amber `.splat-error` warning: nothing is wrong — the
+   asset loads, draws, occludes and runs exactly like a resolved one (§7.2). It
+   is a statement about where the bytes live, so it takes the quiet blue of
+   `.badge.splat`, a readout rather than an alarm, and sits **before** the load
+   badge so the row still ends with what parsed. */
+.tree-row .rate.not-saved {
+  color: #7fb8e6;
+  font-style: italic;
+}

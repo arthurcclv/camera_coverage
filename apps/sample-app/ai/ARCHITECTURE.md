@@ -281,11 +281,32 @@ default" — see DECISIONS.md).
   (position/rotation/uniform scale) is here too, and `SplatObject` extends it, so
   the three fields that always travel together have one name without changing the
   serialized shape. Tested in `test/splats.test.ts`.
-- `splatAssets.ts` — the **Add 3DGS** dialog's list decisions (§3.2):
-  `planSplatAssetList` (filter to the accepted extensions, list a PCSOGS
-  `meta.json` *with its reason* rather than dropping it, case-insensitive stable
-  order), `firstSelectableAsset`, `formatByteSize`. The same pure/impure split
-  `sceneFileList.ts` has from `sceneIO.ts`. Tested in `test/splatAssets.test.ts`.
+- `assetImport.ts` — the import's decisions (`asset_import.md` §4, §6.2), shared by
+  both kinds: `routePickedFile` (which entry accepts which picked file, and the exact
+  reason a refusal gives), `resolveImportName` (the `assets/<name>/` folder a file
+  lands in, normalized by `spec.md` §14.5's portability rule and uniquified against
+  **pending imports only**), `importSrc`/`importFolderName`. Tested in
+  `test/assetImport.test.ts`.
+- `plyHeader.ts` — `classifyPlyHeader` (§4.2): a `.ply` is a legal member of both
+  format lists, and only its header says which it is. A pure function over the first
+  4 KB, which `sceneIO` reads. Tested in `test/plyHeader.test.ts`.
+- `assetMaterialise.ts` — what a save must do to `assets/` before it writes the scene
+  file (§8.3–§8.6), as a **pure function of a listing**: which pending assets are
+  already on disk (dedupe first, so a deduped one can never be reported as a
+  collision), which folders would be created, which replaced, and which
+  replacements must be **refused** — a plain file in the way, or a folder the scene
+  being saved still reads from. That last one is why the plan is computed before the
+  overwrite confirmation is raised: no dialog should be able to authorise corrupting
+  the scene it is saving. Tested in `test/assetMaterialise.test.ts`, which is where
+  the guardrails on the app's only irreversible operation live.
+- `pendingAssets.ts` — the pending store (§7): `src` → the `File`s to write at the next
+  save, refcounted by referencing rows; `assetFiles` is the one definition of which
+  files an entry writes and in what order, so the pre-flight probe, the write loop and
+  the plan's path list cannot walk different sets.
+  Keyed by `src` so `Scene` itself stays untouched and fully serializable. Tested in
+  `test/pendingAssets.test.ts`. It keeps the picker's **handle** as well as the
+  `File`, because identity is the only way to ask whether a picked file already lives
+  in `assets/` (§8.3).
 - `splatLayer.ts` — the impure half (§4): the splat `Group` inside the viewport
   scene, the `SparkRenderer` (constructed once, on the first load), the
   streamed load path, the **per-`src` decode cache** refcounted by referencing
@@ -375,7 +396,14 @@ default" — see DECISIONS.md).
   streams each referenced GLB from the source folder to the same relative path in
   the destination (creating folders as needed) and throws `AssetCopyError`
   (carrying `src` + `reason`) on the first failure so the caller can abandon the
-  save before writing the scene file. One private `fileHandleAt` walks a relative
+  save before writing the scene file, plus the import path's `pickImportFile`,
+  `preflightPending` (a one-byte probe of every pending `File`, throwing
+  `PendingUnreadableError` with the path — the wording is the locale's, not the
+  error's), `dedupePendingAssets` (the recursive `isSameEntry` walk) and
+  `materialiseAssets`. **`App.tsx` asks for write permission before any of that
+  runs** when there are pending imports (`asset_import.md` §8.7 step 1): the probe
+  and the walk can take a whole `assets/` tree, and an activation spent walking is
+  gone by the time `requestPermission` needs it. One private `fileHandleAt` walks a relative
   asset path for both import and copy; one private `readTextAt` turns a failed
   read into `null` for the list. **No decisions live here** — every judgement is
   in one of the three pure modules, which is what keeps the untested surface this
@@ -394,8 +422,10 @@ default" — see DECISIONS.md).
   Save-as dialog), `nextSaveTarget` (fold an import/save/failure/cancel outcome
   into it), `normalizeSceneFileName` + `isSceneFileName` (the naming rules and the
   `*.json` listing predicate), `summarizeSceneFile` (a list row's
-  `96 cams · 12 probes`), `planAssetCopy` (the deduped referenced-`src` list a
-  cross-folder Save As… must copy), `resolveWriteAction` + `describeOverwriteConfirm`
+  `96 cams · 12 probes`), `sceneAssetSrcs` (every referenced `src`, one per row —
+  asked by the copy plan, the pending store's refcount release and the materialise
+  plan's self-reference guard alike) and `planAssetCopy` (that list deduplicated, what
+  a cross-folder Save As… must copy), `resolveWriteAction` + `describeOverwriteConfirm`
   (whether a commit replaces a file and so must be confirmed, §14.5, and what the
   confirmation says), and the status/warning/error strings. The
   dirty check is not a function here — it is one `!==` on the `sceneSnapshot`

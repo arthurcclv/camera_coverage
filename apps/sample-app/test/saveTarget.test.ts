@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   describeAssetCopyFailure,
   describeOverwriteConfirm,
+  describePendingUnreadable,
   describeReplaceWarning,
   describeSaveFailure,
   describeSceneFileStatus,
@@ -12,11 +13,13 @@ import {
   normalizeSceneFileName,
   planAssetCopy,
   resolveSaveAction,
+  sceneAssetSrcs,
   resolveWriteAction,
   summarizeSceneFile,
 } from '../src/scene/saveTarget.ts';
 import { identityTransform, type GeometryObject } from '../src/scene/geometryModel.ts';
 import { defaultSplat } from '../src/scene/splats.ts';
+import en from '../src/locales/en/common.json' with { type: 'json' };
 
 // Stand-ins for directory handles — the logic only ever reads `.name` (§14.5).
 const siteA = { name: 'site-a' };
@@ -323,4 +326,83 @@ test('a src shared by a mesh object and a splat row is deduplicated across the t
 test('a scene with no splats plans exactly its mesh srcs', () => {
   assert.deepEqual(planAssetCopy([mesh('assets/shelf.glb')], []), ['assets/shelf.glb']);
   assert.deepEqual(planAssetCopy([], []), []);
+});
+
+test('the unsaved warning names pending imports, since those are unrecoverable (asset_import.md §9)', () => {
+  // A dirty scene has always been recoverable by redoing edits; a discarded
+  // import loses bytes the app can no longer reach. The count leads, and it
+  // counts **assets**, not rows.
+  assert.deepEqual(describeUnsavedWarning('scene.json', 2), {
+    key: 'unsavedPendingAssets',
+    params: { count: 2 },
+  });
+  assert.deepEqual(describeUnsavedWarning(null, 1), {
+    key: 'unsavedPendingAssets',
+    params: { count: 1 },
+  });
+});
+
+test('with nothing pending the warning is unchanged (§14.4)', () => {
+  assert.deepEqual(describeUnsavedWarning('scene.json', 0), {
+    key: 'unsavedNamed',
+    params: { name: 'scene.json' },
+  });
+  assert.deepEqual(describeUnsavedWarning(null), { key: 'unsavedAnonymous' });
+});
+
+// --- what the save reports about materialised imports (asset_import.md §8.7) ---
+
+test('a save that found its imports already in the folder says so (§8.3, §8.7)', () => {
+  // Nothing was written, but two rows now point somewhere else than they did
+  // when the user imported them. That is the one `src` change a save can make
+  // under the user, so it is the one thing the status line must not swallow.
+  assert.deepEqual(
+    describeSceneFileStatus({ folder: siteA, name: 'a.json' }, { assetsCopied: 0, assetsPresent: 2 }),
+    { key: 'savedAssetsPresent', params: { name: 'a.json', count: 2 } },
+  );
+});
+
+test('a save that both wrote and deduped counts each separately (§8.7)', () => {
+  assert.deepEqual(
+    describeSceneFileStatus({ folder: siteB, name: 'a.json' }, { assetsCopied: 3, assetsPresent: 1 }),
+    {
+      key: 'savedWithAssetsAndPresent',
+      params: { folder: 'site-b', name: 'a.json', count: 3, present: 1 },
+    },
+  );
+});
+
+test('with nothing already present the line reads exactly as it did (§14.7)', () => {
+  const status = describeSceneFileStatus({ folder: siteB, name: 'a.json' }, { assetsCopied: 1, assetsPresent: 0 });
+  assert.equal(status.key, 'savedWithAssets');
+});
+
+test('a pending import that went unreadable is its own message, not a copy failure (§8.2)', () => {
+  // The reason is a sentence this app wrote, so it lives in the locale files —
+  // unlike `describeAssetCopyFailure`'s, which carries a browser's own text.
+  assert.deepEqual(describePendingUnreadable('assets/rack/rack.glb'), {
+    key: 'pendingAssetUnreadable',
+    params: { src: 'assets/rack/rack.glb' },
+  });
+  assert.ok('pendingAssetUnreadable' in en);
+});
+
+// --- the scene's asset paths (asset_import.md §7.3, §8.6) -------------------
+
+test('every referenced src is listed once per row, meshes then splats', () => {
+  // The refcount release and the self-reference guard both ask this question,
+  // and a disagreement between them would either free bytes a row still draws
+  // or refuse a replacement nothing uses.
+  const geometry: GeometryObject[] = [
+    { kind: 'box', id: 'geom-1', name: '', enabled: true, min: [0, 0, 0], max: [1, 1, 1], ...identityTransform() },
+    { kind: 'mesh', id: 'geom-2', name: '', enabled: true, src: 'assets/rack/rack.glb', ...identityTransform() },
+  ];
+  const splats = [defaultSplat('splat-1', 'assets/site.spz'), defaultSplat('splat-2', 'assets/site.spz')];
+  assert.deepEqual(sceneAssetSrcs(geometry, splats), [
+    'assets/rack/rack.glb',
+    'assets/site.spz',
+    'assets/site.spz',
+  ]);
+  // The copy plan is the same list, deduplicated — one write per file (§14.5).
+  assert.deepEqual(planAssetCopy(geometry, splats), ['assets/rack/rack.glb', 'assets/site.spz']);
 });

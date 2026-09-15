@@ -9,7 +9,8 @@
       "zone": "計算空間",
       "volume": "取樣範圍",
       "constraint": "位置限制",
-      "splat": "3D 高斯潑濺…"
+      "model": "匯入模型…",
+      "capture": "匯入 3DGS 擷取檔…"
     },
     "constraintSubmenu": {
       "group": "群組",
@@ -68,7 +69,9 @@
         "box": "方塊",
         "mesh": "模型"
       }
-    }
+    },
+    "notSaved": "未儲存",
+    "notSavedTitle": "本次工作階段匯入——儲存場景時才會寫入檔案。"
   },
   "sceneFileControls": {
     "title": "場景",
@@ -100,17 +103,6 @@
     "title": "要覆寫場景檔案嗎?",
     "overwriteButton": "覆寫"
   },
-  "addSplatDialog": {
-    "title": "新增 3D 高斯潑濺",
-    "captureFilesPrefix": "擷取檔案位於",
-    "captureFilesSuffix": "將 {{extensions}} 檔案放入該資料夾即可在此新增 — 本應用程式不會寫入該資料夾。",
-    "readingFolder": "正在讀取資料夾…",
-    "noAssetDirPrefix": "此場景資料夾沒有",
-    "noAssetDirSuffix": "資料夾。請建立一個並放入擷取檔案。",
-    "noneAddablePrefix": "",
-    "noneAddableSuffix": "中沒有可新增的擷取檔案。",
-    "listAriaLabel": "擷取檔案"
-  },
   "splatPanel": {
     "titlePrefix": "潑濺物 — {{label}}",
     "sourceLabel": "來源",
@@ -141,5 +133,9 @@
     "roomParamsValue": "{{x}} × {{z}} 公尺，高 {{height}} 公尺，牆厚 {{thickness}} 公尺",
     "boxParams": "方塊",
     "boxParamsValue": "{{x}} × {{y}} × {{z}} 公尺"
+  },
+  "importRefusal": {
+    "title": "無法匯入這個檔案",
+    "dismiss": "確定"
   }
 }

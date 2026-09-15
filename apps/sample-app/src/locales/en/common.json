@@ -22,7 +22,6 @@
   "resizeHierarchyPanels": "Resize hierarchy and detail panels",
   "exportingCameraRays": "Still casting the camera rays…",
   "selectedViewDisabledReason": "Select a camera to use this view",
-  "addSplatBlocker": "Load or save a scene first.",
   "unionLabelZones": "All enabled zones",
   "unionLabelWorkspace": "Whole workspace",
   "view": "View",
@@ -82,5 +81,23 @@
   "legendCamerasSeeingVoxel": "Cameras seeing voxel",
   "runBlocker": {
     "noGeometry": "No geometry to measure — tick or add a geometry row first."
-  }
+  },
+  "unsavedPendingAssets_one": "Loading discards 1 imported asset that has not been written to disk.",
+  "unsavedPendingAssets_other": "Loading discards {{count}} imported assets that have not been written to disk.",
+  "writePermissionDenied": "write permission was denied",
+  "pendingAssetUnreadable": "\"{{src}}\" is no longer readable — it may have been moved or deleted since it was imported. Nothing was saved.",
+  "importRefusalSogBundle": "That's a SOG bundle — use its .sog zip instead.",
+  "importRefusalExtension": "{{ext}} files can't be imported here — accepted: {{accepted}}.",
+  "importRefusalNoExtension": "A file with no extension can't be imported — accepted: {{accepted}}.",
+  "importRefusalMeshPly": "That's a mesh PLY — use Import model… instead.",
+  "importRefusalSplatPly": "That's a 3DGS capture — use Import 3DGS capture… instead.",
+  "importRefusalNoFaces": "No faces — nothing to occlude.",
+  "importRefusalUnreadablePly": "Not a readable PLY.",
+  "materialiseNotImportPath": "\"{{src}}\" is not an imported asset path, so it cannot be written.",
+  "materialiseFolderIsFile": "a file named {{folder}} is already there. Rename or remove it first.",
+  "materialiseFolderInUse": "{{folder}}/ cannot be replaced: this scene still uses \"{{src}}\" from it.",
+  "savedAssetsPresent_one": "Saved \"{{name}}\" — 1 imported asset was already in this folder.",
+  "savedAssetsPresent_other": "Saved \"{{name}}\" — {{count}} imported assets were already in this folder.",
+  "savedWithAssetsAndPresent_one": "Saved \"{{name}}\" to {{folder}} with 1 asset — {{present}} already there.",
+  "savedWithAssetsAndPresent_other": "Saved \"{{name}}\" to {{folder}} with {{count}} assets — {{present}} already there."
 }

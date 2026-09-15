@@ -24,7 +24,8 @@
  *   collision mesh.
  */
 import * as THREE from 'three';
-import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import type { Quat, SceneMesh, Vec3 } from '@linkervision/camera-coverage-sdk';
 import type { ClipBand } from './sectionHeatmap.ts';
 import {
@@ -209,32 +210,67 @@ function buildBoxPieces(obj: BoxGeometryObject, mats: Materials): Pieces {
 }
 
 /**
+ * The **loader table** (`geometry_assets.md` §2.2): one `mesh` kind, with the
+ * loader chosen by extension. A kind per format would be three branches doing
+ * the same thing, and a file's `kind` could then contradict its own `src`.
+ *
+ * `.gltf` and `.obj` are listed as accepted by `asset_import.md` §4.1 but need
+ * sibling resolution to load anything real (§5, stage C); until then a `.gltf`
+ * whose buffer is external fails to parse and badges as such, which is the same
+ * failure it had before this feature existed.
+ */
+const MESH_LOADERS: Record<string, (bytes: ArrayBuffer) => Promise<THREE.Object3D>> = {
+  '.glb': loadGltf,
+  '.gltf': loadGltf,
+  '.ply': loadPly,
+};
+
+async function loadGltf(bytes: ArrayBuffer): Promise<THREE.Object3D> {
+  return (await new GLTFLoader().parseAsync(bytes, '')).scene;
+}
+
+/**
+ * A **mesh** PLY (`asset_import.md` §4.2 routed it here, so it declares faces).
+ * PLY carries no materials, so the import material is the app's own — vertex
+ * colours used when the file has them, which is how scanned geometry usually
+ * ships its only appearance.
+ */
+async function loadPly(bytes: ArrayBuffer): Promise<THREE.Object3D> {
+  const geometry = new PLYLoader().parse(bytes);
+  geometry.computeVertexNormals();
+  const material = new THREE.MeshStandardMaterial({
+    vertexColors: geometry.hasAttribute('color'),
+    color: geometry.hasAttribute('color') ? 0xffffff : 0xb9bec7,
+  });
+  return new THREE.Mesh(geometry, material);
+}
+
+/**
  * Loads a `mesh` object's asset and reduces every mesh in its scene graph to a
  * world-space `TriMesh` — each mesh's geometry transformed by (object transform
  * × node world-matrix), per spec §14.6. Non-mesh nodes (lights/cameras) are
  * skipped for collision; the loaded scene graph is the render node's child,
  * materials intact, with the object transform on the node above it (§7).
  *
- * **glTF only, for now.** `.ply` and `.obj` arrive with the Add Geometry dialog
- * (`geometry_assets.md` §13, stage 2); a `src` with any other extension is
- * rejected here rather than silently contributing nothing, which would break
- * §14.6's "every geometry object contributes to occlusion".
+ * A `src` whose extension has no loader is rejected here rather than silently
+ * contributing nothing, which would break §14.6's "every geometry object
+ * contributes to occlusion".
  */
 async function buildMeshPieces(obj: MeshGeometryObject, resolveAsset: AssetResolver): Promise<Pieces> {
-  const lower = obj.src.toLowerCase();
-  if (!lower.endsWith('.glb') && !lower.endsWith('.gltf')) {
-    throw new Error(`Cannot load mesh geometry "${obj.src}": only .glb/.gltf are supported yet`);
+  const at = obj.src.lastIndexOf('.');
+  const load = at < 0 ? undefined : MESH_LOADERS[obj.src.slice(at).toLowerCase()];
+  if (load == null) {
+    throw new Error(`Cannot load mesh geometry "${obj.src}": ${Object.keys(MESH_LOADERS).join('/')} are supported`);
   }
-  const bytes = await resolveAsset(obj.src);
-  const gltf: GLTF = await new GLTFLoader().parseAsync(bytes, '');
+  const root = await load(await resolveAsset(obj.src));
 
-  gltf.scene.updateMatrixWorld(true);
+  root.updateMatrixWorld(true);
   // Reduced in the **object's own frame** (each mesh by its node's world matrix
   // within the asset, and no more): the object transform is applied by
   // `transformTriMesh` below, so a later move/rotate/scale re-bakes these same
   // triangles without re-parsing the asset (§4.3).
   const local: TriMesh[] = [];
-  gltf.scene.traverse((node) => {
+  root.traverse((node) => {
     if (!(node instanceof THREE.Mesh)) return;
     const positionAttr = node.geometry.getAttribute('position');
     if (!positionAttr) return;
@@ -258,7 +294,7 @@ async function buildMeshPieces(obj: MeshGeometryObject, resolveAsset: AssetResol
   // A mesh asset's local triangles are the same buffers, un-baked: the object
   // matrix is dropped from `finalMatrix` so a later transform edit can re-bake
   // them without re-parsing the asset (§4.3).
-  return { collision, local, node: nodeFor(obj, [gltf.scene], local) };
+  return { collision, local, node: nodeFor(obj, [root], local) };
 }
 
 /**

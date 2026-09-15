@@ -84,16 +84,36 @@ Then add a test — for the reducer transition and/or the pure function.
   in `npm run dev`** — jsdom has no layout, so `getBoundingClientRect` would return
   zeros and any test of those would be testing its own stubs.
 
+## Bringing a real site model in
+
+1. **"+" → Import model…** (or right-click the **Geometry** group header). The OS
+   picker opens on the scene folder when one is open, anywhere otherwise.
+2. Pick the `.glb` / `.gltf` / `.ply` / `.obj`. A row appears, auto-selected, drawing
+   from memory — no scene folder required, and nothing written yet.
+3. Fix the obvious import errors in the `GeometryPanel`: up-axis and units, read off
+   the world-size readout. A 1000× unit error is visible within a second.
+4. **Save.** That is when the bytes are written, into `<scene folder>/assets/<name>/`
+   — and when a file that was *already* in `assets/` is recognised by identity and
+   referenced in place instead of copied (`asset_import.md` §8.3). A save with no
+   target opens the Save-as dialog first, so a from-scratch scene gets a folder here.
+   If a folder of that name is already there, the save asks before replacing it, and
+   **refuses outright** if another row in the scene still reads from it.
+5. **Run.**
+
+The row carries a **`not saved`** marker until step 4, because until then the bytes
+exist only in the tab. A capture follows the same five steps through **Import 3DGS
+capture…**, minus step 3 and step 5 — it is a backdrop, not an occluder.
+
 ## Working on the splat layer
 
 Nothing here is reachable from `node --test`: Spark needs a WebGL2 context,
 workers and wasm. Two rules follow.
 
-- **Put the decision in `scene/splats.ts` or `scene/splatAssets.ts`, never in
+- **Put the decision in `scene/splats.ts` or `scene/assetImport.ts`, never in
   `scene/splatLayer.ts`.** The layer is canvas creation, the `SparkRenderer`, the
   stream load, `mesh.visible`, the `SplatEdit` lifecycle and disposal — and is
   deliberately untested. If a change to it needs a judgement (which files are
-  listed, what a badge says, where the clip box goes), that judgement belongs in
+  accepted, what a badge says, where the clip box goes), that judgement belongs in
   one of the pure two, with a test (`gaussian_splats.md` §11).
 - **What must be verified in `npm run dev`, against a real capture:** that the
   capture appears at all, that the WebGPU canvas still composites over it, that

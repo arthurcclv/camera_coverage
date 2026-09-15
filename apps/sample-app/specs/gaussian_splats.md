@@ -173,8 +173,10 @@ capture is shared by all of them.
 - Validated by the existing **`isSafeAssetPath`** (`scene/sceneFile.ts`) — absolute
   paths, URLs, `..` segments, and anything outside the folder are rejected on import
   (`spec.md` §14.8).
-- Conventionally `assets/<file>`; that is the only place §3.2 will offer, and the
-  only place a cross-folder Save As… will copy to.
+- Two shapes, both valid and both resolved identically: a **hand-placed** capture
+  is `assets/<file>`, and an **imported** one is `assets/<name>/<file>` — every
+  import gets a folder of its own (`asset_import.md` §6.2). `isSafeAssetPath`
+  accepts both, and a cross-folder Save As… copies either.
 
 **Accepted extensions** — the single-file `SplatFileType`s Spark can decode from a
 byte stream: **`.spz`**, **`.sog`**, **`.ply`**, **`.splat`**, **`.ksplat`**.
@@ -186,51 +188,38 @@ loading one would need a second, hand-rolled decode path
 for data that the `.sog` zip already carries in one file. Picking a `meta.json` in
 §3.2 reports "*that's a SOG bundle — use its `.sog` zip instead*".
 
-### 3.2 Adding a splat — the **Add 3DGS** dialog
+### 3.2 Adding a splat — see [`asset_import.md`](./asset_import.md)
 
-The hierarchy header **"+" menu** (`spec.md` §5.5) gains a **3D Gaussian Splat…**
-entry, the only entry that opens a dialog rather than spawning an entity. The
-**Add 3DGS** dialog lists the capture files **already present in the scene folder's
-`assets/`** and adds a row referencing the chosen one.
+**Replaced.** This section specified an **Add 3DGS** dialog listing the capture
+files already present in the scene folder's `assets/`, and justified at length
+why the app never wrote there. [`asset_import.md`](./asset_import.md) §3–§6 owns
+adding a capture now, through the **Import 3DGS capture…** entry and the same OS
+file picker a mesh asset uses.
 
-- **The user puts the file there.** The app never writes into `assets/`. This is
-  deliberate: `spec.md` §14.9 excludes in-app **file management**, Load grants the
-  folder handle **`mode: 'read'`** and write permission is only requested lazily on a
-  save (`spec.md` §14.5) — and copying a multi-hundred-megabyte capture through the
-  browser is
-  a slow, failable operation that would need its own progress and quota error
-  surface. Dropping the file into `assets/` in Finder is one step, and the file is
-  then shared by every scene file in the folder, which is the entire point of
-  `assets/`.
-- **Listing.** `assets/` at the folder root only, **non-recursive** — the same
-  flatness rule §14.2 applies to scene files. Entries are filtered to the accepted
-  extensions (§3.1) and sorted **case-insensitively** and stably, exactly as
-  `planSceneFileList` sorts scene files, so the list does not reshuffle between
-  openings. Each row shows the filename and its **byte size** (from
-  `FileSystemFileHandle.getFile().size` — metadata only; **no file is read or
-  decoded to build the list**).
-- **A file already referenced by this scene is still listed and still selectable** —
-  adding it twice is a legitimate way to place two differently-aligned copies of one
-  capture, and §3.3 makes it cheap.
-- **Opens on the first selectable row**, so the commit button always has a
-  subject, and **ArrowUp/ArrowDown walk the selectable rows only**, clamping at
-  both ends rather than wrapping — a listed-but-unselectable `meta.json` is there
-  to explain its own exclusion, not to be stopped on. **Enter** and a
-  **double-click** both commit. This is the Load dialog's list behavior exactly
-  (`spec.md` §14.7), and it is the *same code*: the move is
-  `sceneFileList.moveListSelection`, since a keyboard shortcut inside a dialog is
-  `(rows, selected) → selected` and belongs in a tested pure module, not inline
-  in the component (`ai/CONVENTIONS.md`).
-- **Commit** adds a `SplatObject` with the next free id, `enabled: true`, an
-  **identity transform** (`position [0,0,0]`, `rotation [0,0,0,1]`, `scale 1`), a
-  blank `name`, and **auto-selects** it — so the `SplatPanel` (§7) is open on it and
-  the gizmo attached, ready to register. Loading (§4.4) starts immediately.
-- **No scene folder yet.** At boot there is no save target (`spec.md` §14.1), so
-  there is no `assets/` to read. The **3D Gaussian Splat…** entry is then **disabled**
-  with the hint *"Load or save a scene first."* — it is the one "+" entry that is not
-  always enabled, because it is the one that needs a folder.
-- **No `assets/` folder, or nothing in it.** The dialog says so and offers no commit;
-  it does not create the folder.
+The reasoning that section gave has not been waved away so much as **answered**
+(`asset_import.md` §1.1):
+
+- *The `read`-mode handle.* Still `read`; write access is still requested lazily,
+  from a save's own user activation. An import asks for nothing.
+- *Copying a multi-hundred-megabyte capture is slow and failable.* Still true, and
+  still avoided in the case that matters: a capture already in the scene folder is
+  **recognised by identity** and referenced in place, not copied (§8.3). What is
+  copied is a capture that genuinely is not there yet — which the user was
+  previously copying by hand, in Finder, with no progress either.
+- *One file shared by every scene file in the folder.* Unchanged. A materialised
+  capture is an ordinary asset.
+
+What survives unchanged is the **commit**: a `SplatObject` with the next free id,
+`enabled: true`, an identity registration (`position [0,0,0]`, `rotation
+[0,0,0,1]`, `scale 1`), a blank `name`, **auto-selected** so the `SplatPanel` (§7)
+is open on it with its gizmo attached, loading immediately (§4.4), and marking
+**nothing** stale (§1.1).
+
+Two rules this section stated are reversed there: the entry is **always enabled**
+(it no longer needs a folder to read), and the app **does** write into `assets/`
+— at a save, never at the import.
+
+`scene/splatAssets.ts` and `ui/AddSplatDialog.tsx` are deleted with it.
 
 ### 3.3 One decode per `src`
 
@@ -244,6 +233,11 @@ duplicated 400 MB capture would double both its memory and its multi-second deco
 for nothing. The cache is **refcounted by referencing rows** and the entry is
 disposed when the last row referencing that `src` is deleted (§6.3) or the scene is
 replaced (§8).
+
+The cache is **re-keyed**, not invalidated, when a save rewrites a `src` — a
+pending capture deduping onto one already on disk, or a collision sending it to a
+suffixed folder (`asset_import.md` §8.3, §8.4). Re-decoding a resident capture
+because its path was renamed would be the most expensive no-op in the app.
 
 **A scene replacement is App's signal, not the layer's.** The layer drops the
 whole cache by itself when the *asset loader* changes, i.e. when the scene
@@ -789,7 +783,6 @@ Additions to the §14.8 table:
 | A `meta.json` picked in the Add dialog | not offered — listed with its reason and unselectable (§3.1) |
 | A `meta.json` referenced by a hand-edited scene file | **import succeeds**; the row badges `⚠ SOG bundle — use its .sog zip` rather than the bare undecodable badge, since the remedy is a different file and not a repair |
 | No `assets/` folder, or it holds no accepted file | the Add dialog says so and offers no commit |
-| No scene folder yet (boot) | the "+" menu's **3D Gaussian Splat…** entry is disabled with *"Load or save a scene first."* |
 | No WebGL2 context at all | the viewport cannot be created; App surfaces the failure in place of the viewport, since there is no second renderer left to fall back to (`spec.md` §2.3) |
 | Spark's dynamic import fails | the affected rows badge `⚠ could not be decoded`; the rest of the app is unaffected |
 | Referenced capture missing on a **cross-folder Save As…** | abort before writing the scene file, keep target, show error naming the asset (unchanged §14.5 rule — a copy cannot invent bytes) |
@@ -901,14 +894,14 @@ here so a later change knows what was actually measured rather than assumed
 
 | `spec.md` section | Edit |
 |---|---|
-| §2.2 Layout / file map | Add `scene/splats.ts`, `scene/splatAssets.ts`, `scene/splatLayer.ts`, `ui/SplatPanel.tsx`, `ui/AddSplatDialog.tsx`; note the Splats umbrella and `SplatPanel` in the left-panel detail list. |
+| §2.2 Layout / file map | Add `scene/splats.ts`, `scene/splatLayer.ts`, `ui/SplatPanel.tsx`; note the Splats umbrella and `SplatPanel` in the left-panel detail list. (`splatAssets.ts` and `AddSplatDialog.tsx` were deleted by `asset_import.md` §1.2.) |
 | §2.3 Render backend | State the two-backend split — WebGPU for worker compute, **WebGL2 for the viewport** — and that Spark's `WebGLRenderer` requirement is what fixes the render backend, buying one shared depth buffer (§4.1, §4.2). |
 | §2.4 Viewport toolbar | Add the **Splats** and **Geometry** rows to the eye-menu list, both defaulting to visible (§5.2, §5.3); note that Translate/Rotate apply to a selected splat and **Scale stays volume-only** (§7). |
 | §2.4.1 Selected view | Note that splats render in this view too (§4.2). |
 | §2.4.2 Place on surface | State that splats are **not** a placement target, with the reason (§1.1). |
 | §2.4.3 Disabled entities | State the splat divergence: a disabled splat stays hidden **even when selected**, though its gizmo still attaches (§5.1). |
 | §4.2 Workspace | State that splats contribute **no bounds** to the workspace AABB (§1.1). |
-| §5.5 Hierarchy | Add the `{ kind: 'splat' }` node and the **Splats** umbrella; root order → Cameras → Probes → Sections → Zones → Constraints → **Splats**; `buildSceneTree`'s new `splats` parameter; the `'splat'` selection case; the row checkbox and load badge; the filename label fallback as the documented exception to the ordinal rule; "+" → **3D Gaussian Splat…** as the one dialog-opening and conditionally-disabled entry; Duplicate/Delete rules; **no splat action marks the result stale**. |
+| §5.5 Hierarchy | Add the `{ kind: 'splat' }` node and the **Splats** umbrella; root order → Cameras → Probes → Sections → Zones → Constraints → **Splats**; `buildSceneTree`'s new `splats` parameter; the `'splat'` selection case; the row checkbox and load badge; the filename label fallback as the documented exception to the ordinal rule; "+" → **Import 3DGS capture…** (`asset_import.md` §3.1), always enabled; Duplicate/Delete rules; **no splat action marks the result stale**. |
 | §5.5.1 Reordering | Add **splat** to the draggable kinds. |
 | §8.1 Staleness | State that splats are never analysis inputs, so no splat action marks the result stale (mirrors `camera_placement.md` §1.1). |
 | §9.2 Overlay intensity | Note that the intensity scale is also the dial for fog read over a splat capture, which the fog **tints** when it composites over the scene (§4.5). |
@@ -918,7 +911,7 @@ here so a later change knows what was actually measured rather than assumed
 | §14.3 File format | Add the top-level `"splats"` array and its per-splat shape; `enabled` optional on read / omitted on write when `true`; `name` omitted when blank; **`formatVersion` stays `3`** with the additive-precedent reasoning; `splats` order is display order. |
 | §14.4 Import | Import replaces `splats`; validation joins the all-or-nothing pass; **capture loading is not part of it** — a missing/undecodable capture does not abort (contrast step 5's GLB rule). |
 | §14.5 Export / Save As… | `planAssetCopy(geometry, splats)` — captures copy on a cross-folder Save As… and count toward the pre-commit total and the replace warning; a missing capture aborts that save. |
-| §14.7 UI controls | Add the **Add 3DGS** dialog (§3.2). |
+| §14.7 UI controls | Carried by `asset_import.md` §14: the entry opens the **OS picker** directly, and the dialogs are its consequences. |
 | §14.8 Error handling | Add the §9 rows. |
 | §14.9 Out of scope | Clarify that the non-authorable, non-selectable rule covers **`geometry`** objects; splats are a separate array and are authorable (§2.1). |
 | §17 Terminology | Add **3D Gaussian Splat**, **splat**, **registration**, **splat group** (§10). |
@@ -930,7 +923,7 @@ Also required outside `spec.md` (per the repo's `ai/` docs rule):
 | `ai/STACK.md` | Add `@sparkjsdev/spark@2.1.0` (peer `three >=0.180.0`), that it is **dynamically imported** and why (~5 MB), and that its WebGL-only requirement is what fixes the app's render backend. |
 | `ai/ARCHITECTURE.md` | The single-renderer viewport, the splat group inside the main scene, the decode cache, and the pure/impure split of the new modules. |
 | `ai/DECISIONS.md` | New entries (newest at top): `splats[]` over a `GeometryObject` kind; pick-from-`assets/` over an in-app copy; hide-not-unload; uniform scale; **one world-space SDF clip for the whole layer**; `formatVersion` unchanged; dynamic import; hierarchy-only picking; filename label fallback; **fog-over-capture left to the existing Coverage and intensity controls**. Each entry records what the spike measured, since several of these rest on measurements rather than on reading docs. |
-| `ai/CONVENTIONS.md` | The pure-decision / impure-layer split as applied here (`splats.ts`/`splatAssets.ts` vs `splatLayer.ts`). |
+| `ai/CONVENTIONS.md` | The pure-decision / impure-layer split as applied here (`splats.ts` vs `splatLayer.ts`). |
 | `ai/VISUAL_DESIGN.md` | The Splats group row, the splat row badge states, the two new eye-menu rows and their glyphs, and the `SplatPanel` layout. |
 
 ---

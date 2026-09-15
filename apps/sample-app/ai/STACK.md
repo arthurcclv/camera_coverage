@@ -38,6 +38,15 @@ Technologies used by the demo app and the role each plays. See
   a minimal ambient declaration lives in `src/types/file-system-access.d.ts`
   (`FileSystemDirectoryHandle`/`FileSystemFileHandle` themselves — including
   `getFileHandle`/`getDirectoryHandle`/`createWritable` — are already declared).
+- **`showOpenFilePicker`** — asset import (`asset_import.md` §3.2). Same API, same
+  browser support, same ambient-declaration file. It returns a handle with **no
+  parent and no path**, which is why `FileSystemHandle.isSameEntry` is what answers
+  "is this file already in `assets/`?" (§8.3) and
+  `FileSystemDirectoryHandle.removeEntry({ recursive: true })` is what a confirmed
+  folder replace uses (§8.5). No new dependency for any of it.
+- **`PLYLoader`** from `three/addons`, beside the existing `GLTFLoader` — mesh PLY
+  import. `OBJLoader`/`MTLLoader` join it with multi-file support (§15 stage C).
+  Still no new dependency: all of them ship with `three`.
 
 The coverage overlay is a single `InstancedMesh` of unit cubes (one instance per
 voxel) with per-instance attributes and a GLSL slab/chord fragment shader — one

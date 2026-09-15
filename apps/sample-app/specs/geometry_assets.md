@@ -1,9 +1,10 @@
 # Sample App — Geometry assets (meshes as editable scene entities)
 
 The feature spec for **authoring the scene's geometry in the app**: a **Geometry**
-group in the scene hierarchy, one row per geometry object, and an **Add Geometry**
-dialog that places `.glb` / `.gltf` / `.ply` / `.obj` assets from the scene folder's
-`assets/` into the scene. Companion to [`spec.md`](./spec.md); this document owns the
+group in the scene hierarchy, and one row per geometry object, each with a
+checkbox, a transform and a panel. Bringing `.glb` / `.gltf` / `.ply` / `.obj`
+assets **into** a scene is [`asset_import.md`](./asset_import.md)'s, which
+replaced this document's §3.2. Companion to [`spec.md`](./spec.md); this document owns the
 full behavior of the feature, and §12 lists the edits required in `spec.md` so the two
 stay consistent (workflow rule: spec-first, no drift).
 
@@ -50,9 +51,10 @@ assets in:
 - A **Geometry** group listing **every** geometry object, the default room and its
   boxes included, each with an **enabled checkbox**, a transform, a name, and the
   usual duplicate / delete / reorder actions.
-- An **Add Geometry** dialog that lists the mesh assets already sitting in the scene
-  folder's `assets/` and adds a row referencing the chosen one — the **Add 3DGS**
-  pattern (`gaussian_splats.md` §3.2), applied to triangles.
+- A way to bring real assets in — originally a dialog listing what was already in
+  `assets/`, now the picker in [`asset_import.md`](./asset_import.md) §3, which
+  reaches the whole disk and writes what it is given into `assets/` at the next
+  save.
 - Four accepted formats: **`.glb`**, **`.gltf`**, **`.ply`** (mesh PLY — see §3.3),
   **`.obj`**, including the **multi-file** cases (`.gltf` + `.bin` + textures;
   `.obj` + `.mtl` + textures) that today's loader cannot resolve at all.
@@ -247,88 +249,36 @@ A `.mtl`, a `.bin`, or a texture file is **never** a `src` — those are depende
 reached only through the file that references them (§3.4), and they are not listed as
 addable in §3.2.
 
-### 3.2 Adding geometry — the **Add Geometry** dialog
+### 3.2 Adding geometry — see [`asset_import.md`](./asset_import.md)
 
-The hierarchy header **"+" menu** (`spec.md` §5.5) gains a **Geometry…** entry — the
-second entry that opens a dialog rather than spawning an entity, and the second that
-is not always enabled. The **Add Geometry** dialog lists the mesh assets already
-present under the scene folder's `assets/` and adds a row referencing the chosen one.
+**Replaced.** This section specified an **Add Geometry** dialog listing the mesh
+assets already sitting in the scene folder's `assets/`. That listing is gone, and
+with it the requirement that the user stage the file themselves:
+[`asset_import.md`](./asset_import.md) §3–§6 owns adding geometry now — an
+**Import model…** entry opening the OS file picker, which reaches anywhere on
+disk, copies what it is given into `assets/` at the next save, and resolves a
+file that is *already* there to itself instead of duplicating it (§8.3).
 
-- **The user puts the file there.** The app never writes into `assets/` — the same
-  rule, for the same reasons, as Add 3DGS (`spec.md` §14.9's no-file-management rule,
-  and a `read`-mode folder handle until the first save).
-- **Listing walks `assets/` recursively, with no depth limit.** Exported model
-  bundles arrive as their own folder (`assets/site/model.obj` +
-  `assets/site/textures/`), and flattening one by hand before the app can see it
-  would defeat the point. This **diverges deliberately** from Add 3DGS's
-  root-only rule (`gaussian_splats.md` §3.2) and from §14.2's flatness rule for scene
-  *files*: a capture is one file and a scene file must sit one level from `assets/`,
-  while a model is a **set** of files that ships as a directory.
-  - Rows show the **folder-relative path** (`site/model.obj`) and the file's **byte
-    size**, sorted case-insensitively and stably by path, so the list does not
-    reshuffle between openings. **No file is read or parsed to build the list** —
-    metadata only — with the single exception of `.ply` header sniffing (§3.3), which
-    reads the first bytes of each `.ply` and nothing else.
-  - The walk is **asynchronous** and the dialog shows a progress state
-    (`scanning assets/… 412 files`) until it completes, so a deep or large folder
-    never blocks the UI. There is **no depth cap and no entry cap**: the ceiling is
-    whatever the user's own `assets/` holds. If a real folder ever makes this dialog
-    slow to open, the fix is a cap here, stated in this bullet — not a silent
-    truncation added elsewhere.
-- **An asset already referenced by this scene is still listed and still selectable** —
-  two rows on one file is how two placements of the same rack are made, and §3.5
-  makes it cheap.
-- **Opens on the first selectable row**; **ArrowUp/ArrowDown** walk the selectable
-  rows only, clamping at both ends; **Enter** and **double-click** commit. This is the
-  Load and Add 3DGS list behavior exactly, and it is the *same code* —
-  `sceneFileList.moveListSelection` (`ai/CONVENTIONS.md`: a keyboard move is
-  `(rows, selected) → selected` and belongs in a tested pure module).
-- **Commit** adds a `MeshGeometryObject` with the next free id, `enabled: true`, an
-  **identity transform**, a blank `name`, and **auto-selects** it — so the
-  `GeometryPanel` (§7) is open on it with its size readout, ready to fix up-axis and
-  units. Loading (§4.2) starts immediately. The add **marks the result stale** (§1.1).
-- **No scene folder yet.** At boot there is no save target (`spec.md` §14.1), so
-  there is no `assets/` to read: the **Geometry…** entry is **disabled** with the hint
-  *"Load or save a scene first."*, exactly as **3D Gaussian Splat…** is.
-- **No `assets/` folder, or nothing addable in it.** The dialog says so and offers no
-  commit; it does not create the folder.
-- The **Geometry group header's context menu** offers the same **Add geometry…**
-  item, so the empty-list state has a route out of itself (§2.3). This is the first
-  non-empty group menu besides Cameras' **Export camera info**, and it is declared in
-  the same exhaustive per-group record (`ui/groupMenu.ts`).
+What survives unchanged is the **commit**: a `MeshGeometryObject` with the next
+free id, `enabled: true`, an identity transform, a blank `name`, **auto-selected**
+so the `GeometryPanel` (§7) is open on it with its size readout, loading
+immediately (§4.2), and marking the result stale (§1.1).
 
-### 3.3 `.ply` is claimed — routing by header
+Two rules this section used to state are reversed there and should not be looked
+for here: the "+" entry is **always enabled** (an import needs no scene folder,
+because it writes none until a save), and the app **does** write into `assets/`.
 
-`.ply` is already in `SPLAT_EXTENSIONS` (`gaussian_splats.md` §3.1): the Add 3DGS
-dialog lists every `assets/**.ply` as a Gaussian capture, because that is one of the
-formats captures ship in. A **mesh** PLY and a **splat** PLY share an extension and
-are different files entirely.
+### 3.3 `.ply` is claimed — see [`asset_import.md`](./asset_import.md) §4.2
 
-They are distinguishable from the header alone, which is **plain ASCII text at the
-head of every PLY**, binary variants included, and terminated by `end_header`:
+**Moved.** The problem is unchanged — a mesh PLY and a splat PLY share an
+extension and are different files entirely — and so is the routing table and its
+reasoning. What changed is *when* it runs: it was an annotation on two listings,
+and is now a **validation** on the one picked file, refused before anything is
+added. `classifyPlyHeader` (`scene/plyHeader.ts`) and its 4 KB sniff window are
+unchanged.
 
-- a **splat** PLY declares per-vertex Gaussian properties — `f_dc_0`, `scale_0`,
-  `rot_0`, `opacity`;
-- a **mesh** PLY declares `element face …`.
-
-The routing rule:
-
-| Header | Add Geometry | Add 3DGS |
-|---|---|---|
-| has `element face`, no Gaussian properties | **listed, selectable** | listed with the reason *"that's a mesh PLY"* |
-| has Gaussian properties | listed with the reason *"that's a 3DGS capture — use Add 3DGS"* | **listed, selectable** |
-| neither (points only, no faces) | listed with the reason *"no faces — nothing to occlude"* (§4.5) | listed, selectable (Spark may still decode it) |
-| header unreadable / not a PLY | listed with the reason *"not a readable PLY"* | as today |
-
-Listing the wrong-kind file **with its reason** rather than hiding it is the choice
-both existing dialogs already make (`spec.md` §14.4's invalid `*.json`,
-`SOG_BUNDLE_REASON`): a folder explains itself instead of looking empty.
-
-The sniff is a **pure function over the header text** (`scene/plyHeader.ts`), so it
-is unit-tested against fixtures with no file system involved; `sceneIO` reads the
-first 4 KB of each `.ply` and hands it over. 4 KB is comfortably past `end_header` in
-every real file; a header that has not ended by then reports *"not a readable PLY"*
-rather than reading further.
+The refusal is also now **actionable**: it names the other entry, and the other
+entry is enabled and one click from the same file.
 
 ### 3.4 Multi-file assets — sibling resolution
 
@@ -344,6 +294,9 @@ Resolution runs through the **same directory handle** everything else uses:
   validates the result with **`isSafeAssetPath`** (so `../../etc/passwd`, an absolute
   path, or an `http:` URL is refused), reads the bytes through the folder handle, and
   returns a **blob URL**.
+- The modifier checks the **pending store first**, then the folder handle
+  (`asset_import.md` §7.2), so a model imported this session resolves its siblings
+  from memory and a materialised one from disk, on one code path.
 - Blob URLs are **revoked** once the parse settles — success or failure — so a
   repeated add does not leak a URL per texture.
 - A **missing sibling** fails the object's load, and the row reports
@@ -369,6 +322,11 @@ The render side shares the parsed `BufferGeometry` between rows (each row gets i
 `THREE.Mesh` with its own matrix); the collision side re-transforms the cached
 triangles per row, since each row bakes its own transform into world space
 (`geometryModel.transformTriMesh`).
+
+The cache is **re-keyed**, not invalidated, when a save rewrites a `src` — which
+happens when a pending asset dedupes onto one already on disk, or a collision
+sends it to a suffixed folder (`asset_import.md` §8.3, §8.4). The bytes did not
+change; only the name they are filed under did.
 
 **A scene replacement is App's signal, not the loader's** — the same reasoning as
 `gaussian_splats.md` §3.3: two scene files in one folder share an asset loader while
@@ -474,9 +432,13 @@ The guardrail is **information, never a refusal**:
 
 An asset that parses but yields **no triangles** — a faceless PLY (a point cloud), an
 OBJ of only points or lines, a glTF whose nodes are all lights or cameras — is
-**refused at the Add Geometry dialog**, listed with the reason *"no faces — nothing to
-occlude"* and unselectable. A hand-edited scene file referencing one loads, and the
+**refused at import**, with the reason *"no faces — nothing to occlude"*
+(`asset_import.md` §4.3). A hand-edited scene file referencing one loads, and the
 row badges the same reason (§9).
+
+A faceless **PLY** is refused from its header alone, before any parse
+(`asset_import.md` §4.2); the other two need the parse, so their refusal lands on
+the import's commit rather than on the pick.
 
 It would otherwise be a row that occupies the hierarchy, occludes nothing, and still
 **grows the workspace AABB** — diluting every coverage rate with voxels nothing can
@@ -782,7 +744,8 @@ amount nothing can quantify, because the missing object is an **occluder**. So: 
 scene loads, the row says what is wrong, and **Run is blocked until an explicit choice
 is made** (§5.4).
 
-Additions to the §14.8 table:
+Additions to the §14.8 table (the import path's own rows are
+`asset_import.md` §11's):
 
 | Case | Handling |
 |---|---|
@@ -796,8 +759,6 @@ Additions to the §14.8 table:
 | A splat PLY referenced as `geometry`, or a mesh PLY referenced as a `splat` | each reports through its own kind's badge — the geometry row `⚠ could not be parsed`, the splat row `⚠ could not be decoded`; the Add dialogs prevent both (§3.3) |
 | Every geometry object deleted or disabled | legal; **Run disabled** with *"No geometry to measure"*; standing result cleared (§5.3) |
 | One object or the merged scene over the triangle warning threshold | amber note on the row and in the stats panel; **nothing blocked** (§4.4) |
-| No `assets/`, or nothing addable in it | the **Add Geometry** dialog says so and offers no commit |
-| No save target yet (boot) | the "+" menu's **Geometry…** entry is disabled: *"Load or save a scene first."* |
 | Referenced mesh **or one of its dependencies** missing on a cross-folder Save As… | abort before writing the scene file, keep target, show error naming the file (§8) |
 
 ---
@@ -830,23 +791,8 @@ Tested under `node --test`:
 - **`geometryLabel`** — `name` wins when non-blank; a `mesh` falls back to
   `basename(src)`, not an ordinal; `room`/`box` fall back to `Room N` / `Box N`
   numbered **within their own kind**; whitespace-only name counts as blank.
-- **`planGeometryAssetList`** (`scene/meshAssets.ts`) — filters to the accepted
-  extensions; lists a splat PLY, a faceless PLY and an unreadable PLY **with their
-  reasons** and unselectable; sorts case-insensitively and stably **by
-  folder-relative path**; nested paths listed; an already-referenced asset still
-  selectable; empty and no-`assets/` cases; `.mtl`/`.bin`/texture files never listed.
-- **`classifyPlyHeader`** (`scene/plyHeader.ts`) — Gaussian properties ⇒ splat;
-  `element face` ⇒ mesh; vertices with neither ⇒ point cloud; ASCII and
-  `binary_little_endian` headers; CRLF line endings; a header with no `end_header`
-  inside the sniff window ⇒ unreadable; a non-PLY magic ⇒ unreadable.
-- **`scanAssetDependencies`** (`scene/assetDeps.ts`) — glTF JSON yields
-  `buffers[].uri` + `images[].uri` and **skips `data:` URIs**; `.obj` yields every
-  `mtllib` operand (including two on one line); `.mtl` yields `map_Kd`/`map_Bump`/
-  `bump`/`disp`/`refl` operands; paths resolve **relative to the referencing file**
-  (`assets/site/model.obj` + `tex/wall.png` ⇒ `assets/site/tex/wall.png`); `..`,
-  absolute and URL operands are **rejected**, not resolved; `.glb` and `.ply` yield
-  nothing; a transitive `.obj` → `.mtl` → texture chain resolves fully and
-  deduplicates.
+- **`classifyPlyHeader`**, **`scanAssetDependencies`** and the rest of the import
+  pipeline's suites are `asset_import.md` §13's, since the pipeline is theirs.
 - **`parseSceneFile` / `serializeScene`** — a v3 file's `kind: "gltf"` reads as
   `mesh`; ids back-fill as `geom-1…` by position; a file **mixing** explicit and
   absent ids back-fills around the taken ones (`[{"id":"geom-2"},{},{}]` ⇒ `geom-2`,
@@ -908,7 +854,7 @@ is already in `spec.md`. A row that spans stages is applied in the part that shi
 
 | `spec.md` section | Edit |
 |---|---|
-| §2.2 Layout / file map | Add `scene/runGate.ts`, `scene/sceneView/transformMode.ts`, `ui/GeometryPanel.tsx` — and, *(stage 2)*, `scene/meshAssets.ts`, `scene/plyHeader.ts`, `scene/assetDeps.ts`, `scene/meshLoader.ts`, `ui/AddGeometryDialog.tsx`; note the Geometry group in `SceneHierarchy.tsx`'s line and `GeometryPanel` in the left-panel detail list. |
+| §2.2 Layout / file map | Add `scene/runGate.ts`, `scene/sceneView/transformMode.ts`, `ui/GeometryPanel.tsx`; note the Geometry group in `SceneHierarchy.tsx`'s line and `GeometryPanel` in the left-panel detail list. The import pipeline's modules are `asset_import.md` §14's. |
 | §2.4 Viewport toolbar | **Scale** is no longer volume-only: a selected **geometry object** is scale-capable, per-axis (§7). Note that geometry keeps Move/Rotate/Scale while splats keep Move/Rotate. |
 | §2.4.2 Place on surface | Unchanged rule, but state that imported meshes are ordinary placement targets, and that a **geometry object** is not itself placeable (it is not a point). |
 | §2.4.3 Disabled entities | State that a disabled geometry object is excluded from the collision mesh and the workspace AABB — the first kind whose checkbox changes a number — and that it joins the **splat exception** to "selection wins": hidden even while selected, with its gizmo still attached (§5.1). |
@@ -918,17 +864,17 @@ is already in `spec.md`. A row that spans stages is applied in the part that shi
 | §5.5 Hierarchy | Add the `{ kind: 'geometry' }` node and the **Geometry** umbrella; root order → Cameras → Probes → Sections → Zones → Constraints → **Geometry** → Splats; the group is **always shown**, expanded; `buildSceneTree`'s new `geometry` parameter; the `'geometry'` selection case; row checkbox semantics (§5.1) and the mesh load badge; the label rule (§2.4); "+" → **Geometry…** as the second dialog-opening, conditionally-disabled entry; the group-header menu's **Add geometry…**; Duplicate/Delete rules; **which geometry actions mark the result stale** (§1.1). |
 | §5.5.1 Reordering | Add **geometry** to the draggable kinds; reordering geometry never marks stale. |
 | §8.1 Staleness | State the geometry rule: add / delete / duplicate / transform / toggle-enabled mark stale; rename and reorder do not; a geometry edit **cancels a superseded in-flight run** (already covered by "a resolution, geometry, or sampling change") and the following run is a **full re-init** when the AABB moved. Add the **lazy rebuild** rule (§4.3) and the two Run blocks (§5.3, §5.4). |
-| §10 Stats panel *(stage 3)* | Add the next-run workspace/voxel readout and the triangle-count/threshold note (§4.4). |
+| §10 Stats panel *(stage D)* | Add the next-run workspace/voxel readout and the triangle-count/threshold note (§4.4). |
 | §13.9 Clip | No behavior change; note that imported meshes receive the same material clipping planes as every other render mesh. |
 | §14.1 `Scene` model | `GeometryObject` gains `id`/`name`/`enabled`; the `gltf` kind becomes `mesh`; geometry is now addable, selectable and editable (the §14.9 rule this deletes). |
-| §14.2 Folder layout *(stage 2)* | `assets/` may hold **model bundles in subfolders**; a mesh `src` may be multi-segment; the Add Geometry listing is **recursive** (§3.2), unlike scene files and captures. |
+| §14.2 Folder layout | Carried by `asset_import.md` §14: `assets/` holds **one subfolder per imported asset**, and a mesh `src` may be multi-segment. |
 | §14.3 File format | `formatVersion` **4**; reader accepts 1–4; the per-object shape with `id`/`name`/`enabled`; legacy `gltf` → `mesh`; id back-fill by position; the bump's justification (§8). Update the sketch. |
-| §14.4 Import *(stage 2)* | Step 5 no longer loads GLBs as a gate: **mesh loading is asynchronous and non-blocking**, and a missing/unparseable mesh reports on its row instead of aborting (§9) — with the compensating **Run block** (§5.4), which is what keeps a broken scene from producing a number. Step 6 releases the **parse cache** alongside the decode cache. |
-| §14.5 Export / Save As… *(stage 3)* | `planAssetCopy` copies the **dependency closure** (§8); a missing dependency aborts a cross-folder save, naming the file. |
+| §14.4 Import *(stage B)* | Step 5 no longer loads GLBs as a gate: **mesh loading is asynchronous and non-blocking**, and a missing/unparseable mesh reports on its row instead of aborting (§9) — with the compensating **Run block** (§5.4), which is what keeps a broken scene from producing a number. Step 6 releases the **parse cache** alongside the decode cache. |
+| §14.5 Export / Save As… *(stage C)* | `planAssetCopy` copies the **dependency closure** (§8); a missing dependency aborts a cross-folder save, naming the file. Everything else a save now does is `asset_import.md` §8's. |
 | §14.6 Geometry rendering & collision | `mesh` objects of all four formats render with their own materials (PLY without materials takes the default import material, using vertex colours when present; OBJ takes its `.mtl` when resolvable), all forced double-sided; **normals are computed when absent**; the collision statement stays exact because §4.5 refuses zero-triangle assets; add the **lazy rebuild** (§4.3) and the sibling-resolution rule (§3.4); restate the layer-toggle-vs-checkbox split (§5.2). |
-| §14.7 UI controls *(stage 2)* | Add the **Add Geometry** dialog (§3.2) to the modal list, with its recursive listing and its keyboard rules. |
+| §14.7 UI controls | Carried by `asset_import.md` §14: the import entries open the **OS picker** directly, and the dialogs are its consequences (a refusal, and stage C's dependency resolver). |
 | §14.8 Error handling | Add the §9 rows; amend the "Referenced GLB missing or fails to parse" row, which no longer aborts. |
-| §14.9 Out of scope | **Delete** the in-app geometry-authoring bullet outright and replace it with what remains out of scope: creating **primitives** in-app, editing their intrinsic parameters, and writing into `assets/` (still nothing is ever copied or transcoded in-app). Keep "additional primitive kinds". |
+| §14.9 Out of scope | **Delete** the in-app geometry-authoring bullet outright and replace it with what remains out of scope: creating **primitives** in-app and editing their intrinsic parameters. Keep "additional primitive kinds". Writing into `assets/` left this list with `asset_import.md` §14. |
 | §17 Terminology | Add **geometry object**, **mesh**, **mesh asset**, **dependency closure** (§10); amend the splat entries' contrasts where they say "unlike geometry, which is not editable". |
 
 Also required outside `spec.md` (per the repo's `ai/` docs rule):
@@ -938,30 +884,35 @@ Also required outside `spec.md` (per the repo's `ai/` docs rule):
 | `ai/DESIGN.md` | The product shift this makes: the app no longer takes its geometry as given — a site model is brought in, placed and switched off from inside the app, and the coverage question becomes "against which version of the site?" |
 | `ai/ARCHITECTURE.md` | The geometry load path (dialog → reducer → loader → parse cache → render group), the **two builds on two schedules** (§4.1), and the pure/impure split of the new modules. |
 | `ai/DECISIONS.md` | New entries, newest at top: one `geometry` array over a second editable array; `mesh` as one kind with an extension-keyed loader table; **`formatVersion` 4** and why this bump is not additive; the checkbox meaning membership rather than visibility; **lazy collision rebuild at Run**; PLY routed by header sniff; sibling resolution through the folder handle; **dependency-closure copying** over a persisted dep list; recursive `assets/` listing with no depth cap (and the stall risk accepted with it); warn-never-block on triangles; row-only selection. |
-| `ai/CONVENTIONS.md` | The pure-decision / impure-loader split as applied here (`meshAssets.ts`/`plyHeader.ts`/`assetDeps.ts` vs `meshLoader.ts`); the rule that a format sniff is a pure function over bytes already read. |
-| `ai/STACK.md` *(stage 2)* | `PLYLoader`, `OBJLoader`, `MTLLoader` from `three/addons` — **no new dependency**; note the `LoadingManager.setURLModifier` mechanism. |
-| `ai/VISUAL_DESIGN.md` | The Geometry group row, the mesh row badge states (including the amber threshold variant), the `GeometryPanel` layout with its size readout and preset buttons, and the Add Geometry dialog. |
-| `ai/WORKFLOWS.md` *(stage 2)* | How to bring a real site model in: drop the bundle in `assets/`, Add Geometry, fix up-axis/units from the readout, Run. |
+| `ai/CONVENTIONS.md` | The pure-decision / impure-loader split as applied here; the rule that a format sniff is a pure function over bytes already read (carried by `asset_import.md` §14). |
+| `ai/STACK.md` *(stage C)* | `PLYLoader`, `OBJLoader`, `MTLLoader` from `three/addons` — **no new dependency**; note the `LoadingManager.setURLModifier` mechanism. |
+| `ai/VISUAL_DESIGN.md` | The Geometry group row, the mesh row badge states (including the amber threshold variant), and the `GeometryPanel` layout with its size readout and preset buttons. The import dialogs and the `not saved` marker are `asset_import.md` §14's. |
+| `ai/WORKFLOWS.md` | Carried by `asset_import.md` §14: **Import model…**, fix up-axis/units from the readout, Save to write it into `assets/`, Run. The "drop the bundle in `assets/` first" step is gone. |
 
 ---
 
 ## 13. Implementation stages
 
-One approved spec, three stages, each green before the next starts.
+Stage 1 has shipped: `id`/`name`/`enabled` on `GeometryObject`, `formatVersion` 4
+with the legacy `gltf` → `mesh` mapping and id back-fill, the **Geometry** group,
+rows, selection, `GeometryPanel`, delete / duplicate / reorder / toggle, the stale
+rules, the lazy rebuild (§4.3), the empty-scene rule (§5.3), and a scale-capable
+`resolveMode`.
 
-1. **Model & hierarchy.** `id`/`name`/`enabled` on `GeometryObject`; `formatVersion` 4
-   with the legacy `gltf` → `mesh` mapping and id back-fill; the **Geometry** group,
-   rows, selection, `GeometryPanel` (transform + read-only params), delete / duplicate
-   / reorder / toggle; the stale rules; the lazy rebuild (§4.3); the empty-scene rule
-   (§5.3); scale-capable `resolveMode`. **Existing `gltf` assets only** — no new
-   formats, no dialog.
-2. **Adding assets.** The **Add Geometry** dialog with its recursive listing, the
-   `mesh` loader table (PLY, OBJ), the PLY header sniff, the zero-triangle refusal,
-   streaming load states and row badges, the parse cache, and the Run block on a
-   failed or loading object (§5.4).
-3. **Multi-file assets & polish.** Sibling resolution (§3.4), the dependency-closure
-   copy on Save As… (§8), the up-axis / unit presets and the size readout (§7), and
-   the triangle guardrail with its stats-panel readout (§4.4).
+**The adding half of what were stages 2 and 3 now belongs to
+[`asset_import.md`](./asset_import.md) §15**, which stages it as A (import,
+self-contained), B (materialise at save) and C (multi-file). The `mesh` loader
+table, the PLY header sniff, the zero-triangle refusal, the parse cache, the load
+states and row badges, sibling resolution (§3.4) and the dependency-closure copy
+(§8) are all carried there, because they are steps of one pipeline shared with
+splat captures rather than geometry's own.
+
+What remains here, independent of that pipeline and unblocked by it:
+
+**Stage D — the import's own panel.** The up-axis / unit presets and the world
+size readout (§7), and the triangle guardrail with its stats-panel readout (§4.4).
+These are what a freshly imported model needs *after* it lands, and nothing about
+bringing bytes in depends on them.
 
 ---
 
@@ -971,11 +922,12 @@ One approved spec, three stages, each green before the next starts.
   a primitive's intrinsic parameters (§7). A real feature, but a different one: it
   needs its own defaults, creation UX and panel controls, and nothing about importing
   assets depends on it.
-- **Writing into `assets/`** — importing a file from outside the scene folder,
-  copying, converting or transcoding (`spec.md` §14.9). The user drops the file in;
-  the app references it. Save As… remains the one operation that copies asset bytes.
-- **A file picker for arbitrary paths** — everything stays inside the scene folder, so
-  every scene file in it resolves assets identically.
+- **Transcoding or conversion** — `.obj` to `.glb`, texture recompression, Draco.
+  Writing into `assets/` is no longer out of scope (`asset_import.md` deletes that
+  rule, and §16 there carries what remains of it), but the app writes the bytes it
+  was given and does not rewrite them. **Deleting** an asset stays out of scope in
+  both documents: `assets/` is shared by every scene file in the folder, so
+  "unused" is a claim the app cannot make (`asset_import.md` §10).
 - **Parsing in a worker** (§4.2), and with it a progress bar for the parse itself
   rather than for the read.
 - **Mesh decimation or LOD** — no simplification is offered for a model too heavy to

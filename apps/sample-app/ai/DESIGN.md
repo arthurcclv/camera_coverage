@@ -25,8 +25,13 @@ result. It is a **readable reference for SDK consumers**, not a shipping product
   (`geometry_assets.md`). Unticking one takes it *out of the scene* rather than merely
   off screen, which is how "what does coverage look like without this rack?" is asked;
   deleting the last one leaves a legal scene that renders and saves but cannot be run.
-  Importing `.glb` / `.gltf` / `.ply` / `.obj` assets from the scene folder's `assets/`
-  follows in the next stage of that spec.
+- **Bring a real site model in from anywhere on disk** — **Import model…** opens the
+  OS file picker for a `.glb` / `.gltf` / `.ply` / `.obj`, and **Import 3DGS capture…**
+  does the same for a capture (`asset_import.md`). The row appears and draws
+  immediately, from memory; the bytes are written into the scene folder's `assets/` by
+  the next save. The app no longer asks the user to stage files for it: a model goes
+  from Downloads to measured coverage without leaving the window, and a file that is
+  already in `assets/` is recognised and referenced rather than copied.
 - **Move / rotate / re-aim each camera** and change its FOV and detection range
   (far), via in-viewport gizmos or panel sliders.
 - **Look through the selected camera** — the **Selected** view renders the viewport

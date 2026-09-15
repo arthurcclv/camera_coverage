@@ -235,6 +235,34 @@ test('serializeScene . parseSceneFile round-trips', () => {
   assert.deepEqual(reserialized, doc);
 });
 
+test('a pending import serializes exactly as a resolved one, at formatVersion 4 (asset_import.md §7.1)', () => {
+  // The regression guard on §7.1's central claim: the pending store lives
+  // *beside* the scene, keyed by the `src` the row already carries, so `Scene`
+  // gains no field and the format does not move. A pending mesh and a
+  // materialised one are the same JSON — which is also why the dirty check keeps
+  // working through the existing `serializeScene` baseline with no exclusion.
+  const doc = validDoc();
+  doc.geometry = [
+    {
+      // `name` and `enabled` are omitted for the same reason every other row
+      // omits them: serialization writes only what differs from the default.
+      kind: 'mesh',
+      id: 'geom-import',
+      src: 'assets/rack/rack.glb',
+      position: [0, 0, 0],
+      rotation: [0, 0, 0, 1],
+      scale: [1, 1, 1],
+    },
+  ];
+  const parsed = parseSceneFile(doc);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const written = serializeScene(parsed.scene);
+  assert.deepEqual(written, doc);
+  assert.equal(written.formatVersion, SCENE_FILE_FORMAT_VERSION);
+  assert.equal(written.formatVersion, 4);
+});
+
 test('array order is the hierarchy order and round-trips verbatim (spec §5.5.1, §14.3)', () => {
   const doc = validDoc();
   doc.cameras = [

@@ -19,7 +19,6 @@ import {
   FLIP_Z_ROTATION,
   identityRegistration,
   isFlippedZ,
-  isSplatFileName,
   needsSplatDepthPass,
   splatBadge,
   splatDecodeFailure,
@@ -63,24 +62,6 @@ test('a duplicated row is labelled identically, so it reads as a duplicate (§6.
   const a = defaultSplat('splat-1', 'assets/site.spz');
   const b = { ...a, id: 'splat-2' };
   assert.equal(splatLabel(a), splatLabel(b));
-});
-
-// --- accepted extensions (§3.1) --------------------------------------------
-
-test('only the single-file capture formats are accepted', () => {
-  for (const name of ['site.spz', 'site.sog', 'site.ply', 'site.splat', 'site.ksplat']) {
-    assert.equal(isSplatFileName(name), true, name);
-  }
-  for (const name of ['site.glb', 'scene.json', 'meta.json', 'site.webp', 'notes.txt', 'site']) {
-    assert.equal(isSplatFileName(name), false, name);
-  }
-});
-
-test('the extension match is case-insensitive but needs a stem', () => {
-  assert.equal(isSplatFileName('SITE.SPZ'), true);
-  assert.equal(isSplatFileName('Site.Ply'), true);
-  // A bare extension is not a file name.
-  assert.equal(isSplatFileName('.spz'), false);
 });
 
 // --- the row badge (§6.2) --------------------------------------------------

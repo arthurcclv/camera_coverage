@@ -56,9 +56,9 @@ message, belonging to no single layer.
   against the current one, shared graph because a gizmo drag emits per frame and
   rebuilding the nodes would dispose the one being dragged (`geometry_assets.md` §4.3).
 - **A dialog may own its own I/O; a commit may not.** The **file-referencing
-  dialogs** (`LoadSceneDialog`, `SaveSceneAsDialog`, `AddSplatDialog`) are the
+  dialogs** (`LoadSceneDialog`, `SaveSceneAsDialog`) are the
   exception to the presentational-components rule: each runs its own folder reads
-  (`listSceneFiles`, `fileNamesIn`, `findExistingAssets`, `listSplatAssets`) for
+  (`listSceneFiles`, `fileNamesIn`, `findExistingAssets`) for
   state that exists only while it is open, guarded by a `live` flag so a folder
   change mid-read is discarded. The exception is exactly this shape — *what is on
   disk right now, needed only while the dialog is up* — and does not extend to a
@@ -71,8 +71,17 @@ message, belonging to no single layer.
   both unit-tested without a handle in sight. A keyboard shortcut inside a dialog is
   still `(rows, selected) → selected`, and belongs in the pure module like any other —
   and where two dialogs walk a file list the same way they **share** that function
-  rather than each keeping its own copy: `AddSplatDialog` moves its selection with
-  `sceneFileList.moveListSelection`, the Load dialog's own.
+  rather than each keeping its own copy.
+- **A format sniff is a pure function over bytes already read.** `sceneIO` reads a
+  bounded head (4 KB for a `.ply`) and hands over text; `plyHeader.classifyPlyHeader`
+  decides what the file is. The read is I/O and stays thin; "what is this file" is a
+  judgement and gets a fixture suite (`asset_import.md` §4.2).
+- **A multi-step plan over the file system is computed before it is run.** The save's
+  materialise path — dedupe, collisions, which folders would be emptied, which `src`s
+  get rewritten — is a pure function of a listing plus the scene's own `src`s, asserted
+  whole, with the writes left thin (`asset_import.md` §8.7). That is what lets the
+  guardrails on the one irreversible operation in the app be tested rather than
+  reviewed.
 - **Pointer gestures** (the panel divider, hierarchy drag-reorder): the geometry goes
   in a pure module that takes plain numbers; the component keeps only the plumbing.
   Window `pointermove`/`pointerup` listeners are attached **imperatively inside
@@ -161,7 +170,9 @@ cannot be keyed on one.
   so it is reachable here), `navigation` (the Perspective view's navigation math,
   extracted for the same reason — `navigation.md` §6 makes headless testability the
   stated reason the design reads the ground plane rather than the depth buffer),
-  `splats`, `splatAssets`.
+  `splats`, `assetImport`, `plyHeader`, `pendingAssets`, `assetMaterialise` (the
+  save's whole plan over `assets/`, including every §8.6 guardrail on the one
+  irreversible operation this app has).
   A few drive real (renderer-free) Three.js gizmo objects and assert on their
   state — `cameraGizmos`, `samplingVolumeGizmos`, and `gizmoSet` (the shared spine,
   via a minimal subclass: reconcile/dispose/getAttachTarget/pickHit) — which is how
@@ -186,8 +197,9 @@ cannot be keyed on one.
   and wasm — so the splat feature draws the boundary where `sceneFileList.ts` vs
   `sceneIO.ts` already draws it. `scene/splats.ts` (label, accepted extensions,
   row badge, the `Flip 180° Z` preset, `clipBandToSdfBox`, `needsSplatDepthPass`) and
-  `scene/splatAssets.ts` (the Add-dialog list) hold **every judgement** and are
-  tested; `scene/splatLayer.ts` holds only canvas creation, the `SparkRenderer`,
+  `scene/assetImport.ts`, `scene/plyHeader.ts` and `scene/assetMaterialise.ts`
+  (what a picked file is, where it lands, and what the save may write or empty)
+  hold **every judgement** and are tested; `scene/splatLayer.ts` holds only canvas creation, the `SparkRenderer`,
   the stream load, `mesh.visible`, the depth-only redraw (`writeDepth`), the
   `SplatEdit` lifecycle and disposal, and is verified by running the app. When a
   decision looks like it belongs in the layer, that is the signal it belongs in one
@@ -210,6 +222,16 @@ cannot be keyed on one.
   component renders; the component itself never learns the value was ever
   anything but a plain string. Follow this same split for any new pure composer
   whose output reaches the UI.
+  **A *refusal* is user-facing text too** — the case that got through review:
+  `routePickedFile` and `planMaterialisation` (`asset_import.md` §4, §8.6) each
+  return a `{ key, params? }` reason, not the sentence the spec's tables quote,
+  and `sceneIO`'s pre-flight throws `PendingUnreadableError` carrying only the
+  path so the wording stays in the locale files. The exclusion in spec §18.1 is
+  for text a *browser* produced (`AssetCopyError`'s `copyFailureReason`); a
+  sentence this app wrote is never covered by it, however deep in a failure path
+  it lives. Where a refusal must nest inside another message (a plan reason
+  inside `describeSaveFailure`), `App.tsx` resolves the inner key first so the
+  sentence reaches the user whole.
 - **A few suites drive the real engine on the CPU backend** — `coverageRun`,
   `optimizeAcceptance`, `optimizeObjective`, `placementParity` — because some contracts
   are only meaningful against the engine's own answer. `placementParity` is the model:

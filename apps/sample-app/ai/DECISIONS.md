@@ -6,6 +6,78 @@ shaped the way it is. Newest at the top when you add to this file.
 
 ---
 
+## Asset import: one picker for both kinds, and the bytes land at the next save
+
+Behavior in [`../specs/asset_import.md`](../specs/asset_import.md); the consistency
+edits it required are listed in its §14.
+
+Getting a file into a scene used to mean leaving the app: put it in `assets/` with
+Finder, come back, and pick it from a list of what you just moved. Three documents
+stated that the app writes nothing into `assets/`, and the rule bought something real
+— a `read`-mode handle, no quota surface, no copy progress. What it cost was the first
+thirty seconds of every session, and for a `.gltf` it also required knowing that the
+`.bin` beside it was not optional.
+
+- **One picker replaces both listings.** The **Add Geometry** and **Add 3DGS** dialogs
+  asked the same question and answered it the same way, and the answer stopped
+  belonging to either kind, so the pipeline lives in its own document rather than
+  inside the geometry one. What is lost is the browse-what-this-site-already-has view;
+  what is gained is that `assets/` is now just another folder the picker can be pointed
+  at, and a file already there resolves to itself instead of being copied.
+- **Every import defers to the save — not only the folderless one.** The obvious design
+  was "copy now when there is a folder, hold it when there isn't", and it is worse: two
+  code paths, two collision-resolution moments, and a mesh that is sometimes on disk and
+  sometimes not. Deferring *everything* means writing stays confined to the save path,
+  which is what `spec.md` §14.5 already described, and the collision check happens once,
+  where a real folder exists to check against.
+- **`src` is assigned at import; the bytes go in a store keyed by it.** So `Scene` is
+  untouched — no nullable `src` to thread through the loader, the label, `planAssetCopy`
+  and validation; no non-serializable `File` inside the object that gets JSON-serialized
+  for the dirty check; no format change, `formatVersion` stays 4. The key is the one the
+  parse and decode caches already use, so two rows on one pending asset share one entry.
+- **One subfolder per import, self-contained files included.** `assets/shelf/shelf.glb`
+  is a segment longer than it needs to be. The alternative branches the rule on whether
+  a parse happened to find dependencies — something the user cannot predict before
+  picking — and it makes collisions structural rather than incidental.
+- **`isSameEntry` over name matching.** "Is this picked file already in `assets/`?" is
+  identity, not a string comparison: the picker exposes no path at all, and a
+  name-plus-size heuristic silently references the wrong `wall.png`. The walk costs N
+  cheap async comparisons and saves copying a 300 MB capture onto itself.
+- **Dependencies split Required/Optional by their effect on triangles.** A `.gltf`
+  buffer is required because without it the asset has no triangles and the
+  zero-triangle rule refuses it anyway; textures are skippable because the model still
+  occludes *exactly* as correctly without them. It would be absurd for a lost `.png` to
+  block a measurement it cannot influence.
+- **Replace means empty-then-write, and it is the app's only irreversible act.** Writing
+  the new files and leaving the rest makes "replace" a half-truth and leaves a folder
+  nothing can untangle. The guardrails are the design: a single direct child of
+  `assets/`, name-exact, never the folder itself, never multi-segment, and **refused
+  outright** if any surviving row in the scene resolves inside it — a confirmation
+  dialog should not be able to authorise corrupting the scene being saved. A pre-flight
+  probe of every held file runs before anything is emptied, because a stale handle is
+  the likeliest failure and the worst moment to discover it.
+- **Write permission is asked for first, before the pre-flight and the walk.** Every
+  other save in this app requests it as its first `await`, so the commit click is still
+  the transient user activation `requestPermission` needs. A save with pending imports
+  has real work to do before the first byte moves — probing every held `File`, walking
+  the target's whole `assets/` for `isSameEntry` matches — and doing that work first
+  spends the activation on it. Hence `asset_import.md` §8.7's ordering, with step 1
+  ahead of step 2: a denial then costs nothing, and keeps the scene, the target and the
+  pending store (§8.1).
+- **A refusal is user-facing text, so it is a message and not a sentence.** The reasons
+  quoted in `asset_import.md` §4.2 and §8.6 read like strings to return, and returning
+  them is how English reaches a zh-TW user through a pure module. `routePickedFile` and
+  `planMaterialisation` return `{ key, params? }`; the pre-flight throws an error
+  carrying only the path. The spec §18.1 exclusion covers text a *browser* wrote, which
+  is what `AssetCopyError` carries and nothing else here does.
+- **Nothing is ever deleted on a row delete.** `assets/` is shared by every scene file
+  in the folder and the app sees only the loaded scene, so "unused" is a claim it cannot
+  make. The no-file-management rule survives for deletion even as this feature breaks it
+  for writing, and the two halves are consistent: create what the scene needs, never
+  remove what you cannot prove is safe to remove.
+
+---
+
 ## Geometry is an editable entity: one array, a `mesh` kind, a lazy build, and a bumped format
 
 Behavior in [`../specs/geometry_assets.md`](../specs/geometry_assets.md); the
